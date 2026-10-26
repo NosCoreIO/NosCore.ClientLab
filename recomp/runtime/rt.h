@@ -1,7 +1,22 @@
 #pragma once
 #include <stdint.h>
 #include <math.h>
+#ifdef _MSC_VER
 #include <intrin.h>
+#else
+/* Portable builds (Emscripten): no Windows underneath, so the MSVC intrinsics the generated code uses map to
+   compiler builtins, and fs: goes to a per-thread virtual TEB owned by the host layer (CPU.fs_base). */
+static inline char _InterlockedCompareExchange8(volatile char* p, char x, char cmp) { __atomic_compare_exchange_n(p, &cmp, x, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return cmp; }
+static inline long _InterlockedCompareExchange(volatile long* p, long x, long cmp) { __atomic_compare_exchange_n(p, &cmp, x, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return cmp; }
+static inline long _InterlockedExchangeAdd(volatile long* p, long v) { return __atomic_fetch_add(p, v, __ATOMIC_SEQ_CST); }
+static inline long _InterlockedIncrement(volatile long* p) { return __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST); }
+static inline long _InterlockedDecrement(volatile long* p) { return __atomic_sub_fetch(p, 1, __ATOMIC_SEQ_CST); }
+static inline unsigned char _BitScanForward(unsigned long* i, unsigned long v) { if (!v) return 0; *i = (unsigned long)__builtin_ctz((unsigned)v); return 1; }
+static inline unsigned char _BitScanReverse(unsigned long* i, unsigned long v) { if (!v) return 0; *i = 31u - (unsigned long)__builtin_clz((unsigned)v); return 1; }
+#define _byteswap_ulong(v) __builtin_bswap32(v)
+#define __forceinline inline __attribute__((always_inline))
+#define RT_PORTABLE 1
+#endif
 
 typedef union {
     uint32_t d;
@@ -37,6 +52,7 @@ struct CPU {
     uint32_t tls_slots[4];
     uint32_t trace_pos;
     uint32_t trace[128];
+    uint32_t fs_base;
 };
 #define RT_TRACE(c, e, r) do { uint32_t _p = (c)->trace_pos++ & 63; (c)->trace[_p * 2] = (e); (c)->trace[_p * 2 + 1] = (r); } while (0)
 #define CPU_OFF_HOST_ESP 32
@@ -68,12 +84,21 @@ struct CPU {
 #define MF32(a) (*(float*)(uintptr_t)(uint32_t)(a))
 #define MF64(a) (*(double*)(uintptr_t)(uint32_t)(a))
 
+#ifdef RT_PORTABLE
+#define FS8(a) M8(c->fs_base + (a))
+#define FS16(a) M16(c->fs_base + (a))
+#define FS32(a) M32(c->fs_base + (a))
+#define FS32_W(a, v) (M32(c->fs_base + (a)) = (v))
+#define FS16_W(a, v) (M16(c->fs_base + (a)) = (v))
+#define FS8_W(a, v) (M8(c->fs_base + (a)) = (v))
+#else
 #define FS8(a) __readfsbyte(a)
 #define FS16(a) __readfsword(a)
 #define FS32(a) __readfsdword(a)
 #define FS32_W(a, v) __writefsdword((a), (v))
 #define FS16_W(a, v) __writefsword((a), (v))
 #define FS8_W(a, v) __writefsbyte((a), (v))
+#endif
 
 #define PUSH(v) do { uint32_t _v = (v); c->esp -= 4; M32(c->esp) = _v; } while (0)
 

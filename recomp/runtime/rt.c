@@ -94,8 +94,13 @@ void rt_divzero(CPU* c, uint32_t addr) {
 void rt_int3(CPU* c, uint32_t addr) { rt_fatal("int3 at %08x", addr); }
 
 void rt_cpuid(CPU* c) {
-    int r[4];
+    int r[4] = {0, 0, 0, 0};
+#ifdef RT_PORTABLE
+    if (c->eax == 0) { r[0] = 1; r[1] = 0x756e6547; r[3] = 0x49656e69; r[2] = 0x6c65746e; }
+    else if (c->eax == 1) { r[0] = 0x00000f29; r[3] = 0x0383fbff; }
+#else
     __cpuidex(r, (int)c->eax, (int)c->ecx);
+#endif
     c->eax = (uint32_t)r[0]; c->ebx = (uint32_t)r[1]; c->ecx = (uint32_t)r[2]; c->edx = (uint32_t)r[3];
 }
 
