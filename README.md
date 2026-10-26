@@ -2,6 +2,8 @@
 
 Decompiling the NosTale client so it can eventually run in a browser and drive automated NosCore tests.
 
+**Current state, what we learned, and how to continue are in [docs/STATUS.md](docs/STATUS.md).**
+
 **No client content lives here.** Bring your own client. Everything it produces (patched exe, IDR/Ghidra databases, decompiled C) stays in a local work folder outside git.
 
 ## Decompile your client
