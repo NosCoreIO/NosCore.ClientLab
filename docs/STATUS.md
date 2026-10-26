@@ -11,7 +11,9 @@ The client (`NosCore.exe`, Delphi 7, md5 `51bbff3ec09d67c8425f88d74c6d5df5`) is 
 
 - 17,008 functions are lifted, covering 87% of the code section's bytes. The remainder is mostly Delphi data embedded in the code section (VMTs, RTTI, string literals, jump tables).
 - The client boots through Delphi RTL and VCL initialisation, its own startup checks, and Chromium Embedded (CEF) setup. CEF's `--type=gpu-process` helper also runs as a recompiled process.
-- It stays up for more than 45 s (about 120 MB) but does not show a game window yet. Each run still stops now and then on a function nobody discovered. `recomp/iterate.ps1` seeds these automatically (25 so far, in `symbols/<md5>/recomp_seeds.txt`).
+- **It opens the NosTale window and renders the loading/title artwork through Direct3D 9** (2026-10-26). Startup takes about 45 s at `/Od` and stays responsive at about 250 MB. Not yet tested: getting past loading to login (needs `_NC_AUTH_CODE` from the launcher), input, networking.
+- Run it with `NOSRECOMP_NO_CEF=1`. The recompiled client's Chromium Embedded integration hits a CEF `CHECK` (int3 in `libcef.dll`) in every helper process right after it calls back into the client's Delphi CEF classes; the main process then dies with `0x80000003`. With `libcef.dll` hidden, CEF4Delphi shows "Error loading libcef.dll" (press OK) and the game continues without its embedded browser (NosMall). Root cause not found yet. The browser build stubs CEF anyway.
+- Each run still stops now and then on a function nobody discovered. `recomp/iterate.ps1` seeds these automatically (28 so far, in `symbols/<md5>/recomp_seeds.txt`).
 - The differential tester passes 398 of 409 instruction shapes against Unicorn. The 11 remaining are junk decodes that never execute (`in`, `sldt`, `das`) and Unicorn's own x87 transcendental imprecision.
 
 ## Pipeline
@@ -31,7 +33,7 @@ The client (`NosCore.exe`, Delphi 7, md5 `51bbff3ec09d67c8425f88d74c6d5df5`) is 
 - **Callbacks.** When Windows calls guest code (WndProc, threads, SEH handlers), it lands in guest code pages that are mapped non-executable. The vectored exception handler catches the DEP fault and redirects to `rt_bridge_stub`.
 - **Non-local jumps.** Delphi's `except` blocks jump across frames. They become a pending jump, which `rt_bridge_run` resolves by longjmp to the right activation record.
 - **Hardware faults** inside recompiled code are re-raised as guest exceptions (`rt_raise_guest_fault`).
-- **Debug switches.** `NOSRECOMP_TRACE_API=1` logs every Windows call, with string arguments and the return value. Fault reports map the host instruction pointer to its generated C line, which shows the original x86 instruction.
+- **Debug switches.** `NOSRECOMP_TRACE_API=1` logs every Windows call, with string arguments and the return value (about 1M lines per minute, and it slows the client a lot). `NOSRECOMP_NO_CEF=1` hides `libcef.dll`. Unexpected exceptions (breakpoint, stack overflow, `/GS`, access violation) are logged with the faulting module and the trace ring before Windows handles them. Fault reports map the host instruction pointer to its generated C line, which shows the original x86 instruction.
 
 ## What we learned (non-obvious; read before changing things)
 
@@ -68,7 +70,7 @@ The client (`NosCore.exe`, Delphi 7, md5 `51bbff3ec09d67c8425f88d74c6d5df5`) is 
 
 The native build is the correctness oracle. The browser build uses the same generated C, compiled with Emscripten to wasm32. Pointers stay 32-bit, guest addresses are linear-memory offsets, and the image goes at `0x400000`. It links against a host layer that *implements* Windows instead of calling it:
 
-1. **Finish native boot to the login screen.** Keep running `iterate.ps1`, and add a function-coverage counter.
+1. **Finish native boot to the login screen.** Keep running `iterate.ps1`, launch with the launcher's `_NC_AUTH_CODE`, and add a function-coverage counter. Also: the WebAssembly build of the generated code already compiles (`recomp/wasm/compile_all.py`, Emscripten in `C:\tools\emsdk`). The kit route is blocked on installing Ghidra 12.1.3 and the kit's Python venv (see `kit-game/game.toml`).
 2. **Use the existing kits as the Win32 layer.** The user is fine reusing them without a license.
    - Coverage of our 501 imports: `recomp-kit` covers 380, `x86recomp` covers 232, and together they cover 403.
    - `recomp-kit` has Direct3D 9 → WebGPU (its shader generator), a browser worker host and OPFS file storage. That's what NFS Most Wanted runs on in Chrome.

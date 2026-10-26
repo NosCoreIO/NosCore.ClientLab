@@ -335,6 +335,15 @@ static LONG CALLBACK veh(PEXCEPTION_POINTERS ep) {
         ctx->Eip = (DWORD)(uintptr_t)rt_fault_stub;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
+    if (code == EXCEPTION_BREAKPOINT || code == STATUS_STACK_OVERFLOW || code == 0xC0000409 || code == EXCEPTION_ACCESS_VIOLATION) {
+        HMODULE mod = 0;
+        char name[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)(uintptr_t)ctx->Eip, &mod))
+            GetModuleFileNameA(mod, name, sizeof name);
+        rt_log("exception %08lx at %08lx in %s (thread %lu, esp %08lx)", code, ctx->Eip, name, GetCurrentThreadId(), ctx->Esp);
+        if (ctx->Eip >= host_image_lo && ctx->Eip < host_image_hi) log_host_location(ctx->Eip);
+        if (host_tls.cpu) dump_state(host_tls.cpu);
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -364,12 +373,43 @@ static VOID WINAPI ov_ExitProcess(UINT code) {
     ExitProcess(code);
 }
 
+/* NOSRECOMP_NO_CEF=1 hides libcef.dll so the client runs without its embedded browser. */
+static int no_cef;
+
+static int is_cef(const char* name) {
+    const char* base = strrchr(name, '\\');
+    return no_cef && !_stricmp(base ? base + 1 : name, "libcef.dll");
+}
+
+static int is_cef_w(const wchar_t* name) {
+    const wchar_t* base = wcsrchr(name, L'\\');
+    return no_cef && !_wcsicmp(base ? base + 1 : name, L"libcef.dll");
+}
+
+static HMODULE WINAPI ov_LoadLibraryA(LPCSTR name) {
+    if (name && is_cef(name)) { rt_log("hiding %s", name); SetLastError(ERROR_MOD_NOT_FOUND); return 0; }
+    return LoadLibraryA(name);
+}
+
+static HMODULE WINAPI ov_LoadLibraryExA(LPCSTR name, HANDLE file, DWORD flags) {
+    if (name && is_cef(name)) { rt_log("hiding %s", name); SetLastError(ERROR_MOD_NOT_FOUND); return 0; }
+    return LoadLibraryExA(name, file, flags);
+}
+
+static HMODULE WINAPI ov_LoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) {
+    if (name && is_cef_w(name)) { rt_log("hiding libcef.dll (W)"); SetLastError(ERROR_MOD_NOT_FOUND); return 0; }
+    return LoadLibraryExW(name, file, flags);
+}
+
 typedef struct { const char* dll; const char* name; void* fn; } Override;
 static const Override overrides[] = {
     {"kernel32.dll", "GetModuleHandleA", (void*)ov_GetModuleHandleA},
     {"kernel32.dll", "GetModuleFileNameA", (void*)ov_GetModuleFileNameA},
     {"kernel32.dll", "GetCommandLineA", (void*)ov_GetCommandLineA},
     {"kernel32.dll", "ExitProcess", (void*)ov_ExitProcess},
+    {"kernel32.dll", "LoadLibraryA", (void*)ov_LoadLibraryA},
+    {"kernel32.dll", "LoadLibraryExA", (void*)ov_LoadLibraryExA},
+    {"kernel32.dll", "LoadLibraryExW", (void*)ov_LoadLibraryExW},
 };
 
 static void* find_override(const char* dll, const char* name) {
@@ -584,6 +624,7 @@ int main(int argc, char** argv) {
     SetDllDirectoryA(dir);
     rt_log("guest: %s  args: %s", guest_path, rest);
     rt_api_trace = GetEnvironmentVariableA("NOSRECOMP_TRACE_API", logp_unused, sizeof logp_unused) > 0;
+    no_cef = GetEnvironmentVariableA("NOSRECOMP_NO_CEF", logp_unused, sizeof logp_unused) > 0;
     sprintf_s(guest_cmdline, sizeof guest_cmdline, "\"%s\" %s", guest_path, rest);
     (void)k;
 
