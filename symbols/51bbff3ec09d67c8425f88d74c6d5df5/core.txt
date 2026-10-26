@@ -1,0 +1,72 @@
+# NosCore.exe (patched client), md5 51bbff3ec09d67c8425f88d74c6d5df5
+# address  name  [plate comment]
+
+# --- TClientCore: raw TCP socket, select()-polled, 8 KiB recv/send buffers ---
+# fields: +0x0C wsaReady, +0x10 broken, +0x14 socket, +0x18 fd_set, +0x11C recvBuf, +0x211C sendBuf,
+#         +0x411C urgentBuf, +0x4320 recvLen, +0x4324 sendLen, +0x4328 urgentLen, +0x432C bytesIn,
+#         +0x4330 bytesOut, +0x4334 connected, +0x4338 OnDisconnect, +0x4340 OnDataAvailable
+004da928 FdClr
+004da950 FdIsSet
+004da968 FdSet
+004da978 FdZero
+004daa78 TClientCore.Init
+004dab6c TClientCore.ResetCounters
+004dab80 TClientCore.ConnectHost  Resolves host with inet_addr, then ConnectAddr.
+004daba8 TClientCore.ConnectAddr  socket/connect then switches the socket to non-blocking.
+004daca4 TClientCore.Disconnect
+004dacd0 TClientCore.RecvIntoBuffer
+004dad18 TClientCore.FlushSend
+004dadc0 TClientCore.QueueSend
+004dae08 TClientCore.ReadReceived
+004dae64 TClientCore.Poll  select() with 1 ms timeout; fires OnDataAvailable / OnDisconnect.
+004daf98 TClientCore.DiscardReceived
+
+# --- Packet command lists ---
+004db314 TNosRevCmdList.Register  Header -> handler (method pointer); list kept sorted for binary search.
+004db354 SplitFirstToken
+004db458 SplitFirstTokenTrimmed
+004db5c0 TNosRevCmdList.Dispatch  Splits on spaces, finds header, fills arg TStringList, calls handler. "xign" keeps args unsplit.
+004db710 TNosRevCmdList.Sort
+004db720 TNosRevCmdList.IndexOf
+004db774 TNosRevCmd.Invoke
+004db83c TNosSndCmdList.SendThrottled  Per-key throttle: sends now if key is new or interval elapsed, else drops or keeps the latest copy as pending.
+004db924 TNosSndCmdList.FlushDue
+004dba24 TNosDelayRunCmdList.Add
+004dbb48 TNosDelayRunCmdList.Tick
+
+# --- TNTClient: login/world connection, crypto, dispatch ---
+# fields: +0x04 core, +0x08 OnConnect, +0x10 OnDisconnect, +0x18 OnPacket, +0x20 OnSent, +0x28 OnError,
+#         +0x30 worldPending, +0x31 isWorld, +0x34 revCmds, +0x38 sndCmds, +0x3C delayRunCmds, +0x40 serverList,
+#         +0x44 sessionCryptoMode, +0x48 sessionKey, +0x70 packetId, +0x74 lastSendTick, +0x78 recvCarry
+004eaca8 TNTClient.Connect
+004ead7c TNTClient.ConnectSelectedServer
+004eada8 TNTClient.Disconnect
+004eadfc TNTClient.EncryptAndQueue  World: "<id> <packet>", pack, then session-key transform (mode 0-3). Login: (b ^ 0xC3) + 0x0F.
+004eb000 TNTClient.DispatchLocal
+004eb00c TNTClient.SendPacket
+004eb058 TNTClient.SendThrottledKeepLatest
+004eb084 TNTClient.SendThrottledDropExtra
+004eb0b0 TNTClient.SetWorldMode
+004eb0e4 TNTClient.AddDelayRunCmd
+004eb110 TNTClient.DecryptWorldPacket  0xFF ends a packet; high bit = packed nibbles via table at 0x00788CC8, else byte ^ 0xFF.
+004eb2c8 TNTClient.DecryptLoginPacket  b - 0x0F until '\n'.
+004eb398 TNTClient.OnWorldData
+004eb540 TNTClient.OnLoginData
+004eb8e0 TNTClient.OnCoreDisconnected
+004eb924 TNTClient.SendLogin  Builds NoS0575 with MD5 of NostaleClientX.exe/NostaleClient.exe and the GF InstallationId.
+004ec268 TNTClient.Tick  Poll socket, run delayed sends/commands, 10 s keepalive in world mode.
+004aef50 WorldPacketPack
+004dfe18 Md5String
+004dfe8c Md5File
+0046277c GetTickCountMs
+
+# --- Main loop and rendering ---
+0077c05c TNosTaleMainF.AppIdle  Application.OnIdle: one game tick then frame-limiter sleep.
+0055a2e4 TNosTaleGame.Tick  pulse every 60 s, network tick, then one rendered frame.
+0055a628 TNosTaleGame.RegisterPacketHandlers
+004779a8 Render.BeginFrame
+004779bc Render.EndFrame
+0047782c TD3DDevice.BeginScene  Clear (vtbl+0xAC) then BeginScene (vtbl+0xA4).
+00477874 TD3DDevice.EndSceneAndPresent  EndScene (vtbl+0xA8) then Present (vtbl+0x44).
+00477790 TD3DDevice.CheckLost  TestCooperativeLevel (vtbl+0x0C), resets on D3DERR_DEVICENOTRESET.
+004777e4 TD3DDevice.Reset
