@@ -33,7 +33,10 @@ struct CPU {
     uint32_t lj_target;
     RtAct* acts;
     uint32_t tls_slots[4];
+    uint32_t trace_pos;
+    uint32_t trace[128];
 };
+#define RT_TRACE(c, e, r) do { uint32_t _p = (c)->trace_pos++ & 63; (c)->trace[_p * 2] = (e); (c)->trace[_p * 2 + 1] = (r); } while (0)
 #define CPU_OFF_HOST_ESP 32
 
 #define eax r[0].d

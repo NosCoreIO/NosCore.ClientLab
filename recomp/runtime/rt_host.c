@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include <psapi.h>
+#include <share.h>
 
 #define HOST_STACK_SIZE (64u << 20)
 #define GUEST_BASE 0x00400000u
@@ -55,6 +56,11 @@ void rt_fatal(const char* fmt, ...) {
         rt_log("  eax=%08x ecx=%08x edx=%08x ebx=%08x esp=%08x ebp=%08x esi=%08x edi=%08x",
                c->r[0].d, c->r[1].d, c->r[2].d, c->r[3].d, c->r[4].d, c->r[5].d, c->r[6].d, c->r[7].d);
         for (int k = 0; k < 16; k++) rt_log("  [esp+%02x] %08x", k * 4, ((uint32_t*)(uintptr_t)c->r[4].d)[k]);
+        rt_log("  pend=%u pend_target=%08x acts=%p", c->pend, c->pend_target, (void*)c->acts);
+        for (int k = 64; k > 0; k--) {
+            uint32_t p = (c->trace_pos - k) & 63;
+            if (c->trace[p * 2]) rt_log("  trace -%02d: %08x (ret %08x)", k, c->trace[p * 2], c->trace[p * 2 + 1]);
+        }
     }
     MessageBoxA(0, buf, "NosCore.ClientLab recomp", MB_ICONERROR);
     ExitProcess(3);
@@ -421,7 +427,7 @@ int main(int argc, char** argv) {
         GetModuleFileNameA(0, logp, sizeof logp);
         s = strrchr(logp, '\\');
         strcpy_s(s ? s + 1 : logp, sizeof logp - (s ? (size_t)(s + 1 - logp) : 0), "recomp.log");
-        fopen_s(&log_file, logp, "w");
+        log_file = _fsopen(logp, "w", _SH_DENYNO);
     }
     SetCurrentDirectoryA(dir);
     SetDllDirectoryA(dir);

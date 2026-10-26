@@ -78,6 +78,7 @@ class Lifter:
         self.md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
         self.md.detail = True
         self.reloc_targets = self._reloc_code_targets()
+        self.reloc_slots = self._reloc_slots()
 
     def _reloc_code_targets(self):
         out = set()
@@ -89,6 +90,30 @@ class Lifter:
                 val = struct.unpack("<I", self.pe.get_data(e.rva, 4))[0]
                 if self.code_lo <= val < self.code_hi:
                     out.add(val)
+        return out
+
+    def _reloc_slots(self):
+        out = {}
+        for blk in self.pe.DIRECTORY_ENTRY_BASERELOC:
+            for e in blk.entries:
+                if e.type == 3:
+                    out[e.rva + self.base] = struct.unpack("<I", self.pe.get_data(e.rva, 4))[0]
+        return out
+
+    def jump_table(self, ins):
+        """Targets of 'jmp dword ptr [reg*4 + table]', read through relocated table slots."""
+        if ins.mnemonic != "jmp" or not ins.operands or ins.operands[0].type != X.X86_OP_MEM:
+            return []
+        m = ins.operands[0].mem
+        if m.base or not m.index or m.scale != 4:
+            return []
+        out, slot = [], m.disp & 0xFFFFFFFF
+        while slot in self.reloc_slots and len(out) < 1024:
+            v = self.reloc_slots[slot]
+            if not (self.code_lo <= v < self.code_hi):
+                break
+            out.append(v)
+            slot += 4
         return out
 
     def disasm_range(self, lo, hi):
@@ -118,10 +143,67 @@ class FnGen:
         self.ins = []
         for lo, hi in ranges:
             self.ins.extend(lifter.disasm_range(lo, hi))
-        self.ins.sort(key=lambda i: i.address)
         self.addrs = {i.address for i in self.ins}
+        if label_index is not None:
+            self._absorb_orphans(label_index)
+        self.ins.sort(key=lambda i: i.address)
         self.out = []
         self.uses_seh = any(self._writes_fs_esp(i) for i in self.ins)
+
+    def _absorb_orphans(self, covered):
+        """Pull in code this function reaches (pushed return labels, jump targets) that no function owns,
+        e.g. Delphi try/finally epilogues that Ghidra cut off after the 'push label; ...; ret'."""
+        L = self.L
+        changed = True
+        while changed:
+            changed = False
+            roots = []
+            self.ins.sort(key=lambda i: i.address)
+            for k, i in enumerate(self.ins):
+                m = i.mnemonic
+                for t in L.jump_table(i):
+                    if t not in self.addrs and not covered(t):
+                        roots.append(t)
+                if not i.operands or i.operands[0].type != X.X86_OP_IMM:
+                    continue
+                if m == "push" and not self._is_code_push(k):
+                    continue
+                if m == "push" or m.startswith("j") or m.startswith("loop"):
+                    t = i.operands[0].imm & 0xFFFFFFFF
+                    if L.code_lo <= t < L.code_hi and t not in self.addrs and not covered(t):
+                        roots.append(t)
+            for pos in roots:
+                work = [pos]
+                while work:
+                    p = work.pop()
+                    while L.code_lo <= p < L.code_hi and p not in self.addrs and not covered(p):
+                        dec = L.disasm_range(p, p + 1)
+                        if not dec:
+                            break
+                        i = dec[0]
+                        self.ins.append(i)
+                        self.addrs.add(p)
+                        changed = True
+                        m = i.mnemonic
+                        if (m.startswith("j") or m.startswith("loop")) and i.operands and i.operands[0].type == X.X86_OP_IMM:
+                            work.append(i.operands[0].imm & 0xFFFFFFFF)
+                        work.extend(L.jump_table(i))
+                        if m in ("jmp", "ret", "int3"):
+                            break
+                        p = i.address + i.size
+
+    def _is_code_push(self, k):
+        """Delphi pushes code addresses in two shapes: the finally return label right after the
+        'mov fs:[reg], reg' that ends a try, and the SEH handler right before 'push fs:[..]'."""
+        prev = self.ins[k - 1] if k > 0 else None
+        nxt = self.ins[k + 1] if k + 1 < len(self.ins) else None
+        if prev is not None and prev.mnemonic == "mov" and prev.operands and prev.operands[0].type == X.X86_OP_MEM \
+                and prev.operands[0].mem.segment == X.X86_REG_FS:
+            return True
+        if nxt is not None and nxt.mnemonic == "push" and nxt.operands and nxt.operands[0].type == X.X86_OP_MEM \
+                and nxt.operands[0].mem.segment == X.X86_REG_FS:
+            return True
+        return False
 
     @staticmethod
     def _writes_fs_esp(ins):
@@ -135,6 +217,7 @@ class FnGen:
 
     def labels(self):
         labs = {self.entry} if self.entry in self.addrs else set()
+        labs |= {x for x in getattr(self, "extra_labels", ()) if x in self.addrs}
         for idx, i in enumerate(self.ins):
             m = i.mnemonic
             if (m.startswith("j") or m == "loop" or m == "call") and i.operands and i.operands[0].type == X.X86_OP_IMM:
@@ -316,6 +399,7 @@ class FnGen:
         o.append(f"/* {self.name} */")
         o.append(f"void {fn}(CPU* c, uint32_t entry, uint32_t ret) {{")
         o.append("  uint32_t tgt = entry, t, a, b, r; uint64_t q; int ind = 0; (void)t; (void)a; (void)b; (void)r; (void)q;")
+        o.append("  RT_TRACE(c, entry, ret);")
         if self.uses_seh:
             o.append("  RtAct act; act.fn = " + fn + "; act.guest_esp = c->esp; act.host_esp = c->host_esp;")
             o.append("  if (rt_setjmp(act.jb)) { tgt = c->lj_target; ind = 0; rt_act_push(c, &act); goto dispatch; }")
@@ -750,6 +834,121 @@ class FnGen:
         raise NotImplementedError(m)
 
 
+SANE = {"mov", "push", "pop", "add", "sub", "and", "or", "xor", "cmp", "test", "lea", "call", "jmp", "ret", "inc", "dec",
+        "movzx", "movsx", "shl", "shr", "sar", "imul", "neg", "not", "xchg", "cdq", "nop", "leave", "fld", "fstp", "fild",
+        "fwait", "wait", "sete", "setne"} | set(JCC)
+
+
+def reloc_code_seeds(L, fns):
+    """Relocated pointers into the code section that no function covers and that decode as plausible code
+    (interface thunks, method pointers only referenced from data)."""
+    spans = sorted((lo, hi) for _, _, rs in fns for lo, hi in rs)
+    los = [lo for lo, _ in spans]
+
+    def covered(x):
+        k = bisect.bisect_right(los, x) - 1
+        return k >= 0 and spans[k][0] <= x < spans[k][1]
+
+    def entry_shape(t):
+        dec = L.disasm_range(t, t + 8)
+        if len(dec) < 2:
+            return False
+        a, b = dec[0], dec[1]
+        if a.mnemonic == "add" and b.mnemonic == "jmp" and a.op_str.split(",")[0] in ("eax", "dword ptr [esp + 4]"):
+            return True
+        if a.mnemonic == "push" and a.op_str == "ebp" and b.mnemonic == "mov" and b.op_str == "ebp, esp":
+            return True
+        if a.mnemonic == "push" and a.op_str in ("ebx", "esi", "edi") and b.mnemonic in ("push", "mov", "add", "sub", "xor"):
+            return True
+        return False
+
+    out = []
+    for t in sorted(L.reloc_targets):
+        if covered(t) or not entry_shape(t):
+            continue
+        pos, ok = t, False
+        for _ in range(24):
+            dec = L.disasm_range(pos, pos + 1)
+            if not dec or dec[0].mnemonic not in SANE:
+                break
+            if dec[0].mnemonic in ("jmp", "ret"):
+                ok = True
+                break
+            pos += dec[0].size
+        if ok:
+            out.append(t)
+    print(f"{len(out)} relocation targets look like uncovered code")
+    return out
+
+
+def call_targets(L, fns):
+    """Direct call targets that land mid-function become extra entry labels of the owning function;
+    targets no function covers become new functions."""
+    md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+    owner_spans = sorted((lo, hi, e) for e, _, rs in fns for lo, hi in rs)
+    los = [s[0] for s in owner_spans]
+    entries = {e for e, _, _ in fns}
+    extra, seeds = defaultdict(set), set()
+    for e, _, rs in fns:
+        for lo, hi in rs:
+            for i in md.disasm(L.code[lo - L.code_lo: hi - L.code_lo], lo):
+                if i.mnemonic != "call" or not i.op_str.startswith("0x"):
+                    continue
+                t = int(i.op_str, 16)
+                if t in entries or not (L.code_lo <= t < L.code_hi):
+                    continue
+                k = bisect.bisect_right(los, t) - 1
+                if k >= 0 and owner_spans[k][0] <= t < owner_spans[k][1]:
+                    extra[owner_spans[k][2]].add(t)
+                else:
+                    seeds.add(t)
+    print(f"{sum(len(v) for v in extra.values())} mid-function call targets, {len(seeds)} uncovered call targets")
+    return extra, sorted(seeds)
+
+
+def discover(L, fns, seeds):
+    """Recursive-descent disassembly from seed addresses not already covered by a function."""
+    covered = sorted((lo, hi) for _, _, rs in fns for lo, hi in rs)
+    los = [lo for lo, _ in covered]
+    entries = {e for e, _, _ in fns}
+
+    def inside(x):
+        k = bisect.bisect_right(los, x) - 1
+        return k >= 0 and covered[k][0] <= x < covered[k][1]
+
+    out = []
+    for s in seeds:
+        if s in entries or not (L.code_lo <= s < L.code_hi):
+            continue
+        seen, work = {}, [s]
+        while work:
+            pos = work.pop()
+            while pos not in seen and L.code_lo <= pos < L.code_hi and (pos == s or not inside(pos)):
+                ins = L.disasm_range(pos, pos + 1)
+                if not ins:
+                    break
+                i = ins[0]
+                seen[pos] = i.address + i.size
+                m = i.mnemonic
+                if (m.startswith("j") or m.startswith("loop")) and i.operands and i.operands[0].type == X.X86_OP_IMM:
+                    work.append(i.operands[0].imm & 0xFFFFFFFF)
+                if m == "jmp" or m == "ret" or m == "int3":
+                    break
+                pos = i.address + i.size
+        ranges = []
+        for lo in sorted(seen):
+            hi = seen[lo]
+            if ranges and ranges[-1][1] == lo:
+                ranges[-1] = (ranges[-1][0], hi)
+            else:
+                ranges.append((lo, hi))
+        if ranges:
+            out.append((s, f"seed_{s:08x}", ranges))
+            entries.add(s)
+    print(f"{len(out)} functions discovered from seeds")
+    return out
+
+
 def write_if_changed(path, text):
     if os.path.exists(path):
         with open(path) as f:
@@ -764,7 +963,7 @@ def main():
     ap.add_argument("exe")
     ap.add_argument("functions")
     ap.add_argument("outdir")
-    ap.add_argument("--per-file", type=int, default=60)
+    ap.add_argument("--seeds", help="extra function entry points (hex, one per line) found missing at runtime")
     a = ap.parse_args()
 
     L = Lifter(a.exe)
@@ -780,14 +979,58 @@ def main():
         e = int(entry, 16)
         if rs and L.code_lo <= e < L.code_hi:
             fns.append((e, name, rs))
-    fns.sort()
+    fns.extend(discover(L, fns, reloc_code_seeds(L, fns)))
+    if a.seeds and os.path.exists(a.seeds):
+        fns.extend(discover(L, fns, [int(x.split()[0], 16) for x in open(a.seeds) if x.strip() and not x.startswith("#")]))
     os.makedirs(a.outdir, exist_ok=True)
+
+    def make_covered(fns):
+        spans = sorted((lo, hi) for _, _, rs in fns for lo, hi in rs)
+        span_los = [lo for lo, _ in spans]
+
+        def covered(x):
+            k = bisect.bisect_right(span_los, x) - 1
+            return k >= 0 and spans[k][0] <= x < spans[k][1]
+        return covered
+
+    extra_labels = defaultdict(set)
+    for _ in range(3):
+        fns.sort()
+        covered = make_covered(fns)
+        owner, calls = {}, set()
+        for e, name, rs in fns:
+            g = FnGen(L, e, name, rs, covered)
+            for i in g.ins:
+                owner.setdefault(i.address, e)
+                m = i.mnemonic
+                if (m == "call" or m.startswith("j") or m.startswith("loop")) and i.operands and i.operands[0].type == X.X86_OP_IMM:
+                    t = i.operands[0].imm & 0xFFFFFFFF
+                    if m == "call" or t not in g.addrs:
+                        calls.add(t)
+        entries = {e for e, _, _ in fns}
+        seeds = []
+        for t in calls:
+            if t in entries or not (L.code_lo <= t < L.code_hi):
+                continue
+            if t in owner:
+                extra_labels[owner[t]].add(t)
+            else:
+                seeds.append(t)
+        print(f"{sum(len(v) for v in extra_labels.values())} mid-function call targets, {len(seeds)} uncovered call targets")
+        if not seeds:
+            break
+        fns.extend(discover(L, fns, sorted(seeds)))
+    fns.sort()
+    covered = make_covered(fns)
 
     table = []
     chunks, unimpl = defaultdict(list), defaultdict(int)
 
+    absorbed = 0
     for e, name, rs in fns:
-        g = FnGen(L, e, name, rs, None)
+        g = FnGen(L, e, name, rs, covered)
+        g.extra_labels = extra_labels.get(e, set())
+        absorbed += sum(1 for i in g.ins if not covered(i.address))
         src = g.gen()
         for line in g.out:
             if "rt_unimpl" in line:
