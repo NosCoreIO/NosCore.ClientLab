@@ -22,7 +22,8 @@ if (-not (Test-Path (Join-Path $idrDir 'kb7.bin'))) {
 }
 if (-not (Test-Path (Join-Path $dhrakeDir 'DhrakeInit.java'))) {
     foreach ($f in 'DhrakeInit.java', 'DhrakeParseClass.java') {
-        gh api "repos/huettenhain/dhrake/contents/$f" -H 'Accept: application/vnd.github.raw' | Out-File -Encoding utf8 (Join-Path $dhrakeDir $f)
+        $source = (gh api "repos/huettenhain/dhrake/contents/$f" -H 'Accept: application/vnd.github.raw') -join "`n"
+        [IO.File]::WriteAllText((Join-Path $dhrakeDir $f), $source, (New-Object Text.UTF8Encoding $false))
     }
 }
 Copy-Item (Join-Path $PSScriptRoot 'ghidra\ExportDecompiled.java') $dhrakeDir -Force
