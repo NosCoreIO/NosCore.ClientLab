@@ -401,12 +401,98 @@ static HMODULE WINAPI ov_LoadLibraryExW(LPCWSTR name, HANDLE file, DWORD flags) 
     return LoadLibraryExW(name, file, flags);
 }
 
+static int WINAPI ov_MessageBoxA(HWND hwnd, LPCSTR text, LPCSTR caption, UINT type) {
+    rt_log("MessageBoxA \"%s\": %s", caption ? caption : "", text ? text : "");
+    if (no_cef && text && strstr(text, "libcef")) return IDOK;
+    return MessageBoxA(hwnd, text, caption, type);
+}
+
+/* ---- frame capture: hook IDirect3DDevice9::Present; touch out\shot.req to get out\shot.bmp ---- */
+
+typedef HRESULT(WINAPI* PresentFn)(void* dev, const RECT*, const RECT*, HWND, const void*);
+typedef HRESULT(WINAPI* CreateDeviceFn)(void* d3d, UINT, DWORD, HWND, DWORD, void* params, void** out);
+static PresentFn real_present;
+static CreateDeviceFn real_create_device;
+static char shot_req[MAX_PATH], shot_out[MAX_PATH];
+
+#define VT(obj) (*(void***)(obj))
+#define VCALL(obj, slot, type) ((type)VT(obj)[slot])
+
+static void patch_slot(void* obj, int slot, void* fn, void** old) {
+    DWORD prot;
+    void** vt = VT(obj);
+    if (vt[slot] == fn) return;
+    VirtualProtect(&vt[slot], sizeof(void*), PAGE_EXECUTE_READWRITE, &prot);
+    *old = vt[slot];
+    vt[slot] = fn;
+    VirtualProtect(&vt[slot], sizeof(void*), prot, &prot);
+}
+
+static void save_backbuffer(void* dev) {
+    typedef HRESULT(WINAPI* GetBackBufferFn)(void*, UINT, UINT, int, void**);
+    typedef HRESULT(WINAPI* GetDescFn)(void*, void*);
+    typedef HRESULT(WINAPI* CreateOffscreenFn)(void*, UINT, UINT, int, int, void**, HANDLE*);
+    typedef HRESULT(WINAPI* GetRtDataFn)(void*, void*, void*);
+    typedef HRESULT(WINAPI* LockFn)(void*, void*, const RECT*, DWORD);
+    typedef HRESULT(WINAPI* UnlockFn)(void*);
+    typedef ULONG(WINAPI* ReleaseFn)(void*);
+    struct { int Format, Type; DWORD Usage; int Pool; int Multi; DWORD Quality; UINT Width, Height; } desc;
+    struct { INT Pitch; void* pBits; } lr;
+    void *bb = 0, *sys = 0;
+    FILE* f;
+    if (FAILED(VCALL(dev, 18, GetBackBufferFn)(dev, 0, 0, 0, &bb))) return;
+    VCALL(bb, 12, GetDescFn)(bb, &desc);
+    if (SUCCEEDED(VCALL(dev, 36, CreateOffscreenFn)(dev, desc.Width, desc.Height, desc.Format, 2, &sys, 0)) &&
+        SUCCEEDED(VCALL(dev, 32, GetRtDataFn)(dev, bb, sys)) &&
+        SUCCEEDED(VCALL(sys, 13, LockFn)(sys, &lr, 0, 0x10)) && !fopen_s(&f, shot_out, "wb")) {
+        BITMAPFILEHEADER fh = {0x4D42};
+        BITMAPINFOHEADER ih = {sizeof ih};
+        ih.biWidth = (LONG)desc.Width;
+        ih.biHeight = -(LONG)desc.Height;
+        ih.biPlanes = 1;
+        ih.biBitCount = 32;
+        fh.bfOffBits = sizeof fh + sizeof ih;
+        fh.bfSize = fh.bfOffBits + desc.Width * desc.Height * 4;
+        fwrite(&fh, sizeof fh, 1, f);
+        fwrite(&ih, sizeof ih, 1, f);
+        for (UINT y = 0; y < desc.Height; y++) fwrite((uint8_t*)lr.pBits + y * lr.Pitch, 4, desc.Width, f);
+        fclose(f);
+        VCALL(sys, 14, UnlockFn)(sys);
+        rt_log("frame captured %ux%u (format %d) to %s", desc.Width, desc.Height, desc.Format, shot_out);
+    }
+    if (sys) VCALL(sys, 2, ReleaseFn)(sys);
+    VCALL(bb, 2, ReleaseFn)(bb);
+}
+
+static HRESULT WINAPI hook_present(void* dev, const RECT* a, const RECT* b, HWND w, const void* r) {
+    if (GetFileAttributesA(shot_req) != INVALID_FILE_ATTRIBUTES) {
+        DeleteFileA(shot_req);
+        save_backbuffer(dev);
+    }
+    return real_present(dev, a, b, w, r);
+}
+
+static HRESULT WINAPI hook_create_device(void* d3d, UINT ad, DWORD type, HWND w, DWORD flags, void* params, void** out) {
+    HRESULT hr = real_create_device(d3d, ad, type, w, flags, params, out);
+    if (SUCCEEDED(hr) && out && *out) patch_slot(*out, 17, (void*)hook_present, (void**)&real_present);
+    return hr;
+}
+
+static void* WINAPI ov_Direct3DCreate9(UINT sdk) {
+    typedef void*(WINAPI* CreateFn)(UINT);
+    void* d3d = ((CreateFn)GetProcAddress(GetModuleHandleA("d3d9.dll"), "Direct3DCreate9"))(sdk);
+    if (d3d) patch_slot(d3d, 16, (void*)hook_create_device, (void**)&real_create_device);
+    return d3d;
+}
+
 typedef struct { const char* dll; const char* name; void* fn; } Override;
 static const Override overrides[] = {
     {"kernel32.dll", "GetModuleHandleA", (void*)ov_GetModuleHandleA},
     {"kernel32.dll", "GetModuleFileNameA", (void*)ov_GetModuleFileNameA},
     {"kernel32.dll", "GetCommandLineA", (void*)ov_GetCommandLineA},
     {"kernel32.dll", "ExitProcess", (void*)ov_ExitProcess},
+    {"user32.dll", "MessageBoxA", (void*)ov_MessageBoxA},
+    {"d3d9.dll", "Direct3DCreate9", (void*)ov_Direct3DCreate9},
     {"kernel32.dll", "LoadLibraryA", (void*)ov_LoadLibraryA},
     {"kernel32.dll", "LoadLibraryExA", (void*)ov_LoadLibraryExA},
     {"kernel32.dll", "LoadLibraryExW", (void*)ov_LoadLibraryExW},
@@ -619,6 +705,10 @@ int main(int argc, char** argv) {
         else
             strcpy_s(s ? s + 1 : logp, sizeof logp - (s ? (size_t)(s + 1 - logp) : 0), "recomp.log");
         log_file = _fsopen(logp, "w", _SH_DENYNO);
+        strcpy_s(shot_req, sizeof shot_req, logp);
+        strcpy_s(shot_out, sizeof shot_out, logp);
+        strcpy_s(strrchr(shot_req, '\\') + 1, 16, "shot.req");
+        strcpy_s(strrchr(shot_out, '\\') + 1, 16, "shot.bmp");
     }
     SetCurrentDirectoryA(dir);
     SetDllDirectoryA(dir);
