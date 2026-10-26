@@ -20,10 +20,10 @@ $stale | ForEach-Object { '"' + $_.FullName + '"' } | Set-Content -Encoding asci
 $cmds = @("call `"$vcvars`" >nul 2>nul")
 if ($stale) {
     "compiling $($stale.Count) generated files"
-    $cmds += "cl /nologo /c /MP /W0 /GS- /Gy $Opt /I`"$runtime`" /Fo`"$obj\\`" @`"$list`" || exit /b 1"
+    $cmds += "cl /nologo /c /MP /W0 /GS- /Gy $Opt /Zi /FS /Fd`"$obj\gen.pdb`" /I`"$runtime`" /Fo`"$obj\\`" @`"$list`" || exit /b 1"
 }
 $cmds += "cl /nologo /c /W3 /GS- /O2 /Zi /I`"$runtime`" /Fo`"$obj\\`" /Fd`"$obj\rt.pdb`" `"$runtime\rt.c`" `"$runtime\rt_host.c`" || exit /b 1"
-$cmds += "link /nologo /DEBUG /OUT:`"$Out\NosTaleRecomp.exe`" /SUBSYSTEM:CONSOLE /BASE:0x30000000 /DYNAMICBASE:NO /FIXED /NXCOMPAT /LARGEADDRESSAWARE `"$obj\*.obj`" user32.lib kernel32.lib psapi.lib || exit /b 1"
+$cmds += "link /nologo /DEBUG /OUT:`"$Out\NosTaleRecomp.exe`" /SUBSYSTEM:CONSOLE /BASE:0x30000000 /DYNAMICBASE:NO /FIXED /NXCOMPAT /LARGEADDRESSAWARE `"$obj\*.obj`" user32.lib kernel32.lib psapi.lib dbghelp.lib || exit /b 1"
 $old = Join-Path $Out 'NosTaleRecomp.exe'
 if (Test-Path $old) { Get-ChildItem $Out -Filter 'NosTaleRecomp.old*.exe' | Remove-Item -ErrorAction SilentlyContinue; Rename-Item $old ('NosTaleRecomp.old' + [guid]::NewGuid().ToString('N').Substring(0,6) + '.exe') }
 $bat = Join-Path $Out 'build.bat'

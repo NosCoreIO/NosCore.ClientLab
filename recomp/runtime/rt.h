@@ -27,6 +27,8 @@ struct CPU {
     uint32_t pend, pend_target;
     uint32_t cf, zf, sf, of, pf, df;
     double st[8];
+    int64_t st_i64[8];
+    uint8_t st_exact[8];
     uint32_t ftop;
     uint16_t fcw, fsw;
     uint64_t mm[8];
@@ -76,7 +78,10 @@ struct CPU {
 #define PUSH(v) do { uint32_t _v = (v); c->esp -= 4; M32(c->esp) = _v; } while (0)
 
 #define ST(i) (c->st[(c->ftop + (i)) & 7])
-#define FPUSH(v) do { double _v = (v); c->ftop = (c->ftop - 1) & 7; c->st[c->ftop] = _v; } while (0)
+#define FPUSH(v) do { double _v = (v); c->ftop = (c->ftop - 1) & 7; c->st[c->ftop] = _v; c->st_exact[c->ftop] = 0; } while (0)
+/* fild/fistp of a qword is how Delphi's Move copies 8 bytes; keep the exact integer so a double cannot round it. */
+#define FPUSH_I64(v) do { int64_t _q = (int64_t)(v); c->ftop = (c->ftop - 1) & 7; c->st[c->ftop] = (double)_q; c->st_i64[c->ftop] = _q; c->st_exact[c->ftop] = 1; } while (0)
+#define FST_I64(c) (((c)->st_exact[(c)->ftop & 7] && (c)->st[(c)->ftop & 7] == (double)(c)->st_i64[(c)->ftop & 7]) ? (c)->st_i64[(c)->ftop & 7] : rt_fist64((c), ST(0)))
 #define FPOP() (c->ftop = (c->ftop + 1) & 7)
 
 static __forceinline uint32_t PARITY(uint8_t v) {
@@ -118,6 +123,9 @@ void rt_fbstp(CPU* c, uint32_t addr, double v);
 void rt_fcom(CPU* c, double a, double b);
 uint16_t rt_fsw(CPU* c);
 void rt_fninit(CPU* c);
+void rt_fxch(CPU* c, uint32_t k);
+void rt_fcopy(CPU* c, uint32_t dst, uint32_t src);
+void rt_fld_st(CPU* c, uint32_t k);
 
 void rt_str_movsb(CPU* c);
 void rt_str_movsw(CPU* c);

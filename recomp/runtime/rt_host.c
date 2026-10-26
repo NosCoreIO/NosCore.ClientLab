@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <psapi.h>
 #include <share.h>
+#include <dbghelp.h>
 
 #define HOST_STACK_SIZE (64u << 20)
 #define GUEST_BASE 0x00400000u
@@ -42,6 +43,46 @@ void rt_log(const char* fmt, ...) {
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     if (log_file) { fprintf(log_file, "%s\n", buf); fflush(log_file); }
+}
+
+static volatile uint32_t last_fault_eip;
+
+static void log_host_location(uint32_t eip) {
+    static int sym_ready;
+    char buf[sizeof(SYMBOL_INFO) + 256];
+    SYMBOL_INFO* si = (SYMBOL_INFO*)buf;
+    IMAGEHLP_LINE64 line = {sizeof line};
+    DWORD64 disp = 0;
+    DWORD ldisp = 0;
+    if (!sym_ready) { SymSetOptions(SYMOPT_LOAD_LINES); SymInitialize(GetCurrentProcess(), 0, TRUE); sym_ready = 1; }
+    si->SizeOfStruct = sizeof(SYMBOL_INFO);
+    si->MaxNameLen = 255;
+    if (SymFromAddr(GetCurrentProcess(), eip, &disp, si) && SymGetLineFromAddr64(GetCurrentProcess(), eip, &ldisp, &line)) {
+        FILE* f;
+        char text[512];
+        unsigned n = 0;
+        rt_log("  host eip %08x = %s+%llx at %s:%lu", eip, si->Name, disp, line.FileName, line.LineNumber);
+        if (!fopen_s(&f, line.FileName, "r")) {
+            while (fgets(text, sizeof text, f)) {
+                n++;
+                if (n + 6 >= line.LineNumber && n <= line.LineNumber + 1) rt_log("    %5u%s %s", n, n == line.LineNumber ? ">" : " ", text);
+                if (n > line.LineNumber) break;
+            }
+            fclose(f);
+        }
+    } else {
+        rt_log("  host eip %08x (no symbol)", eip);
+    }
+}
+
+static void dump_state(CPU* c) {
+    rt_log("  eax=%08x ecx=%08x edx=%08x ebx=%08x esp=%08x ebp=%08x esi=%08x edi=%08x",
+           c->r[0].d, c->r[1].d, c->r[2].d, c->r[3].d, c->r[4].d, c->r[5].d, c->r[6].d, c->r[7].d);
+    rt_log("  pend=%u pend_target=%08x acts=%p", c->pend, c->pend_target, (void*)c->acts);
+    for (int k = 24; k > 0; k--) {
+        uint32_t p = (c->trace_pos - k) & 63;
+        if (c->trace[p * 2]) rt_log("  trace -%02d: %08x (ret %08x)", k, c->trace[p * 2], c->trace[p * 2 + 1]);
+    }
 }
 
 void rt_fatal(const char* fmt, ...) {
@@ -121,7 +162,7 @@ __declspec(naked) void rt_longjmp(uint32_t* jb) {
 
 /* Calls a native function with the guest stack as the real stack. [guest esp] holds the
    guest return address; it is swapped for our return label while the callee runs. */
-__declspec(naked) void __cdecl rt_call_host(CPU* c, uint32_t target) {
+__declspec(naked) void __cdecl rt_call_host_raw(CPU* c, uint32_t target) {
     __asm {
         push ebp
         push ebx
@@ -256,7 +297,9 @@ static void __cdecl rt_raise_guest_fault(uint32_t code, uint32_t info0, uint32_t
     guest_push(c, code);
     guest_push(c, 0);
     rt_log("guest fault %08x (%08x %08x), raising in guest", code, info0, info1);
-    rt_call_host(c, (uint32_t)(uintptr_t)RaiseException);
+    log_host_location(last_fault_eip);
+    dump_state(c);
+    rt_call_host_raw(c, (uint32_t)(uintptr_t)RaiseException);
     rt_fatal("guest fault %08x was continued", code);
 }
 
@@ -285,6 +328,7 @@ static LONG CALLBACK veh(PEXCEPTION_POINTERS ep) {
     if (ctx->Eip >= host_image_lo && ctx->Eip < host_image_hi && host_tls.cpu &&
         (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == EXCEPTION_INT_OVERFLOW ||
          code == EXCEPTION_PRIV_INSTRUCTION || code == EXCEPTION_ILLEGAL_INSTRUCTION)) {
+        last_fault_eip = ctx->Eip;
         ctx->Eax = code;
         ctx->Ecx = er->NumberParameters >= 1 ? (DWORD)er->ExceptionInformation[0] : 0;
         ctx->Edx = er->NumberParameters >= 2 ? (DWORD)er->ExceptionInformation[1] : 0;
@@ -336,6 +380,32 @@ static void* find_override(const char* dll, const char* name) {
 
 /* ---- loader ---- */
 
+typedef struct { uint32_t addr; char name[60]; } HostName;
+static HostName host_names[2048];
+static int host_name_count;
+extern int rt_api_trace;
+
+void rt_describe_arg(uint32_t v, char* out, unsigned size) {
+    MEMORY_BASIC_INFORMATION mbi;
+    const unsigned char* p = (const unsigned char*)(uintptr_t)v;
+    unsigned n = 0;
+    sprintf_s(out, size, "%08x", v);
+    if (v < 0x10000 || !VirtualQuery(p, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !(mbi.Protect & 0xEE))
+        return;
+    while (n < 60 && (uint8_t*)p + n < (uint8_t*)mbi.BaseAddress + mbi.RegionSize && p[n] >= 0x20 && p[n] < 0x7f) n++;
+    if (n >= 3 && ((uint8_t*)p + n >= (uint8_t*)mbi.BaseAddress + mbi.RegionSize || p[n] == 0 || n == 60))
+        sprintf_s(out, size, "%08x\"%.*s\"", v, (int)n, (const char*)p);
+    else if ((uint8_t*)p + 12 <= (uint8_t*)mbi.BaseAddress + mbi.RegionSize)
+        sprintf_s(out, size, "%08x[%02x %02x %02x %02x %02x %02x %02x %02x]", v, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+}
+
+const char* rt_host_name(uint32_t addr) {
+    for (int k = 0; k < host_name_count; k++)
+        if (host_names[k].addr == addr) return host_names[k].name;
+    return 0;
+}
+
 static void resolve_imports(uint8_t* base) {
     IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
     IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
@@ -361,6 +431,11 @@ static void resolve_imports(uint8_t* base) {
                 if (!fn && h) fn = (void*)GetProcAddress(h, name);
             }
             if (!fn) { rt_log("unresolved import %s!%s", dll, name); missing++; }
+            if (fn && host_name_count < 2048) {
+                host_names[host_name_count].addr = (uint32_t)(uintptr_t)fn;
+                sprintf_s(host_names[host_name_count].name, sizeof host_names[0].name, "%s", name);
+                host_name_count++;
+            }
             *iat = (uint32_t)(uintptr_t)fn;
         }
     }
@@ -474,6 +549,7 @@ int main(int argc, char** argv) {
     uint8_t* base;
     IMAGE_NT_HEADERS32* nt;
     int k;
+    char logp_unused[8];
 
     /* The guest path travels in NOSRECOMP_GUEST so that processes the guest spawns by re-running
        "itself" (CEF's --type=... helpers) get the guest again, with their own arguments. */
@@ -507,6 +583,7 @@ int main(int argc, char** argv) {
     SetCurrentDirectoryA(dir);
     SetDllDirectoryA(dir);
     rt_log("guest: %s  args: %s", guest_path, rest);
+    rt_api_trace = GetEnvironmentVariableA("NOSRECOMP_TRACE_API", logp_unused, sizeof logp_unused) > 0;
     sprintf_s(guest_cmdline, sizeof guest_cmdline, "\"%s\" %s", guest_path, rest);
     (void)k;
 

@@ -47,11 +47,22 @@ FLAG_RW = {
     "cmc": ({"cf"}, {"cf"}), "clc": (set(), {"cf"}), "stc": (set(), {"cf"}),
     "rcl": ({"cf"}, {"cf", "of"}), "rcr": ({"cf"}, {"cf", "of"}), "rol": (set(), {"cf", "of"}),
     "ror": (set(), {"cf", "of"}),
-    "repe cmpsb": (set(), ALL_FLAGS), "repe cmpsw": (set(), ALL_FLAGS), "repe cmpsd": (set(), ALL_FLAGS),
-    "repne scasb": (set(), ALL_FLAGS), "repne scasw": (set(), ALL_FLAGS), "repe scasb": (set(), ALL_FLAGS),
+    "repe cmpsb": (ALL_FLAGS, ALL_FLAGS), "repe cmpsw": (ALL_FLAGS, ALL_FLAGS), "repe cmpsd": (ALL_FLAGS, ALL_FLAGS),
+    "repne scasb": (ALL_FLAGS, ALL_FLAGS), "repne scasw": (ALL_FLAGS, ALL_FLAGS), "repe scasb": (ALL_FLAGS, ALL_FLAGS),
     "fcomi": (set(), ALL_FLAGS), "fucomi": (set(), ALL_FLAGS), "fcomip": (set(), ALL_FLAGS),
     "fucomip": (set(), ALL_FLAGS),
 }
+
+
+SHIFTS = {"shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr", "shld", "shrd"}
+
+
+def flag_rw_ins(i):
+    """Like flag_rw, but a shift by cl may shift by 0 and leave every flag as it was."""
+    r, w = flag_rw(i.mnemonic)
+    if i.mnemonic in SHIFTS and i.operands and i.operands[-1].type == X.X86_OP_REG:
+        r = set(r) | ALL_FLAGS
+    return r, w
 
 
 def flag_rw(m):
@@ -172,6 +183,11 @@ class FnGen:
                     t = i.operands[0].imm & 0xFFFFFFFF
                     if L.code_lo <= t < L.code_hi and t not in self.addrs and (m == "push" or not covered(t)):
                         roots.append((t, m == "push"))
+            for pos, force in list(roots):
+                first = L.disasm_range(pos, pos + 1)
+                if force and first and first[0].mnemonic == "jmp":
+                    # Delphi SEH handler: 'jmp @HandleFinally; jmp @finally' - _HandleFinally calls the second jump.
+                    roots.append((pos + first[0].size, True))
             for pos, force in roots:
                 work = [(pos, force)]
                 while work:
@@ -300,7 +316,7 @@ class FnGen:
                 for t in s:
                     live |= live_in[t]
                 for i in reversed(blocks[k]):
-                    r, w = flag_rw(i.mnemonic)
+                    r, w = flag_rw_ins(i)
                     if i.mnemonic in ("call",):
                         r, w = set(ALL_FLAGS), set(ALL_FLAGS)
                     live = (live - w) | r
@@ -315,7 +331,7 @@ class FnGen:
                 live |= live_in[t]
             for i in reversed(b):
                 live_after[i.address] = set(live)
-                r, w = flag_rw(i.mnemonic)
+                r, w = flag_rw_ins(i)
                 if i.mnemonic == "call":
                     r, w = set(ALL_FLAGS), set(ALL_FLAGS)
                 live = (live - w) | r
@@ -538,19 +554,27 @@ class FnGen:
                 self.e(f"R16(0) = (uint16_t)(R8L(0) * {self.rd(ops[0])}); CF = OF = R8H(0) != 0;")
             return
         if m in ("div", "idiv"):
+            # A zero divisor or a quotient that does not fit the destination both raise #DE.
             sz = ops[0].size
-            if sz == 2:
-                st = "uint" if m == "div" else "int"
-                self.e(f"{{ {st}32_t n = ({st}32_t)((({'uint32_t' if m == 'div' else 'uint32_t'})R16(2) << 16) | R16(0)); {st}16_t d = ({st}16_t){self.rd(ops[0])}; if (!d) rt_divzero(c, 0x{i.address:08x}u); R16(0) = (uint16_t)(n / d); R16(2) = (uint16_t)(n % d); }}")
-                return
-            if sz == 1:
-                st = "uint" if m == "div" else "int"
-                self.e(f"{{ {st}16_t n = ({st}16_t)R16(0); {st}8_t d = ({st}8_t){self.rd(ops[0])}; if (!d) rt_divzero(c, 0x{i.address:08x}u); R8L(0) = (uint8_t)(n / d); R8H(0) = (uint8_t)(n % d); }}")
-                return
+            fault = f"rt_divzero(c, 0x{i.address:08x}u)"
+            d = self.rd(ops[0])
             if m == "div":
-                self.e(f"{{ uint32_t d = {self.rd(ops[0])}; uint64_t n = ((uint64_t)c->edx << 32) | c->eax; if (!d) rt_divzero(c, 0x{i.address:08x}u); c->eax = (uint32_t)(n / d); c->edx = (uint32_t)(n % d); }}")
+                num = {1: "(uint64_t)R16(0)", 2: "(((uint64_t)R16(2) << 16) | R16(0))", 4: "(((uint64_t)c->edx << 32) | c->eax)"}[sz]
+                lim = {1: "0xFFull", 2: "0xFFFFull", 4: "0xFFFFFFFFull"}[sz]
+                self.e(f"{{ uint64_t n = {num}, dv = ({UTYPE[sz]}){d}, qv; if (!dv) {fault}; qv = n / dv; if (qv > {lim}) {fault};")
+                rem = "n % dv"
             else:
-                self.e(f"{{ int32_t d = (int32_t){self.rd(ops[0])}; int64_t n = (int64_t)(((uint64_t)c->edx << 32) | c->eax); if (!d) rt_divzero(c, 0x{i.address:08x}u); c->eax = (uint32_t)(int32_t)(n / d); c->edx = (uint32_t)(int32_t)(n % d); }}")
+                num = {1: "(int64_t)(int16_t)R16(0)", 2: "(int64_t)(int32_t)(((uint32_t)R16(2) << 16) | R16(0))",
+                       4: "(int64_t)(((uint64_t)c->edx << 32) | c->eax)"}[sz]
+                lo, hi = {1: ("-128", "127"), 2: ("-32768", "32767"), 4: ("-2147483648LL", "2147483647LL")}[sz]
+                self.e(f"{{ int64_t n = {num}, dv = ({STYPE[sz]}){d}, qv; if (!dv || (n == INT64_MIN && dv == -1)) {fault}; qv = n / dv; if (qv < {lo} || qv > {hi}) {fault};")
+                rem = "n % dv"
+            if sz == 1:
+                self.e(f"  R8L(0) = (uint8_t)qv; R8H(0) = (uint8_t)({rem}); }}")
+            elif sz == 2:
+                self.e(f"  R16(0) = (uint16_t)qv; R16(2) = (uint16_t)({rem}); }}")
+            else:
+                self.e(f"  c->eax = (uint32_t)qv; c->edx = (uint32_t)({rem}); }}")
             return
         if m in ("bt", "bts", "btr", "btc"):
             sz = ops[0].size
@@ -573,17 +597,20 @@ class FnGen:
             sz = ops[0].size
             if ops[0].type != X.X86_OP_MEM or sz not in (1, 4):
                 raise NotImplementedError("cmpxchg form")
+            # Flags are those of 'cmp accumulator, old destination'.
             if sz == 1:
-                self.e(f"{{ uint8_t old = (uint8_t)_InterlockedCompareExchange8((volatile char*)(uintptr_t){self.addr(ops[0])}, (char){self.rd(ops[1])}, (char)R8L(0)); ZF = old == R8L(0); if (!ZF) R8L(0) = old; }}")
+                self.e(f"{{ uint8_t acc = R8L(0), old = (uint8_t)_InterlockedCompareExchange8((volatile char*)(uintptr_t){self.addr(ops[0])}, (char){self.rd(ops[1])}, (char)acc); r = (uint8_t)(acc - old);"
+                       f" CF = acc < old; OF = (((acc ^ old) & (acc ^ r)) & 0x80u) != 0; ZF = r == 0; SF = (r & 0x80u) != 0; PF = PARITY((uint8_t)r); if (!ZF) R8L(0) = old; }}")
                 return
-            self.e(f"{{ uint32_t old = (uint32_t)_InterlockedCompareExchange((volatile long*)(uintptr_t){self.addr(ops[0])}, (long){self.rd(ops[1])}, (long)c->eax); ZF = old == c->eax; if (!ZF) c->eax = old; }}")
+            self.e(f"{{ uint32_t acc = c->eax, old = (uint32_t)_InterlockedCompareExchange((volatile long*)(uintptr_t){self.addr(ops[0])}, (long){self.rd(ops[1])}, (long)acc); r = acc - old;"
+                   f" CF = acc < old; OF = (((acc ^ old) & (acc ^ r)) >> 31) & 1; ZF = r == 0; SF = r >> 31; PF = PARITY((uint8_t)r); if (!ZF) c->eax = old; }}")
             return
         if m == "lock xadd" or m == "xadd":
-            self.e(f"{{ uint32_t s = {self.rd(ops[1])}; uint32_t old = (uint32_t)_InterlockedExchangeAdd((volatile long*)(uintptr_t){self.addr(ops[0])}, (long)s); r = old + s; CF = r < old; OF = ((old ^ r) & (s ^ r)) >> 31; ZF = r == 0; SF = r >> 31; {self.wr(ops[1], 'old')} }}")
+            self.e(f"{{ uint32_t s = {self.rd(ops[1])}; uint32_t old = (uint32_t)_InterlockedExchangeAdd((volatile long*)(uintptr_t){self.addr(ops[0])}, (long)s); r = old + s; CF = r < old; OF = ((old ^ r) & (s ^ r)) >> 31; ZF = r == 0; SF = r >> 31; PF = PARITY((uint8_t)r); {self.wr(ops[1], 'old')} }}")
             return
         if m in ("lock inc", "lock dec"):
             fnm = "_InterlockedIncrement" if m == "lock inc" else "_InterlockedDecrement"
-            self.e(f"{{ int32_t v = (int32_t){fnm}((volatile long*)(uintptr_t){self.addr(ops[0])}); ZF = v == 0; SF = v < 0; OF = v == {'(int32_t)0x80000000' if m == 'lock inc' else '0x7fffffff'}; }}")
+            self.e(f"{{ int32_t v = (int32_t){fnm}((volatile long*)(uintptr_t){self.addr(ops[0])}); ZF = v == 0; SF = v < 0; PF = PARITY((uint8_t)v); OF = v == {'(int32_t)0x80000000' if m == 'lock inc' else '0x7fffffff'}; }}")
             return
 
         if m in ("movsb", "movsw", "movsd", "rep movsb", "rep movsw", "rep movsd", "stosb", "stosw", "stosd",
@@ -732,7 +759,9 @@ class FnGen:
 
         if m in ("fld", "fild"):
             if ops[0].type == X.X86_OP_REG:
-                self.e(f"{{ double v = ST({st_index(ops[0])}); FPUSH(v); }}")
+                self.e(f"rt_fld_st(c, {st_index(ops[0])});")
+            elif m == "fild" and ops[0].size == 8:
+                self.e(f"FPUSH_I64(M64({self.addr(ops[0])}));")
             else:
                 self.e(f"FPUSH({memval(ops[0])});")
             return
@@ -744,12 +773,12 @@ class FnGen:
             pop = m.endswith("p")
             op = ops[0]
             if op.type == X.X86_OP_REG:
-                self.e(f"ST({st_index(op)}) = ST(0);")
+                self.e(f"rt_fcopy(c, {st_index(op)}, 0);")
             else:
                 a = self.addr(op)
                 if m.startswith("fist"):
                     self.e({2: f"M16({a}) = (uint16_t)rt_fist16(c, ST(0));", 4: f"M32({a}) = (uint32_t)rt_fist32(c, ST(0));",
-                            8: f"M64({a}) = (uint64_t)rt_fist64(c, ST(0));"}[op.size])
+                            8: f"M64({a}) = (uint64_t)FST_I64(c);"}[op.size])
                 elif m == "fbstp":
                     self.e(f"rt_fbstp(c, {a}, ST(0));")
                 else:
@@ -811,8 +840,8 @@ class FnGen:
         if m in ("fninit", "finit"):
             self.e("rt_fninit(c);"); return
         if m == "fxch":
-            k = st_index(ops[0]) if ops else 1
-            self.e(f"{{ double v = ST(0); ST(0) = ST({k}); ST({k}) = v; }}"); return
+            k = max((st_index(o) for o in ops), default=1)
+            self.e(f"rt_fxch(c, {k});"); return
         if m == "ffree":
             return
         unary = {"fchs": "-ST(0)", "fabs": "fabs(ST(0))", "fsqrt": "sqrt(ST(0))", "fsin": "sin(ST(0))",

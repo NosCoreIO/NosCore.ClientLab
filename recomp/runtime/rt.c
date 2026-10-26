@@ -2,7 +2,25 @@
 #include <string.h>
 
 void rt_fatal(const char* fmt, ...);
-void rt_call_host(CPU* c, uint32_t target);
+void rt_call_host_raw(CPU* c, uint32_t target);
+void rt_log(const char* fmt, ...);
+const char* rt_host_name(uint32_t addr);
+void rt_describe_arg(uint32_t v, char* out, unsigned size);
+int rt_api_trace;
+
+void rt_call_host(CPU* c, uint32_t target) {
+    if (rt_api_trace) {
+        uint32_t* sp = (uint32_t*)(uintptr_t)c->esp;
+        const char* name = rt_host_name(target);
+        char d[4][96];
+        for (int k = 0; k < 4; k++) rt_describe_arg(sp[k + 1], d[k], sizeof d[k]);
+        rt_log("api %08x %s(%s, %s, %s, %s) from %08x", target, name ? name : "?", d[0], d[1], d[2], d[3], sp[0]);
+        rt_call_host_raw(c, target);
+        rt_log("    -> %08x", c->eax);
+        return;
+    }
+    rt_call_host_raw(c, target);
+}
 
 static int is_guest(uint32_t a) { return a >= rt_code_lo && a < rt_code_hi; }
 
@@ -110,6 +128,7 @@ double rt_f80_load(uint32_t addr) {
     double v;
     if (exp == 0 && mant == 0) return sign ? -0.0 : 0.0;
     if (exp == 0x7fff) return (mant << 1) ? NAN : (sign ? -INFINITY : INFINITY);
+    if (exp != 0 && !(mant >> 63)) return NAN;
     v = ldexp((double)mant, exp - 16383 - 63);
     return sign ? -v : v;
 }
@@ -177,6 +196,24 @@ void rt_fcom(CPU* c, double a, double b) {
 uint16_t rt_fsw(CPU* c) { return (uint16_t)((c->fsw & ~0x3800u) | ((c->ftop & 7) << 11)); }
 
 void rt_fninit(CPU* c) { c->fcw = 0x37f; c->fsw = 0; c->ftop = 0; }
+
+void rt_fxch(CPU* c, uint32_t k) {
+    uint32_t a = c->ftop & 7, b = (c->ftop + k) & 7;
+    double d = c->st[a]; int64_t q = c->st_i64[a]; uint8_t e = c->st_exact[a];
+    c->st[a] = c->st[b]; c->st_i64[a] = c->st_i64[b]; c->st_exact[a] = c->st_exact[b];
+    c->st[b] = d; c->st_i64[b] = q; c->st_exact[b] = e;
+}
+
+void rt_fcopy(CPU* c, uint32_t dst, uint32_t src) {
+    uint32_t a = (c->ftop + dst) & 7, b = (c->ftop + src) & 7;
+    c->st[a] = c->st[b]; c->st_i64[a] = c->st_i64[b]; c->st_exact[a] = c->st_exact[b];
+}
+
+void rt_fld_st(CPU* c, uint32_t k) {
+    uint32_t b = (c->ftop + k) & 7, a = (c->ftop - 1) & 7;
+    c->st[a] = c->st[b]; c->st_i64[a] = c->st_i64[b]; c->st_exact[a] = c->st_exact[b];
+    c->ftop = a;
+}
 
 /* ---- string instructions ---- */
 
