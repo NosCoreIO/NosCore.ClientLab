@@ -169,9 +169,8 @@ __declspec(naked) void __cdecl rt_call_host(CPU* c, uint32_t target) {
 }
 
 static RtAct* find_act(CPU* c, uint32_t target) {
-    RtFn f = rt_lookup(target, 0);
     for (RtAct* a = c->acts; a; a = a->prev)
-        if (a->fn == f && a->guest_esp >= c->r[4].d) return a;
+        if (a->guest_esp >= c->r[4].d && rt_fn_has_label(a->fn, target)) return a;
     return 0;
 }
 
@@ -232,14 +231,64 @@ __declspec(naked) void rt_bridge_stub(void) {
     }
 }
 
+static uint32_t host_image_lo, host_image_hi;
+
+static void guest_push(CPU* c, uint32_t v) {
+    c->r[4].d -= 4;
+    M32(c->r[4].d) = v;
+}
+
+/* Raises a hardware fault that happened inside recompiled code as a guest exception, on the guest stack,
+   so the guest's own SEH handlers see it the way the original client would. Never returns. */
+static void __cdecl rt_raise_guest_fault(uint32_t code, uint32_t info0, uint32_t info1) {
+    CPU* c = host_tls.cpu;
+    uint32_t args = 0, nargs = 0;
+    if (code == EXCEPTION_ACCESS_VIOLATION) {
+        c->r[4].d -= 8;
+        M32(c->r[4].d) = info0;
+        M32(c->r[4].d + 4) = info1;
+        args = c->r[4].d;
+        nargs = 2;
+    }
+    guest_push(c, args);
+    guest_push(c, nargs);
+    guest_push(c, 0);
+    guest_push(c, code);
+    guest_push(c, 0);
+    rt_log("guest fault %08x (%08x %08x), raising in guest", code, info0, info1);
+    rt_call_host(c, (uint32_t)(uintptr_t)RaiseException);
+    rt_fatal("guest fault %08x was continued", code);
+}
+
+__declspec(naked) static void rt_fault_stub(void) {
+    __asm {
+        and esp, 0xFFFFFFF0
+        push edx
+        push ecx
+        push eax
+        call rt_raise_guest_fault
+        int 3
+    }
+}
+
 static LONG CALLBACK veh(PEXCEPTION_POINTERS ep) {
     PEXCEPTION_RECORD er = ep->ExceptionRecord;
     PCONTEXT ctx = ep->ContextRecord;
-    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2 &&
+    DWORD code = er->ExceptionCode;
+    if (code == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2 &&
         er->ExceptionInformation[0] == 8 && ctx->Eip >= rt_code_lo && ctx->Eip < rt_code_hi) {
         ctx->Esp -= 4;
         *(uint32_t*)(uintptr_t)ctx->Esp = ctx->Eip;
         ctx->Eip = (DWORD)(uintptr_t)rt_bridge_stub;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    if (ctx->Eip >= host_image_lo && ctx->Eip < host_image_hi && host_tls.cpu &&
+        (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == EXCEPTION_INT_OVERFLOW ||
+         code == EXCEPTION_PRIV_INSTRUCTION || code == EXCEPTION_ILLEGAL_INSTRUCTION)) {
+        ctx->Eax = code;
+        ctx->Ecx = er->NumberParameters >= 1 ? (DWORD)er->ExceptionInformation[0] : 0;
+        ctx->Edx = er->NumberParameters >= 2 ? (DWORD)er->ExceptionInformation[1] : 0;
+        ctx->Eip = (DWORD)(uintptr_t)rt_fault_stub;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     return EXCEPTION_CONTINUE_SEARCH;
@@ -386,14 +435,16 @@ static DWORD WINAPI guest_main_thread(LPVOID unused) {
 
 /* Windows maps NLS tables and heaps around 0x400000 during process start, before main().
    Relaunch ourselves suspended and reserve the guest range in the child before its loader runs. */
-static int relaunch_with_reservation(void) {
+static int relaunch_with_reservation(const char* guest_args) {
     char self[MAX_PATH];
+    static char cmd[8192];
     STARTUPINFOA si = {sizeof si};
     PROCESS_INFORMATION pi;
     DWORD code = 1;
     GetModuleFileNameA(0, self, sizeof self);
+    sprintf_s(cmd, sizeof cmd, "\"%s\" %s", self, guest_args);
     SetEnvironmentVariableA("NOSRECOMP_CHILD", "1");
-    if (!CreateProcessA(self, GetCommandLineA(), 0, 0, FALSE, CREATE_SUSPENDED, 0, 0, &si, &pi)) {
+    if (!CreateProcessA(self, cmd, 0, 0, FALSE, CREATE_SUSPENDED, 0, 0, &si, &pi)) {
         fprintf(stderr, "relaunch failed (%lu)\n", GetLastError());
         return 1;
     }
@@ -405,20 +456,41 @@ static int relaunch_with_reservation(void) {
     return (int)code;
 }
 
+static const char* skip_arg(const char* s) {
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '"') {
+        s++;
+        while (*s && *s != '"') s++;
+        if (*s) s++;
+    } else {
+        while (*s && *s != ' ' && *s != '\t') s++;
+    }
+    while (*s == ' ' || *s == '\t') s++;
+    return s;
+}
+
 int main(int argc, char** argv) {
     char dir[MAX_PATH], *slash;
     uint8_t* base;
     IMAGE_NT_HEADERS32* nt;
     int k;
 
-    if (!GetEnvironmentVariableA("NOSRECOMP_CHILD", dir, sizeof dir))
-        return relaunch_with_reservation();
-
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s <path to NostaleClientX.exe> [client args...]\n", argv[0]);
-        return 2;
+    /* The guest path travels in NOSRECOMP_GUEST so that processes the guest spawns by re-running
+       "itself" (CEF's --type=... helpers) get the guest again, with their own arguments. */
+    const char* rest = skip_arg(GetCommandLineA());
+    if (!GetEnvironmentVariableA("NOSRECOMP_GUEST", guest_path, sizeof guest_path)) {
+        if (argc < 2) {
+            fprintf(stderr, "usage: %s <path to NostaleClientX.exe> [client args...]\n", argv[0]);
+            return 2;
+        }
+        if (!GetFullPathNameA(argv[1], sizeof guest_path, guest_path, 0)) return 2;
+        SetEnvironmentVariableA("NOSRECOMP_GUEST", guest_path);
+        rest = skip_arg(rest);
     }
-    if (!GetFullPathNameA(argv[1], sizeof guest_path, guest_path, 0)) return 2;
+    if (!GetEnvironmentVariableA("NOSRECOMP_CHILD", dir, sizeof dir))
+        return relaunch_with_reservation(rest);
+    SetEnvironmentVariableA("NOSRECOMP_CHILD", 0);
+
     strcpy_s(dir, sizeof dir, guest_path);
     slash = strrchr(dir, '\\');
     if (slash) *slash = 0;
@@ -426,18 +498,17 @@ int main(int argc, char** argv) {
         char logp[MAX_PATH], *s;
         GetModuleFileNameA(0, logp, sizeof logp);
         s = strrchr(logp, '\\');
-        strcpy_s(s ? s + 1 : logp, sizeof logp - (s ? (size_t)(s + 1 - logp) : 0), "recomp.log");
+        if (strstr(rest, "--type="))
+            sprintf_s(s ? s + 1 : logp, sizeof logp - (s ? (size_t)(s + 1 - logp) : 0), "recomp-%lu.log", GetCurrentProcessId());
+        else
+            strcpy_s(s ? s + 1 : logp, sizeof logp - (s ? (size_t)(s + 1 - logp) : 0), "recomp.log");
         log_file = _fsopen(logp, "w", _SH_DENYNO);
     }
     SetCurrentDirectoryA(dir);
     SetDllDirectoryA(dir);
-    rt_log("guest: %s", guest_path);
-
-    sprintf_s(guest_cmdline, sizeof guest_cmdline, "\"%s\"", guest_path);
-    for (k = 2; k < argc; k++) {
-        strcat_s(guest_cmdline, sizeof guest_cmdline, " ");
-        strcat_s(guest_cmdline, sizeof guest_cmdline, argv[k]);
-    }
+    rt_log("guest: %s  args: %s", guest_path, rest);
+    sprintf_s(guest_cmdline, sizeof guest_cmdline, "\"%s\" %s", guest_path, rest);
+    (void)k;
 
     if (!VirtualFree((void*)(uintptr_t)GUEST_BASE, 0, MEM_RELEASE))
         rt_log("no guest address reservation to release (%lu)", GetLastError());
@@ -450,6 +521,12 @@ int main(int argc, char** argv) {
     resolve_imports(base);
     setup_tls(base);
     protect_code(base);
+    {
+        uint8_t* self = (uint8_t*)GetModuleHandleA(0);
+        IMAGE_NT_HEADERS32* hn = (IMAGE_NT_HEADERS32*)(self + ((IMAGE_DOS_HEADER*)self)->e_lfanew);
+        host_image_lo = (uint32_t)(uintptr_t)self;
+        host_image_hi = host_image_lo + hn->OptionalHeader.SizeOfImage;
+    }
     AddVectoredExceptionHandler(1, veh);
 
     guest_entry = GUEST_BASE + nt->OptionalHeader.AddressOfEntryPoint;

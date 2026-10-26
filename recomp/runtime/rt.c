@@ -32,10 +32,26 @@ void rt_call(CPU* c, uint32_t t, uint32_t ret) {
 
 void rt_jump(CPU* c, uint32_t t, uint32_t ret) { rt_call(c, t, ret); }
 
-void rt_jump_ind(CPU* c, uint32_t t, uint32_t ret) {
+int rt_fn_has_label(RtFn fn, uint32_t addr) {
+    uint32_t lo = 0, hi = rt_label_count;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        if (rt_labels[mid].addr < addr) lo = mid + 1;
+        else hi = mid;
+    }
+    for (; lo < rt_label_count && rt_labels[lo].addr == addr; lo++)
+        if (rt_labels[lo].fn == fn) return 1;
+    return 0;
+}
+
+/* kind 1: indirect jmp; kind 2: ret to an address that is not this activation's return address. */
+void rt_jump_ind(CPU* c, uint32_t t, uint32_t ret, int kind) {
     uint32_t entry = 0;
     RtFn f;
-    if (!is_guest(t)) { rt_call_host(c, t); return; }
+    if (!is_guest(t)) {
+        if (kind == 1) { rt_call_host(c, t); return; }
+        c->pend = 1; c->pend_target = t; return;
+    }
     f = rt_lookup(t, &entry);
     if (!f) rt_fatal("no recompiled code for indirect jump target %08x", t);
     if (entry) { f(c, t, ret); return; }
@@ -52,7 +68,11 @@ void rt_act_pop(CPU* c, RtAct* a) {
 }
 
 void rt_unimpl(CPU* c, uint32_t addr, const char* what) { rt_fatal("unimplemented instruction at %08x: %s", addr, what); }
-void rt_divzero(CPU* c, uint32_t addr) { rt_fatal("integer divide by zero at %08x", addr); }
+void rt_divzero(CPU* c, uint32_t addr) {
+    volatile int zero = 0;
+    (void)addr;
+    c->r[0].d = 1 / zero;
+}
 void rt_int3(CPU* c, uint32_t addr) { rt_fatal("int3 at %08x", addr); }
 
 void rt_cpuid(CPU* c) {

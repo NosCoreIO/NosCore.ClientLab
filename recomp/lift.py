@@ -162,21 +162,21 @@ class FnGen:
             for k, i in enumerate(self.ins):
                 m = i.mnemonic
                 for t in L.jump_table(i):
-                    if t not in self.addrs and not covered(t):
-                        roots.append(t)
+                    if t not in self.addrs:
+                        roots.append((t, True))
                 if not i.operands or i.operands[0].type != X.X86_OP_IMM:
                     continue
                 if m == "push" and not self._is_code_push(k):
                     continue
                 if m == "push" or m.startswith("j") or m.startswith("loop"):
                     t = i.operands[0].imm & 0xFFFFFFFF
-                    if L.code_lo <= t < L.code_hi and t not in self.addrs and not covered(t):
-                        roots.append(t)
-            for pos in roots:
-                work = [pos]
+                    if L.code_lo <= t < L.code_hi and t not in self.addrs and (m == "push" or not covered(t)):
+                        roots.append((t, m == "push"))
+            for pos, force in roots:
+                work = [(pos, force)]
                 while work:
-                    p = work.pop()
-                    while L.code_lo <= p < L.code_hi and p not in self.addrs and not covered(p):
+                    p, force = work.pop()
+                    while L.code_lo <= p < L.code_hi and p not in self.addrs and (force or not covered(p)):
                         dec = L.disasm_range(p, p + 1)
                         if not dec:
                             break
@@ -186,8 +186,8 @@ class FnGen:
                         changed = True
                         m = i.mnemonic
                         if (m.startswith("j") or m.startswith("loop")) and i.operands and i.operands[0].type == X.X86_OP_IMM:
-                            work.append(i.operands[0].imm & 0xFFFFFFFF)
-                        work.extend(L.jump_table(i))
+                            work.append((i.operands[0].imm & 0xFFFFFFFF, False))
+                        work.extend((t, True) for t in L.jump_table(i))
                         if m in ("jmp", "ret", "int3"):
                             break
                         p = i.address + i.size
@@ -411,7 +411,7 @@ class FnGen:
         o.append("  switch (tgt) {")
         for lab in sorted(labels):
             o.append(f"  case 0x{lab:08x}u: goto L_{lab:08x};")
-        o.append("  default: if (ind) { rt_jump_ind(c, tgt, ret); EXIT; } c->pend = 1; c->pend_target = tgt; EXIT;")
+        o.append("  default: if (ind) { rt_jump_ind(c, tgt, ret, ind); EXIT; } c->pend = 1; c->pend_target = tgt; EXIT;")
         o.append("  }")
         prev_end = None
         for idx, i in enumerate(self.ins):
@@ -628,7 +628,7 @@ class FnGen:
             return
         if m == "ret":
             n = ops[0].imm if ops else 0
-            self.e(f"t = M32(c->esp); c->esp += {4 + n}; if (t == ret) EXIT; tgt = t; ind = 0; goto dispatch;")
+            self.e(f"t = M32(c->esp); c->esp += {4 + n}; if (t == ret) EXIT; tgt = t; ind = 2; goto dispatch;")
             return
         if m == "int3":
             self.e(f"rt_int3(c, 0x{i.address:08x}u);"); return
@@ -860,6 +860,17 @@ def reloc_code_seeds(L, fns):
             return True
         if a.mnemonic == "push" and a.op_str in ("ebx", "esi", "edi") and b.mnemonic in ("push", "mov", "add", "sub", "xor"):
             return True
+        if a.mnemonic in ("mov", "fild", "fld", "cmp", "test", "lea", "xor") and any(r in a.op_str for r in ("eax", "edx", "ecx")):
+            pos = t
+            for _ in range(24):
+                dec = L.disasm_range(pos, pos + 1)
+                if not dec or dec[0].mnemonic not in SANE and not dec[0].mnemonic.startswith("f"):
+                    return False
+                if dec[0].mnemonic == "ret":
+                    return True
+                if dec[0].mnemonic == "jmp":
+                    return False
+                pos += dec[0].size
         return False
 
     out = []
@@ -1049,11 +1060,7 @@ def main():
             os.remove(os.path.join(a.outdir, old))
     file_no = len(wanted)
 
-    best = {}
-    for lab, e in table:
-        if lab not in best or lab == e:
-            best[lab] = e
-    table = sorted(best.items())
+    table = sorted(set(table), key=lambda le: (le[0], le[0] != le[1], le[1]))
     with io.StringIO() as f:
         f.write('#include "rt.h"\n\n')
         for e in sorted({e for _, e in table}):

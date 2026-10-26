@@ -97,7 +97,8 @@ RtFn rt_lookup(uint32_t addr, uint32_t* is_entry);
 void rt_call(CPU* c, uint32_t target, uint32_t ret);
 void rt_jump(CPU* c, uint32_t target, uint32_t ret);
 #define rt_tls_array(c) ((uint32_t)(uintptr_t)(c)->tls_slots)
-void rt_jump_ind(CPU* c, uint32_t target, uint32_t ret);
+void rt_jump_ind(CPU* c, uint32_t target, uint32_t ret, int kind);
+int rt_fn_has_label(RtFn fn, uint32_t addr);
 void rt_unimpl(CPU* c, uint32_t addr, const char* what);
 void rt_divzero(CPU* c, uint32_t addr);
 void rt_int3(CPU* c, uint32_t addr);
