@@ -27,6 +27,12 @@ typedef union {
 typedef struct CPU CPU;
 typedef void (*RtFn)(CPU*, uint32_t, uint32_t);
 
+#ifdef RT_PORTABLE
+/* No longjmp in the portable host: every frame between a Delphi except handler and its try block is ours, so a
+   pending non-local jump just propagates outward by returning (see guest_call and rt_call_host_raw). */
+#define rt_setjmp(jb) 0
+#endif
+
 typedef struct RtAct {
     uint32_t jb[6];
     RtFn fn;
@@ -119,7 +125,9 @@ extern const RtLabel rt_labels[];
 extern const uint32_t rt_label_count;
 extern const uint32_t rt_code_lo, rt_code_hi;
 
+#ifndef RT_PORTABLE
 int rt_setjmp(uint32_t* jb);
+#endif
 void rt_act_push(CPU* c, RtAct* a);
 void rt_act_pop(CPU* c, RtAct* a);
 

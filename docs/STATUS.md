@@ -17,6 +17,17 @@ The client (`NosCore.exe`, Delphi 7, md5 `51bbff3ec09d67c8425f88d74c6d5df5`) is 
 - Each run still stops now and then on a function nobody discovered. `recomp/iterate.ps1` seeds these automatically (28 so far, in `symbols/<md5>/recomp_seeds.txt`).
 - The differential tester passes 398 of 409 instruction shapes against Unicorn. The 11 remaining are junk decodes that never execute (`in`, `sldt`, `das`) and Unicorn's own x87 transcendental imprecision.
 
+### WebAssembly (portable host), as of 2026-10-27
+
+The same generated C, built with Emscripten and linked with `recomp/port/` (a host that implements Windows instead of calling it), **runs the client's main game loop headless under Node.** It goes through Delphi RTL and VCL init, the Gameforge stub (`Steam_*`, same answers as `NosCore.DeveloperTools.GfStub`), Direct3D 9 device creation on a null device, and `ShowWindow` of the main form, then presents frames continuously.
+
+- Build and run: `recomp/wasm/run_node.ps1` (incremental compile with `emcc`, link `nostale.js` + `nostale.wasm` of about 37 MB, run under Node). Logs go to `C:\tools\re\work\wasm\stderr.txt`; `PORT_TRACE=1` logs every API call.
+- Layout: the image is mapped at `0x400000` in linear memory, Emscripten's own memory sits above `GLOBAL_BASE` (`0x20000000`), and the guest stack and TEB sit at fixed guest addresses. Imports become trampolines at `0x0ff00000+` dispatching to `hle_*.c`.
+- Unimplemented APIs with a known stdcall argument count are soft stubs: logged once, return 0. Counts come from the SDK import libraries plus `EWDL.EWS`, which is actually D3DX9. `argc_table.c` is generated.
+- No `setjmp` in portable mode: Delphi's non-local except jumps propagate outward by returning (`guest_call` / `rt_call_host_raw`). Emscripten's setjmp transform takes forever on the huge generated functions.
+- VCL's runtime-written window thunks (`call` / `pop ecx` / `jmp StdWndProc`) are emulated.
+- Still missing: real rendering (WebGL/WebGPU), input, threads (`CreateThread` is logged and not run), networking (Winsock fails cleanly; it needs the WebSocket bridge), audio (Miles is silent), and a browser page.
+
 ## Pipeline
 
 1. `tools/decompile.ps1`: IDR (Delphi 7 knowledge base) → Dhrake → Ghidra (`-cspec borlanddelphi`). This produces names and the function list.

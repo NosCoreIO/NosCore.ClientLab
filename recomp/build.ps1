@@ -1,7 +1,8 @@
 param(
     [string]$Gen = 'C:\tools\re\work\recomp\gen',
     [string]$Out = 'C:\tools\re\work\recomp\out',
-    [switch]$Full
+    [switch]$Full,
+    [string]$Opt = '/Od'
 )
 $ErrorActionPreference = 'Stop'
 Get-Process NosTaleRecomp -ErrorAction SilentlyContinue | Stop-Process -Force
