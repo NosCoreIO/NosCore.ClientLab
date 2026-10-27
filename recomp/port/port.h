@@ -62,6 +62,7 @@ extern uint32_t port_guest_cmdline_addr;
 
 void hle_kernel32_register(void);
 void hle_user32_register(void);
+void hle_window_client_size(uint32_t hwnd, uint32_t* w, uint32_t* h);
 void hle_misc_register(void);
 void hle_gdi_register(void);
 void hle_d3d9_register(void);

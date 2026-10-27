@@ -111,8 +111,28 @@ static void u_DestroyWindow(CPU* c) {
     RET(1);
 }
 
+/* Windows reports moves and resizes as WM_WINDOWPOSCHANGING/CHANGED; DefWindowProc turns CHANGED into WM_MOVE + WM_SIZE.
+   VCL (and NosTale's widget handler hooked on the main form) only learns its size this way. */
+static void send_windowpos(CPU* c, uint32_t hwnd, uint32_t flags) {
+    Win* w = win_get(hwnd);
+    if (!w) return;
+    uint32_t wp = guest_alloc(28, 16);
+    M32(wp) = hwnd; M32(wp + 4) = 0; M32(wp + 8) = (uint32_t)w->x; M32(wp + 12) = (uint32_t)w->y;
+    M32(wp + 16) = (uint32_t)w->w; M32(wp + 20) = (uint32_t)w->h; M32(wp + 24) = flags;
+    send_message(c, hwnd, 0x0046, 0, wp);
+    send_message(c, hwnd, 0x0047, 0, wp);
+    guest_free(wp);
+}
+
 static void u_DefWindowProcA(CPU* c) {
-    uint32_t msg = ARG(1);
+    uint32_t hwnd = ARG(0), msg = ARG(1), lp = ARG(3);
+    if (msg == 0x0047 && lp) {
+        uint32_t x = M32(lp + 8), y = M32(lp + 12), cx = M32(lp + 16), cy = M32(lp + 20), f = M32(lp + 24);
+        if (!(f & 2)) send_message(c, hwnd, 0x0003, 0, (y & 0xffff) << 16 | (x & 0xffff));
+        if (!(f & 1)) send_message(c, hwnd, 0x0005, 0, (cy & 0xffff) << 16 | (cx & 0xffff));
+        RET(0);
+        return;
+    }
     RET(msg == 0x0081 ? 1 : 0);
 }
 
@@ -190,7 +210,11 @@ static void u_ShowWindow(CPU* c) {
     Win* w = win_get(ARG(0));
     int was = w ? w->visible : 0;
     if (w) w->visible = ARG(1) != 0;
-    if (w) port_log("ShowWindow %08x \"%s\" %u", ARG(0), w->text, ARG(1));
+    if (w) port_log("ShowWindow %08x \"%s\" %u (%dx%d)", ARG(0), w->text, ARG(1), w->w, w->h);
+    if (w && ARG(1) && !was) {
+        send_message(c, ARG(0), 0x0018, 1, 0);
+        send_windowpos(c, ARG(0), 0x40);
+    }
     RET(was);
 }
 static void u_IsWindowVisible(CPU* c) { Win* w = win_get(ARG(0)); RET(w && w->visible); }
@@ -221,11 +245,13 @@ static void u_SetWindowPos(CPU* c) {
     if (w && !(f & 1)) { w->w = (int)ARG(4); w->h = (int)ARG(5); }
     if (w && (f & 0x40)) w->visible = 1;
     if (w && (f & 0x80)) w->visible = 0;
+    if (w && (f & 3) != 3) send_windowpos(c, ARG(0), f);
     RET(1);
 }
 static void u_MoveWindow(CPU* c) {
     Win* w = win_get(ARG(0));
     if (w) { w->x = (int)ARG(1); w->y = (int)ARG(2); w->w = (int)ARG(3); w->h = (int)ARG(4); }
+    if (w) send_windowpos(c, ARG(0), 0);
     RET(1);
 }
 
@@ -450,5 +476,11 @@ static const Hle user32[] = {
     G(UnrealizeObject, 1, g_True), G(GetClipBox, 2, g_True), G(SetDIBColorTable, 4, g_Zero),
     G(GetDIBColorTable, 4, g_Zero), G(GdiFlush, 0, g_True),
 };
+
+void hle_window_client_size(uint32_t hwnd, uint32_t* w, uint32_t* h) {
+    Win* win = win_get(hwnd);
+    *w = win ? (uint32_t)win->w : 0;
+    *h = win ? (uint32_t)win->h : 0;
+}
 
 void hle_user32_register(void) { hle_register(user32, sizeof user32 / sizeof user32[0]); }

@@ -1,6 +1,7 @@
 /* Null Direct3D 9: a headless device that accepts every call. Resources get real memory so Lock/Unlock work;
    draws are dropped. COM objects live in guest memory; their vtables hold trampoline addresses. */
 #include "port.h"
+#include "render.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -109,13 +110,17 @@ static void d_GetDeviceCaps(CPU* c) { fill_caps(ARG(3)); RET(0); }
 static void d_GetAdapterMonitor(CPU* c) { RET(1); }
 static uint32_t the_device, the_d3d, backbuffer, depthbuffer;
 static void d_CreateDevice(CPU* c) {
-    uint32_t pp = ARG(5), w = M32(pp), h = M32(pp + 4);
+    uint32_t pp = ARG(5), w = M32(pp), h = M32(pp + 4), hwnd = M32(pp + 28) ? M32(pp + 28) : ARG(3);
+    if (!w || !h) hle_window_client_size(hwnd, &w, &h);
     if (!w) w = 1024;
     if (!h) h = 768;
+    M32(pp) = w;
+    M32(pp + 4) = h;
     port_log("IDirect3D9::CreateDevice %ux%u format %u", w, h, M32(pp + 8));
     the_device = make_obj(vt_device, O_DEVICE);
     backbuffer = make_surface(w, h, M32(pp + 8) ? M32(pp + 8) : 22, 0);
     depthbuffer = make_surface(w, h, 75, 0);
+    r_init(backbuffer);
     M32(ARG(6)) = the_device;
     RET(0);
 }
@@ -141,7 +146,19 @@ static void v_GetDisplayMode(CPU* c) { fill_mode(ARG(2)); RET(0); }
 static void v_GetCreationParameters(CPU* c) { memset(GPTR(ARG(1)), 0, 16); RET(0); }
 static void v_GetSwapChain(CPU* c) { M32(ARG(2)) = make_obj(vt_swapchain, O_SWAPCHAIN); RET(0); }
 static void v_GetNumberOfSwapChains(CPU* c) { RET(1); }
-static void v_Present(CPU* c) { if (++frames % 300 == 1) port_log("Present frame %u", frames); RET(0); }
+static void v_Present(CPU* c) {
+    static const char* shot_dir;
+    static int checked;
+    if (!checked) { checked = 1; shot_dir = getenv("PORT_SHOT_DIR"); }
+    if (++frames % 300 == 1) port_log("Present frame %u", frames);
+    if (shot_dir && (frames == 1 || frames % 600 == 0)) {
+        char path[400];
+        snprintf(path, sizeof path, "%s/frame_%06u.bmp", shot_dir, frames);
+        r_dump_bmp(backbuffer, path);
+        r_stats();
+    }
+    RET(0);
+}
 static void v_GetBackBuffer(CPU* c) { M32(backbuffer + 4)++; M32(ARG(4)) = backbuffer; RET(0); }
 static void v_GetRasterStatus(CPU* c) { memset(GPTR(ARG(2)), 0, 8); RET(0); }
 static void v_CreateTexture(CPU* c) { M32(ARG(7)) = make_texture(ARG(1), ARG(2), ARG(3), ARG(5)); RET(0); }
@@ -154,11 +171,6 @@ static void v_CreateDepthStencilSurface(CPU* c) { M32(ARG(7)) = make_surface(ARG
 static void v_CreateOffscreenPlainSurface(CPU* c) { M32(ARG(5)) = make_surface(ARG(1), ARG(2), ARG(3), 0); RET(0); }
 static void v_GetRenderTarget(CPU* c) { M32(backbuffer + 4)++; M32(ARG(2)) = backbuffer; RET(0); }
 static void v_GetDepthStencilSurface(CPU* c) { M32(depthbuffer + 4)++; M32(ARG(1)) = depthbuffer; RET(0); }
-static void v_GetTransform(CPU* c) {
-    memset(GPTR(ARG(2)), 0, 64);
-    for (int k = 0; k < 4; k++) MF32(ARG(2) + 20 * k) = 1.0f;
-    RET(0);
-}
 static void v_GetViewport(CPU* c) {
     uint32_t p = ARG(1);
     M32(p) = 0; M32(p + 4) = 0; M32(p + 8) = M32(backbuffer + 12); M32(p + 12) = M32(backbuffer + 16);
@@ -173,6 +185,30 @@ static void v_zero_struct2(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, 104); R
 static void v_new_other_out2(CPU* c) { M32(ARG(2)) = make_obj(vt_other, O_OTHER); RET(0); }
 static void v_new_other_out1(CPU* c) { M32(ARG(1)) = make_obj(vt_other, O_OTHER); RET(0); }
 static void v_ValidateDevice(CPU* c) { if (ARG(1)) M32(ARG(1)) = 1; RET(0); }
+
+/* ---- pipeline state and draws go to the software rasteriser ---- */
+
+static void v_SetFVF(CPU* c) { r_set_fvf(ARG(1)); RET(0); }
+static void v_SetVertexDeclaration(CPU* c) { RET(0); }
+static void v_SetTransform(CPU* c) { r_set_transform(ARG(1), ARG(2)); RET(0); }
+static void v_GetTransformR(CPU* c) { r_get_transform(ARG(1), ARG(2)); RET(0); }
+static void v_SetRenderState(CPU* c) { r_set_render_state(ARG(1), ARG(2)); RET(0); }
+static void v_GetRenderStateR(CPU* c) { M32(ARG(2)) = r_get_render_state(ARG(1)); RET(0); }
+static void v_SetTextureStageState(CPU* c) { r_set_tss(ARG(1), ARG(2), ARG(3)); RET(0); }
+static void v_GetTextureStageStateR(CPU* c) { M32(ARG(3)) = r_get_tss(ARG(1), ARG(2)); RET(0); }
+static void v_SetTexture(CPU* c) { r_set_texture(ARG(1), ARG(2)); RET(0); }
+static void v_GetTextureR(CPU* c) { M32(ARG(2)) = r_get_texture(ARG(1)); RET(0); }
+static void v_SetStreamSource(CPU* c) { if (ARG(1) == 0) r_set_stream(ARG(2), ARG(3), ARG(4)); RET(0); }
+static void v_SetIndices(CPU* c) { r_set_indices(ARG(1)); RET(0); }
+static void v_SetViewport(CPU* c) { r_set_viewport(ARG(1)); RET(0); }
+static void v_SetRenderTarget(CPU* c) { if (ARG(1) == 0) r_set_render_target(ARG(2) ? ARG(2) : backbuffer); RET(0); }
+static void v_Clear(CPU* c) { r_clear(ARG(1), ARG(2), ARG(3), ARG(4)); RET(0); }
+static void v_DrawPrimitive(CPU* c) { r_draw(ARG(1), ARG(2), ARG(3)); RET(0); }
+static void v_DrawPrimitiveUP(CPU* c) { r_draw_up(ARG(1), ARG(2), ARG(3), ARG(4)); RET(0); }
+static void v_DrawIndexedPrimitive(CPU* c) { r_draw_indexed(ARG(1), (int32_t)ARG(2), ARG(5), ARG(6)); RET(0); }
+static void v_DrawIndexedPrimitiveUP(CPU* c) { r_draw_indexed_up(ARG(1), ARG(4), ARG(5), ARG(6), ARG(7), ARG(8)); RET(0); }
+static void v_SetVertexShader(CPU* c) { RET(0); }
+static void v_SetPixelShader(CPU* c) { RET(0); }
 
 static const Method device_methods[] = {
     {"QueryInterface", 3, 0}, {"AddRef", 1, m_addref}, {"Release", 1, m_release},
@@ -189,28 +225,28 @@ static const Method device_methods[] = {
     {"CreateRenderTarget", 9, v_CreateRenderTarget}, {"CreateDepthStencilSurface", 9, v_CreateDepthStencilSurface},
     {"UpdateSurface", 5, 0}, {"UpdateTexture", 3, 0}, {"GetRenderTargetData", 3, 0}, {"GetFrontBufferData", 3, 0},
     {"StretchRect", 6, 0}, {"ColorFill", 4, 0}, {"CreateOffscreenPlainSurface", 7, v_CreateOffscreenPlainSurface},
-    {"SetRenderTarget", 3, 0}, {"GetRenderTarget", 3, v_GetRenderTarget}, {"SetDepthStencilSurface", 2, 0},
+    {"SetRenderTarget", 3, v_SetRenderTarget}, {"GetRenderTarget", 3, v_GetRenderTarget}, {"SetDepthStencilSurface", 2, 0},
     {"GetDepthStencilSurface", 2, v_GetDepthStencilSurface}, {"BeginScene", 1, 0}, {"EndScene", 1, 0},
-    {"Clear", 7, 0}, {"SetTransform", 3, 0}, {"GetTransform", 3, v_GetTransform}, {"MultiplyTransform", 3, 0},
-    {"SetViewport", 2, 0}, {"GetViewport", 2, v_GetViewport}, {"SetMaterial", 2, 0}, {"GetMaterial", 2, v_zero_struct},
+    {"Clear", 7, v_Clear}, {"SetTransform", 3, v_SetTransform}, {"GetTransform", 3, v_GetTransformR}, {"MultiplyTransform", 3, 0},
+    {"SetViewport", 2, v_SetViewport}, {"GetViewport", 2, v_GetViewport}, {"SetMaterial", 2, 0}, {"GetMaterial", 2, v_zero_struct},
     {"SetLight", 3, 0}, {"GetLight", 3, v_zero_struct2}, {"LightEnable", 3, 0}, {"GetLightEnable", 3, v_zero_out2},
-    {"SetClipPlane", 3, 0}, {"GetClipPlane", 3, 0}, {"SetRenderState", 3, 0}, {"GetRenderState", 3, v_zero_out2},
+    {"SetClipPlane", 3, 0}, {"GetClipPlane", 3, 0}, {"SetRenderState", 3, v_SetRenderState}, {"GetRenderState", 3, v_GetRenderStateR},
     {"CreateStateBlock", 3, v_new_other_out2}, {"BeginStateBlock", 1, 0}, {"EndStateBlock", 2, v_new_other_out1},
-    {"SetClipStatus", 2, 0}, {"GetClipStatus", 2, 0}, {"GetTexture", 3, v_zero_out2}, {"SetTexture", 3, 0},
-    {"GetTextureStageState", 4, v_zero_out3}, {"SetTextureStageState", 4, 0}, {"GetSamplerState", 4, v_zero_out3},
+    {"SetClipStatus", 2, 0}, {"GetClipStatus", 2, 0}, {"GetTexture", 3, v_GetTextureR}, {"SetTexture", 3, v_SetTexture},
+    {"GetTextureStageState", 4, v_GetTextureStageStateR}, {"SetTextureStageState", 4, v_SetTextureStageState}, {"GetSamplerState", 4, v_zero_out3},
     {"SetSamplerState", 4, 0}, {"ValidateDevice", 2, v_ValidateDevice}, {"SetPaletteEntries", 3, 0},
     {"GetPaletteEntries", 3, 0}, {"SetCurrentTexturePalette", 2, 0}, {"GetCurrentTexturePalette", 2, v_zero_out1},
     {"SetScissorRect", 2, 0}, {"GetScissorRect", 2, 0}, {"SetSoftwareVertexProcessing", 2, 0},
     {"GetSoftwareVertexProcessing", 1, 0}, {"SetNPatchMode", 2, 0}, {"GetNPatchMode", 1, 0},
-    {"DrawPrimitive", 4, 0}, {"DrawIndexedPrimitive", 7, 0}, {"DrawPrimitiveUP", 5, 0},
-    {"DrawIndexedPrimitiveUP", 9, 0}, {"ProcessVertices", 7, 0}, {"CreateVertexDeclaration", 3, v_new_other_out2},
-    {"SetVertexDeclaration", 2, 0}, {"GetVertexDeclaration", 2, v_zero_out1}, {"SetFVF", 2, 0},
-    {"GetFVF", 2, v_zero_out1}, {"CreateVertexShader", 3, v_new_other_out2}, {"SetVertexShader", 2, 0},
+    {"DrawPrimitive", 4, v_DrawPrimitive}, {"DrawIndexedPrimitive", 7, v_DrawIndexedPrimitive}, {"DrawPrimitiveUP", 5, v_DrawPrimitiveUP},
+    {"DrawIndexedPrimitiveUP", 9, v_DrawIndexedPrimitiveUP}, {"ProcessVertices", 7, 0}, {"CreateVertexDeclaration", 3, v_new_other_out2},
+    {"SetVertexDeclaration", 2, v_SetVertexDeclaration}, {"GetVertexDeclaration", 2, v_zero_out1}, {"SetFVF", 2, v_SetFVF},
+    {"GetFVF", 2, v_zero_out1}, {"CreateVertexShader", 3, v_new_other_out2}, {"SetVertexShader", 2, v_SetVertexShader},
     {"GetVertexShader", 2, v_zero_out1}, {"SetVertexShaderConstantF", 4, 0}, {"GetVertexShaderConstantF", 4, 0},
     {"SetVertexShaderConstantI", 4, 0}, {"GetVertexShaderConstantI", 4, 0}, {"SetVertexShaderConstantB", 4, 0},
-    {"GetVertexShaderConstantB", 4, 0}, {"SetStreamSource", 5, 0}, {"GetStreamSource", 5, v_zero_out2},
-    {"SetStreamSourceFreq", 3, 0}, {"GetStreamSourceFreq", 3, v_zero_out2}, {"SetIndices", 2, 0},
-    {"GetIndices", 2, v_zero_out1}, {"CreatePixelShader", 3, v_new_other_out2}, {"SetPixelShader", 2, 0},
+    {"GetVertexShaderConstantB", 4, 0}, {"SetStreamSource", 5, v_SetStreamSource}, {"GetStreamSource", 5, v_zero_out2},
+    {"SetStreamSourceFreq", 3, 0}, {"GetStreamSourceFreq", 3, v_zero_out2}, {"SetIndices", 2, v_SetIndices},
+    {"GetIndices", 2, v_zero_out1}, {"CreatePixelShader", 3, v_new_other_out2}, {"SetPixelShader", 2, v_SetPixelShader},
     {"GetPixelShader", 2, v_zero_out1}, {"SetPixelShaderConstantF", 4, 0}, {"GetPixelShaderConstantF", 4, 0},
     {"SetPixelShaderConstantI", 4, 0}, {"GetPixelShaderConstantI", 4, 0}, {"SetPixelShaderConstantB", 4, 0},
     {"GetPixelShaderConstantB", 4, 0}, {"DrawRectPatch", 4, 0}, {"DrawTriPatch", 4, 0}, {"DeletePatch", 2, 0},
@@ -301,6 +337,8 @@ static void x_MatrixOrthoRH(CPU* c) {
     float w, h, zn, zf;
     uint32_t a1 = ARG(1), a2 = ARG(2), a3 = ARG(3), a4 = ARG(4);
     memcpy(&w, &a1, 4); memcpy(&h, &a2, 4); memcpy(&zn, &a3, 4); memcpy(&zf, &a4, 4);
+    static int logged;
+    if (logged++ < 3) port_log("D3DXMatrixOrthoRH w=%g h=%g zn=%g zf=%g (from %08x)", w, h, zn, zf, M32(c->esp));
     memset(GPTR(m), 0, 64);
     MF32(m) = 2 / w; MF32(m + 20) = 2 / h; MF32(m + 40) = 1 / (zn - zf); MF32(m + 56) = zn / (zn - zf); MF32(m + 60) = 1.0f;
     RET(m);
@@ -318,12 +356,55 @@ static void ms_LoadMatrix(CPU* c) { memcpy(GPTR(ms_top(THIS)), GPTR(ARG(1)), 64)
 static void ms_MultMatrix(CPU* c) { mat_mul(ms_top(THIS), ms_top(THIS), ARG(1)); RET(0); }
 static void ms_MultMatrixLocal(CPU* c) { mat_mul(ms_top(THIS), ARG(1), ms_top(THIS)); RET(0); }
 static void ms_GetTop(CPU* c) { RET(ms_top(THIS)); }
+
+static float fa(uint32_t v) { float f; memcpy(&f, &v, 4); return f; }
+static void mat_set(float* m, float a, float b, float cc, float d, float e, float f, float g, float h, float i, float j, float k,
+                    float l, float mm, float n, float o, float p) {
+    float t[16] = {a, b, cc, d, e, f, g, h, i, j, k, l, mm, n, o, p};
+    memcpy(m, t, 64);
+}
+/* D3DX stack semantics: Op multiplies the top on the right (M = M * X), OpLocal on the left (M = X * M). */
+static void ms_apply(CPU* c, const float* x, int local) {
+    uint32_t tmp = guest_alloc(64, 16), top = ms_top(THIS);
+    memcpy(GPTR(tmp), x, 64);
+    if (local) mat_mul(top, tmp, top);
+    else mat_mul(top, top, tmp);
+    guest_free(tmp);
+    RET(0);
+}
+static void translation(float* m, float x, float y, float z) { mat_set(m, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1); }
+static void scaling(float* m, float x, float y, float z) { mat_set(m, x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1); }
+static void rotation_axis(float* m, float x, float y, float z, float a) {
+    float len = sqrtf(x * x + y * y + z * z);
+    if (len > 0) { x /= len; y /= len; z /= len; }
+    float s = sinf(a), co = cosf(a), t = 1 - co;
+    mat_set(m, t * x * x + co, t * x * y + s * z, t * x * z - s * y, 0, t * x * y - s * z, t * y * y + co, t * y * z + s * x, 0,
+            t * x * z + s * y, t * y * z - s * x, t * z * z + co, 0, 0, 0, 0, 1);
+}
+static void rotation_ypr(float* m, float yaw, float pitch, float roll) {
+    float a[16], b[16], r[16], t[16];
+    rotation_axis(a, 0, 0, 1, roll);
+    rotation_axis(b, 1, 0, 0, pitch);
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) { float s = 0; for (int k = 0; k < 4; k++) s += a[4 * i + k] * b[4 * k + j]; t[4 * i + j] = s; }
+    rotation_axis(r, 0, 1, 0, yaw);
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) { float s = 0; for (int k = 0; k < 4; k++) s += t[4 * i + k] * r[4 * k + j]; m[4 * i + j] = s; }
+}
+static void ms_Translate(CPU* c) { float m[16]; translation(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 0); }
+static void ms_TranslateLocal(CPU* c) { float m[16]; translation(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 1); }
+static void ms_Scale(CPU* c) { float m[16]; scaling(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 0); }
+static void ms_ScaleLocal(CPU* c) { float m[16]; scaling(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 1); }
+static void ms_RotateAxis(CPU* c) { float m[16]; uint32_t v = ARG(1); rotation_axis(m, MF32(v), MF32(v + 4), MF32(v + 8), fa(ARG(2))); ms_apply(c, m, 0); }
+static void ms_RotateAxisLocal(CPU* c) { float m[16]; uint32_t v = ARG(1); rotation_axis(m, MF32(v), MF32(v + 4), MF32(v + 8), fa(ARG(2))); ms_apply(c, m, 1); }
+static void ms_RotateYawPitchRoll(CPU* c) { float m[16]; rotation_ypr(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 0); }
+static void ms_RotateYawPitchRollLocal(CPU* c) { float m[16]; rotation_ypr(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 1); }
 static const Method matstack_methods[] = {
     {"QueryInterface", 3, 0}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Pop", 1, ms_Pop},
     {"Push", 1, ms_Push}, {"LoadIdentity", 1, ms_LoadIdentity}, {"LoadMatrix", 2, ms_LoadMatrix},
-    {"MultMatrix", 2, ms_MultMatrix}, {"MultMatrixLocal", 2, ms_MultMatrixLocal}, {"RotateAxis", 3, 0},
-    {"RotateAxisLocal", 3, 0}, {"RotateYawPitchRoll", 4, 0}, {"RotateYawPitchRollLocal", 4, 0},
-    {"Scale", 4, 0}, {"ScaleLocal", 4, 0}, {"Translate", 4, 0}, {"TranslateLocal", 4, 0}, {"GetTop", 1, ms_GetTop},
+    {"MultMatrix", 2, ms_MultMatrix}, {"MultMatrixLocal", 2, ms_MultMatrixLocal}, {"RotateAxis", 3, ms_RotateAxis},
+    {"RotateAxisLocal", 3, ms_RotateAxisLocal}, {"RotateYawPitchRoll", 4, ms_RotateYawPitchRoll}, {"RotateYawPitchRollLocal", 4, ms_RotateYawPitchRollLocal},
+    {"Scale", 4, ms_Scale}, {"ScaleLocal", 4, ms_ScaleLocal}, {"Translate", 4, ms_Translate}, {"TranslateLocal", 4, ms_TranslateLocal}, {"GetTop", 1, ms_GetTop},
 };
 static void x_CreateMatrixStack(CPU* c) {
     uint32_t s = make_obj(vt_matstack, O_MATSTACK);

@@ -1,0 +1,387 @@
+/* Software rasteriser behind the null Direct3D 9 device: enough of the fixed-function pipeline for NosTale's sprites
+   (FVF vertices, world/view/projection + texture matrix, TFACTOR/diffuse modulation, alpha test and blending). */
+#include "render.h"
+#include <math.h>
+#include <stdlib.h>
+
+/* surface objects (see hle_d3d9.c): +12 width +16 height +20 format +28 bits +32 pitch; texture +24 levels +40 levels[] */
+#define SW(s) M32((s) + 12)
+#define SH(s) M32((s) + 16)
+#define SFMT(s) M32((s) + 20)
+#define SBITS(s) M32((s) + 28)
+#define SPITCH(s) M32((s) + 32)
+
+typedef struct { float m[16]; } Mat;
+
+static struct {
+    Mat world, view, proj, tex[8];
+    uint32_t rs[256], tss[8][33];
+    uint32_t tex_obj[8];
+    uint32_t vb, vb_offset, vb_stride, ib, fvf;
+    uint32_t vp_x, vp_y, vp_w, vp_h;
+    uint32_t target;
+    int vp_set;
+} R;
+
+static void identity(Mat* m) { memset(m, 0, sizeof *m); m->m[0] = m->m[5] = m->m[10] = m->m[15] = 1; }
+
+void r_init(uint32_t backbuffer) {
+    identity(&R.world); identity(&R.view); identity(&R.proj);
+    for (int k = 0; k < 8; k++) identity(&R.tex[k]);
+    R.rs[7] = 1;          /* ZENABLE */
+    R.rs[19] = 2;         /* SRCBLEND ONE */
+    R.rs[20] = 1;         /* DESTBLEND ZERO */
+    R.rs[25] = 8;         /* ALPHAFUNC ALWAYS */
+    R.rs[60] = 0xffffffffu;
+    for (int s = 0; s < 8; s++) {
+        R.tss[s][1] = s ? 1 : 4; R.tss[s][2] = 2; R.tss[s][3] = 1;
+        R.tss[s][4] = s ? 1 : 2; R.tss[s][5] = 2; R.tss[s][6] = 1;
+    }
+    R.target = backbuffer;
+}
+
+void r_set_render_target(uint32_t surface) { R.target = surface; R.vp_set = 0; }
+void r_set_transform(uint32_t type, uint32_t addr) {
+    Mat* m = type == 256 ? &R.world : type == 2 ? &R.view : type == 3 ? &R.proj : (type >= 16 && type < 24) ? &R.tex[type - 16] : 0;
+    if (m) memcpy(m->m, GPTR(addr), 64);
+}
+void r_get_transform(uint32_t type, uint32_t addr) {
+    Mat* m = type == 256 ? &R.world : type == 2 ? &R.view : type == 3 ? &R.proj : (type >= 16 && type < 24) ? &R.tex[type - 16] : 0;
+    if (m) memcpy(GPTR(addr), m->m, 64);
+    else { Mat i; identity(&i); memcpy(GPTR(addr), i.m, 64); }
+}
+void r_set_render_state(uint32_t s, uint32_t v) { if (s < 256) R.rs[s] = v; }
+uint32_t r_get_render_state(uint32_t s) { return s < 256 ? R.rs[s] : 0; }
+void r_set_tss(uint32_t st, uint32_t t, uint32_t v) { if (st < 8 && t < 33) R.tss[st][t] = v; }
+uint32_t r_get_tss(uint32_t st, uint32_t t) { return st < 8 && t < 33 ? R.tss[st][t] : 0; }
+void r_set_texture(uint32_t st, uint32_t tex) { if (st < 8) R.tex_obj[st] = tex; }
+uint32_t r_get_texture(uint32_t st) { return st < 8 ? R.tex_obj[st] : 0; }
+void r_set_stream(uint32_t vb, uint32_t offset, uint32_t stride) { R.vb = vb; R.vb_offset = offset; R.vb_stride = stride; }
+void r_set_indices(uint32_t ib) { R.ib = ib; }
+void r_set_fvf(uint32_t fvf) { R.fvf = fvf; }
+void r_set_viewport(uint32_t vp) { R.vp_x = M32(vp); R.vp_y = M32(vp + 4); R.vp_w = M32(vp + 8); R.vp_h = M32(vp + 12); R.vp_set = 1; }
+
+/* ---- pixels ---- */
+
+static uint32_t expand(uint32_t v, int bits) { return bits == 0 ? 255 : (v * 255 + ((1u << bits) - 1) / 2) / ((1u << bits) - 1); }
+
+static uint32_t rgb565(uint32_t v) { return 0xff000000u | expand((v >> 11) & 31, 5) << 16 | expand((v >> 5) & 63, 6) << 8 | expand(v & 31, 5); }
+
+static uint32_t dxt_texel(uint32_t s, uint32_t x, uint32_t y, uint32_t fmt) {
+    uint32_t bw = (SW(s) + 3) / 4, bsize = fmt == 0x31545844u ? 8 : 16;
+    uint32_t blk = SBITS(s) + ((y / 4) * bw + x / 4) * bsize, px = x & 3, py = y & 3;
+    uint32_t cblk = fmt == 0x31545844u ? blk : blk + 8, alpha = 255;
+    uint32_t c0 = M16(cblk), c1 = M16(cblk + 2), idx = (M32(cblk + 4) >> (2 * (py * 4 + px))) & 3;
+    uint32_t a = rgb565(c0), b = rgb565(c1), col;
+#define MIX(p, q, wp, wq, d) ((((((p) >> 16) & 255) * (wp) + (((q) >> 16) & 255) * (wq)) / (d)) << 16 | (((((p) >> 8) & 255) * (wp) + (((q) >> 8) & 255) * (wq)) / (d)) << 8 | ((((p) & 255) * (wp) + ((q) & 255) * (wq)) / (d)))
+    if (idx == 0) col = a & 0xffffff;
+    else if (idx == 1) col = b & 0xffffff;
+    else if (c0 > c1 || fmt != 0x31545844u) col = idx == 2 ? MIX(a, b, 2, 1, 3) : MIX(a, b, 1, 2, 3);
+    else if (idx == 2) col = MIX(a, b, 1, 1, 2);
+    else { col = 0; alpha = 0; }
+    if (fmt == 0x33545844u) alpha = expand((M16(blk + 2 * py) >> (4 * px)) & 15, 4);
+    else if (fmt == 0x35545844u) {
+        uint32_t a0 = M8(blk), a1 = M8(blk + 1);
+        uint64_t bits = 0;
+        for (int k = 0; k < 6; k++) bits |= (uint64_t)M8(blk + 2 + k) << (8 * k);
+        uint32_t ai = (uint32_t)(bits >> (3 * (py * 4 + px))) & 7;
+        if (ai == 0) alpha = a0;
+        else if (ai == 1) alpha = a1;
+        else if (a0 > a1) alpha = ((8 - ai) * a0 + (ai - 1) * a1) / 7;
+        else alpha = ai == 6 ? 0 : ai == 7 ? 255 : ((6 - ai) * a0 + (ai - 1) * a1) / 5;
+    }
+    return alpha << 24 | col;
+}
+
+static uint32_t texel(uint32_t s, uint32_t x, uint32_t y) {
+    uint32_t fmt = SFMT(s), row = SBITS(s) + y * SPITCH(s), v;
+    switch (fmt) {
+    case 21: return M32(row + 4 * x);
+    case 22: return M32(row + 4 * x) | 0xff000000u;
+    case 26: v = M16(row + 2 * x); return expand(v >> 12, 4) << 24 | expand((v >> 8) & 15, 4) << 16 | expand((v >> 4) & 15, 4) << 8 | expand(v & 15, 4);
+    case 25: v = M16(row + 2 * x); return (v & 0x8000 ? 0xff000000u : 0) | expand((v >> 10) & 31, 5) << 16 | expand((v >> 5) & 31, 5) << 8 | expand(v & 31, 5);
+    case 24: v = M16(row + 2 * x); return 0xff000000u | expand((v >> 10) & 31, 5) << 16 | expand((v >> 5) & 31, 5) << 8 | expand(v & 31, 5);
+    case 23: return rgb565(M16(row + 2 * x));
+    case 28: return (uint32_t)M8(row + x) << 24 | 0xffffff;
+    case 50: v = M8(row + x); return 0xff000000u | v << 16 | v << 8 | v;
+    case 51: v = M16(row + 2 * x); return (v >> 8) << 24 | (v & 255) << 16 | (v & 255) << 8 | (v & 255);
+    case 0x31545844u: case 0x33545844u: case 0x35545844u: return dxt_texel(s, x, y, fmt);
+    default: return 0xffff00ffu;
+    }
+}
+
+static uint32_t sample(uint32_t tex, float u, float v) {
+    if (!tex) return 0xffffffffu;
+    uint32_t s = M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;  /* texture -> level 0 surface */
+    int32_t w = (int32_t)SW(s), h = (int32_t)SH(s);
+    if (w <= 0 || h <= 0 || !SBITS(s)) return 0xffffffffu;
+    int32_t x = (int32_t)floorf(u * w), y = (int32_t)floorf(v * h);
+    x %= w; if (x < 0) x += w;
+    y %= h; if (y < 0) y += h;
+    return texel(s, (uint32_t)x, (uint32_t)y);
+}
+
+static uint32_t mul_color(uint32_t a, uint32_t b) {
+    uint32_t r = 0;
+    for (int k = 0; k < 32; k += 8) r |= (((a >> k) & 255) * ((b >> k) & 255) + 127) / 255 << k;
+    return r;
+}
+static uint32_t add_color(uint32_t a, uint32_t b) {
+    uint32_t r = 0;
+    for (int k = 0; k < 32; k += 8) { uint32_t v = ((a >> k) & 255) + ((b >> k) & 255); r |= (v > 255 ? 255 : v) << k; }
+    return r;
+}
+
+static uint32_t stage_arg(uint32_t arg, uint32_t tex, uint32_t diffuse, uint32_t current) {
+    uint32_t v;
+    switch (arg & 0xf) {
+    case 0: v = diffuse; break;
+    case 1: v = current; break;
+    case 2: v = tex; break;
+    case 3: v = R.rs[60]; break;
+    default: v = 0xffffffffu; break;
+    }
+    if (arg & 0x10) v = ~v;
+    if (arg & 0x20) { uint32_t a = v >> 24; v = a << 24 | a << 16 | a << 8 | a; }
+    return v;
+}
+static uint32_t stage_op(uint32_t op, uint32_t a1, uint32_t a2, uint32_t current) {
+    switch (op) {
+    case 1: return current;
+    case 2: return a1;
+    case 3: return a2;
+    case 4: return mul_color(a1, a2);
+    case 5: return add_color(mul_color(a1, a2), mul_color(a1, a2));
+    case 7: return add_color(a1, a2);
+    default: return mul_color(a1, a2);
+    }
+}
+
+static uint32_t shade(uint32_t diffuse, float u, float v) {
+    uint32_t tex = R.tex_obj[0] ? sample(R.tex_obj[0], u, v) : 0xffffffffu;
+    uint32_t color, alpha;
+    color = stage_op(R.tss[0][1], stage_arg(R.tss[0][2], tex, diffuse, diffuse), stage_arg(R.tss[0][3], tex, diffuse, diffuse), diffuse);
+    alpha = stage_op(R.tss[0][4], stage_arg(R.tss[0][5], tex, diffuse, diffuse), stage_arg(R.tss[0][6], tex, diffuse, diffuse), diffuse);
+    return (alpha & 0xff000000u) | (color & 0xffffff);
+}
+
+static int alpha_pass(uint32_t a) {
+    if (!R.rs[15]) return 1;
+    uint32_t ref = R.rs[24] & 255;
+    switch (R.rs[25]) {
+    case 1: return 0;
+    case 2: return a < ref;
+    case 3: return a == ref;
+    case 4: return a <= ref;
+    case 5: return a > ref;
+    case 6: return a != ref;
+    case 7: return a >= ref;
+    default: return 1;
+    }
+}
+
+static uint32_t blend_factor(uint32_t f, uint32_t src, uint32_t dst, int ch) {
+    uint32_t sa = src >> 24, da = dst >> 24, s = (src >> ch) & 255, d = (dst >> ch) & 255;
+    switch (f) {
+    case 1: return 0;
+    case 2: return 255;
+    case 3: return s;
+    case 4: return 255 - s;
+    case 5: return sa;
+    case 6: return 255 - sa;
+    case 7: return da;
+    case 8: return 255 - da;
+    case 9: return d;
+    case 10: return 255 - d;
+    default: return 255;
+    }
+}
+
+static struct { uint32_t draws, tris, covered, written, skipped; } S;
+
+static void put(uint32_t x, uint32_t y, uint32_t src) {
+    uint32_t t = R.target, addr = SBITS(t) + y * SPITCH(t) + 4 * x;
+    S.covered++;
+    if (!alpha_pass(src >> 24)) return;
+    S.written++;
+    if (!R.rs[27]) { M32(addr) = src; return; }
+    uint32_t dst = M32(addr), out = 0;
+    for (int ch = 0; ch < 32; ch += 8) {
+        uint32_t sf = blend_factor(R.rs[19], src, dst, ch), df = blend_factor(R.rs[20], src, dst, ch);
+        uint32_t v = (((src >> ch) & 255) * sf + ((dst >> ch) & 255) * df + 127) / 255;
+        out |= (v > 255 ? 255 : v) << ch;
+    }
+    M32(addr) = out;
+}
+
+/* ---- vertices ---- */
+
+typedef struct { float x, y, z, w, u, v; uint32_t diffuse; } Vtx;
+
+static void xform(const Mat* m, const float in[4], float out[4]) {
+    for (int j = 0; j < 4; j++) out[j] = in[0] * m->m[j] + in[1] * m->m[4 + j] + in[2] * m->m[8 + j] + in[3] * m->m[12 + j];
+}
+
+static void fetch(uint32_t p, Vtx* o) {
+    uint32_t fvf = R.fvf, off = 0, pos = fvf & 0xe;
+    float in[4] = {MF32(p), MF32(p + 4), MF32(p + 8), 1}, t[4], c[4];
+    off = pos == 4 ? 16 : 12;
+    if (pos >= 6 && pos <= 0xe) off += 4 * ((pos - 4) / 2);
+    if (fvf & 0x10) off += 12;
+    if (fvf & 0x20) off += 4;
+    o->diffuse = 0xffffffffu;
+    if (fvf & 0x40) { o->diffuse = M32(p + off); off += 4; }
+    if (fvf & 0x80) off += 4;
+    uint32_t tsize = (fvf >> 16) & 3;
+    float tc[4] = {0, 0, 0, 1};
+    if (((fvf >> 8) & 15) > 0) {
+        int n = tsize == 0 ? 2 : tsize == 1 ? 3 : tsize == 2 ? 4 : 1;
+        for (int k = 0; k < n; k++) tc[k] = MF32(p + off + 4 * k);
+        if (n == 2) tc[2] = 1, tc[3] = 0;
+    }
+    uint32_t ttff = R.tss[0][24];
+    if (ttff & 7) {
+        float r[4];
+        xform(&R.tex[0], tc, r);
+        if (ttff & 256) { o->u = r[0] / r[(ttff & 7) - 1]; o->v = r[1] / r[(ttff & 7) - 1]; }
+        else { o->u = r[0]; o->v = r[1]; }
+    } else {
+        o->u = tc[0];
+        o->v = tc[1];
+    }
+    uint32_t vw = R.vp_set ? R.vp_w : SW(R.target), vh = R.vp_set ? R.vp_h : SH(R.target), vx = R.vp_set ? R.vp_x : 0, vy = R.vp_set ? R.vp_y : 0;
+    if (pos == 4) { o->x = in[0]; o->y = in[1]; o->z = in[2]; o->w = 1; return; }
+    xform(&R.world, in, t);
+    xform(&R.view, t, c);
+    xform(&R.proj, c, t);
+    float w = t[3] != 0 ? t[3] : 1;
+    o->x = vx + (t[0] / w + 1) * 0.5f * vw;
+    o->y = vy + (1 - t[1] / w) * 0.5f * vh;
+    o->z = t[2] / w;
+    o->w = w;
+}
+
+static void triangle(const Vtx* a, const Vtx* b, const Vtx* c) {
+    S.tris++;
+    float area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
+    if (fabsf(area) < 1e-6f) return;
+    int32_t tw = (int32_t)SW(R.target), th = (int32_t)SH(R.target);
+    int32_t x0 = (int32_t)floorf(fminf(a->x, fminf(b->x, c->x))), x1 = (int32_t)ceilf(fmaxf(a->x, fmaxf(b->x, c->x)));
+    int32_t y0 = (int32_t)floorf(fminf(a->y, fminf(b->y, c->y))), y1 = (int32_t)ceilf(fmaxf(a->y, fmaxf(b->y, c->y)));
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > tw) x1 = tw;
+    if (y1 > th) y1 = th;
+    int flat = (a->diffuse == b->diffuse && b->diffuse == c->diffuse);
+    for (int32_t y = y0; y < y1; y++)
+        for (int32_t x = x0; x < x1; x++) {
+            float px = x + 0.5f, py = y + 0.5f;
+            float w0 = ((b->x - px) * (c->y - py) - (b->y - py) * (c->x - px)) / area;
+            float w1 = ((c->x - px) * (a->y - py) - (c->y - py) * (a->x - px)) / area;
+            float w2 = 1 - w0 - w1;
+            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+            float u = w0 * a->u + w1 * b->u + w2 * c->u, v = w0 * a->v + w1 * b->v + w2 * c->v;
+            uint32_t d = a->diffuse;
+            if (!flat) {
+                d = 0;
+                for (int ch = 0; ch < 32; ch += 8) {
+                    float f = w0 * ((a->diffuse >> ch) & 255) + w1 * ((b->diffuse >> ch) & 255) + w2 * ((c->diffuse >> ch) & 255);
+                    d |= (uint32_t)(f + 0.5f) << ch;
+                }
+            }
+            put((uint32_t)x, (uint32_t)y, shade(d, u, v));
+        }
+}
+
+static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
+    S.draws++;
+    if (!R.target || !SBITS(R.target) || (SFMT(R.target) != 21 && SFMT(R.target) != 22)) { S.skipped++; return; }
+    if (prim == 4) for (uint32_t k = 0; k < count && 3 * k + 2 < n; k++) triangle(&v[3 * k], &v[3 * k + 1], &v[3 * k + 2]);
+    else if (prim == 5) for (uint32_t k = 0; k < count && k + 2 < n; k++) triangle(&v[k], &v[k + 1], &v[k + 2]);
+    else if (prim == 6) for (uint32_t k = 0; k < count && k + 2 < n; k++) triangle(&v[0], &v[k + 1], &v[k + 2]);
+}
+
+static uint32_t vertex_count(uint32_t prim, uint32_t count) { return prim == 4 ? 3 * count : prim == 5 || prim == 6 ? count + 2 : 0; }
+
+static Vtx vbuf[65536];
+
+void r_draw(uint32_t prim, uint32_t start, uint32_t count) {
+    uint32_t n = vertex_count(prim, count);
+    if (!R.vb || !n || n > 65536 || !R.vb_stride) return;
+    uint32_t base = M32(R.vb + 28) + R.vb_offset;
+    for (uint32_t k = 0; k < n; k++) fetch(base + (start + k) * R.vb_stride, &vbuf[k]);
+    draw_list(prim, count, vbuf, n);
+}
+
+void r_draw_up(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride) {
+    uint32_t n = vertex_count(prim, count);
+    if (!n || n > 65536) return;
+    for (uint32_t k = 0; k < n; k++) fetch(data + k * stride, &vbuf[k]);
+    draw_list(prim, count, vbuf, n);
+}
+
+void r_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t start_index, uint32_t count) {
+    uint32_t n = vertex_count(prim, count);
+    if (!R.vb || !R.ib || !n || n > 65536) return;
+    uint32_t vb = M32(R.vb + 28) + R.vb_offset, ib = M32(R.ib + 28), idx32 = M32(R.ib + 20) == 102;
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t i = idx32 ? M32(ib + 4 * (start_index + k)) : M16(ib + 2 * (start_index + k));
+        fetch(vb + (uint32_t)((int32_t)i + base_vertex) * R.vb_stride, &vbuf[k]);
+    }
+    draw_list(prim, count, vbuf, n);
+}
+
+void r_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t idx_fmt, uint32_t data, uint32_t stride) {
+    uint32_t n = vertex_count(prim, count);
+    if (!n || n > 65536) return;
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t i = idx_fmt == 102 ? M32(indices + 4 * k) : M16(indices + 2 * k);
+        fetch(data + i * stride, &vbuf[k]);
+    }
+    draw_list(prim, count, vbuf, n);
+}
+
+void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color) {
+    uint32_t t = R.target;
+    if (!(flags & 1) || !t || !SBITS(t) || (SFMT(t) != 21 && SFMT(t) != 22)) return;
+    for (uint32_t y = 0; y < SH(t); y++)
+        for (uint32_t x = 0; x < SW(t); x++) M32(SBITS(t) + y * SPITCH(t) + 4 * x) = color;
+    (void)count; (void)rects;
+}
+
+void r_dump_bmp(uint32_t surface, const char* path) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    uint32_t w = SW(surface), h = SH(surface);
+    uint8_t hdr[54] = {'B', 'M'};
+    uint32_t size = 54 + w * h * 4;
+    memcpy(hdr + 2, &size, 4);
+    hdr[10] = 54; hdr[14] = 40;
+    int32_t ih = -(int32_t)h;
+    memcpy(hdr + 18, &w, 4); memcpy(hdr + 22, &ih, 4);
+    hdr[26] = 1; hdr[28] = 32;
+    fwrite(hdr, 1, 54, f);
+    for (uint32_t y = 0; y < h; y++) fwrite(GPTR(SBITS(surface) + y * SPITCH(surface)), 4, w, f);
+    fclose(f);
+}
+
+void r_stats(void) {
+    port_log("render: %u draws (%u skipped), %u triangles, %u pixels covered, %u written; target %ux%u fmt %u; sample v0 x=%.1f y=%.1f u=%.3f v=%.3f",
+             S.draws, S.skipped, S.tris, S.covered, S.written, R.target ? SW(R.target) : 0, R.target ? SH(R.target) : 0,
+             R.target ? SFMT(R.target) : 0, vbuf[0].x, vbuf[0].y, vbuf[0].u, vbuf[0].v);
+    static int dumped;
+    if (!dumped++) {
+        const Mat* ms[4] = {&R.world, &R.view, &R.proj, &R.tex[0]};
+        const char* names[4] = {"world", "view", "proj", "tex0"};
+        for (int k = 0; k < 4; k++)
+            port_log("  %s: %g %g %g %g | %g %g %g %g | %g %g %g %g | %g %g %g %g", names[k], ms[k]->m[0], ms[k]->m[1], ms[k]->m[2],
+                     ms[k]->m[3], ms[k]->m[4], ms[k]->m[5], ms[k]->m[6], ms[k]->m[7], ms[k]->m[8], ms[k]->m[9], ms[k]->m[10],
+                     ms[k]->m[11], ms[k]->m[12], ms[k]->m[13], ms[k]->m[14], ms[k]->m[15]);
+        if (R.vb) {
+            uint32_t p = M32(R.vb + 28) + R.vb_offset;
+            port_log("  vb %08x stride %u fvf %08x first vertex: %g %g %g | %g %g %g | %g %g %g", R.vb, R.vb_stride, R.fvf,
+                     MF32(p), MF32(p + 4), MF32(p + 8), MF32(p + 12), MF32(p + 16), MF32(p + 20), MF32(p + 24), MF32(p + 28), MF32(p + 32));
+        }
+    }
+    memset(&S, 0, sizeof S);
+}
