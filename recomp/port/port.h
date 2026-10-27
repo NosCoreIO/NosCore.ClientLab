@@ -42,6 +42,8 @@ uint32_t hle_trampoline(const char* dll, const char* name);
 uint32_t hle_module_handle(const char* dll);
 const char* hle_module_name(uint32_t handle);
 
+int port_is_web(void);
+void port_host_path(const char* guest, char* out, size_t n);
 void port_log(const char* fmt, ...);
 void port_fatal(const char* fmt, ...);
 
@@ -66,3 +68,4 @@ void hle_window_client_size(uint32_t hwnd, uint32_t* w, uint32_t* h);
 void hle_misc_register(void);
 void hle_gdi_register(void);
 void hle_d3d9_register(void);
+void web_present(uint32_t surface);

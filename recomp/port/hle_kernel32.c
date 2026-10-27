@@ -44,11 +44,7 @@ static Handle* handle_get(uint32_t h) {
 }
 
 /* Guest paths are Windows paths; the host sees them with forward slashes. */
-static void host_path(const char* g, char* out, size_t n) {
-    snprintf(out, n, "%s", g);
-    for (char* p = out; *p; p++)
-        if (*p == '\\') *p = '/';
-}
+static void host_path(const char* g, char* out, size_t n) { port_host_path(g, out, n); }
 
 /* ---- process, module, version ---- */
 

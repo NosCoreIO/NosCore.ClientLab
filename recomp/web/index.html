@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NosTale Recomp</title>
+<style>
+  :root { --bg: #101014; --fg: #d8d8e0; --muted: #8a8a96; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  main { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; }
+  canvas { max-width: 100%; height: auto; background: #000; image-rendering: auto; }
+  #status { color: var(--muted); }
+  #log { width: min(100%, 1100px); height: 180px; overflow: auto; background: #0a0a0d; color: var(--muted);
+         font: 12px/1.35 ui-monospace, monospace; padding: 8px; box-sizing: border-box; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="screen" width="1024" height="768"></canvas>
+  <div id="status">starting…</div>
+  <div id="log"></div>
+</main>
+<script>
+  const canvas = document.getElementById('screen');
+  const ctx = canvas.getContext('2d');
+  const status = document.getElementById('status');
+  const log = document.getElementById('log');
+  const worker = new Worker('/worker.js' + location.search);
+  let frames = 0, last = performance.now();
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'frame') {
+      if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = m.w; canvas.height = m.h; }
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(m.data.buffer), m.w, m.h), 0, 0);
+      frames++;
+      const now = performance.now();
+      if (now - last > 1000) { status.textContent = `${m.w}x${m.h}, ${frames} frames/s shown`; frames = 0; last = now; }
+    } else if (m.type === 'log') {
+      log.textContent += m.text + '\n';
+      log.scrollTop = log.scrollHeight;
+    }
+  };
+</script>
+</body>
+</html>

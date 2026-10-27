@@ -65,8 +65,7 @@ static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
 /* Returns a malloc'd copy of the file's first RT_VERSION resource, or 0. */
 static uint8_t* read_version_resource(const char* guest_path, uint32_t* size) {
     char path[600];
-    snprintf(path, sizeof path, "%s", guest_path);
-    for (char* p = path; *p; p++) if (*p == '\\') *p = '/';
+    port_host_path(guest_path, path, sizeof path);
     FILE* f = fopen(path, "rb");
     if (!f) return 0;
     fseek(f, 0, SEEK_END);
@@ -237,8 +236,7 @@ static uint32_t ail_next = 0x00500000u;
 static void ail_handle(CPU* c) { RET(ail_next += 16); }
 static void ail_file_read(CPU* c) {
     char path[600];
-    snprintf(path, sizeof path, "%s", GSTR(ARG(0)));
-    for (char* p = path; *p; p++) if (*p == '\\') *p = '/';
+    port_host_path(GSTR(ARG(0)), path, sizeof path);
     FILE* f = fopen(path, "rb");
     if (!f) { RET(0); return; }
     fseek(f, 0, SEEK_END);
@@ -252,8 +250,7 @@ static void ail_file_read(CPU* c) {
 static void ail_file_size(CPU* c) {
     char path[600];
     struct stat st;
-    snprintf(path, sizeof path, "%s", GSTR(ARG(0)));
-    for (char* p = path; *p; p++) if (*p == '\\') *p = '/';
+    port_host_path(GSTR(ARG(0)), path, sizeof path);
     RET(stat(path, &st) ? 0xFFFFFFFFu : (uint32_t)st.st_size);
 }
 static void ail_sample_status(CPU* c) { RET(2); }

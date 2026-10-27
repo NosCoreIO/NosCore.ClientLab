@@ -151,6 +151,7 @@ static void v_Present(CPU* c) {
     static int checked;
     if (!checked) { checked = 1; shot_dir = getenv("PORT_SHOT_DIR"); }
     if (++frames % 300 == 1) port_log("Present frame %u", frames);
+    web_present(backbuffer);
     if (shot_dir && (frames == 1 || frames % 600 == 0)) {
         char path[400];
         snprintf(path, sizeof path, "%s/frame_%06u.bmp", shot_dir, frames);

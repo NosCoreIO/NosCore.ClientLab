@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <unistd.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 char port_guest_path[260];
 char port_guest_cmdline[1024];
@@ -67,6 +70,29 @@ void rt_fatal(const char* fmt, ...) {
 
 const char* rt_host_name(uint32_t addr);
 void rt_describe_arg(uint32_t v, char* out, unsigned size) { snprintf(out, size, "%08x", v); }
+
+/* ---- paths: guest Windows paths -> host paths. In a browser worker the game files are mounted under /C:/..., under
+   Node (NODERAWFS) the Windows path itself works. ---- */
+
+static int is_web = -1;
+int port_is_web(void) {
+#ifdef __EMSCRIPTEN__
+    if (is_web < 0) is_web = EM_ASM_INT({ return (typeof importScripts === 'function') ? 1 : 0; });
+#else
+    is_web = 0;
+#endif
+    return is_web;
+}
+
+void port_host_path(const char* guest, char* out, size_t n) {
+    const char* prefix = (port_is_web() && guest[0] && guest[1] == ':') ? "/" : "";
+    snprintf(out, n, "%s%s", prefix, guest);
+    /* Windows paths are case-insensitive; the browser file system is not, so it is mounted in lower case. */
+    for (char* p = out; *p; p++) {
+        if (*p == '\\') *p = '/';
+        else if (port_is_web()) *p = (char)tolower((unsigned char)*p);
+    }
+}
 
 /* ---- guest memory ---- */
 
@@ -262,7 +288,9 @@ static uint32_t rsrc_rva, rsrc_size;
 static uint32_t rd32(const uint8_t* p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
 
-static void load_image(const char* path) {
+static void load_image(const char* guest) {
+    char path[600];
+    port_host_path(guest, path, sizeof path);
     FILE* f = fopen(path, "rb");
     long size;
     if (!f) port_fatal("cannot open %s", path);
@@ -369,8 +397,8 @@ int main(int argc, char** argv) {
     }
 
     {
-        char dir[260], *s;
-        snprintf(dir, sizeof dir, "%s", argv[1]);
+        char dir[600], *s;
+        port_host_path(argv[1], dir, sizeof dir);
         s = strrchr(dir, '/');
         if (!s) s = strrchr(dir, '\\');
         if (s) { *s = 0; if (chdir(dir)) port_log("cannot chdir to %s", dir); }

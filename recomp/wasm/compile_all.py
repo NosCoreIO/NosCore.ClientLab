@@ -47,10 +47,21 @@ def main():
         print(s, m)
     if fails:
         sys.exit(1)
+    objs = sorted(glob.glob(os.path.join(OUT, "obj", "*.o")))
     if "--link" in sys.argv:
-        objs = sorted(glob.glob(os.path.join(OUT, "obj", "*.o")))
         out = os.path.join(OUT, "nostale.js")
         r = subprocess.run([EMCC, *LINK, *objs, "-o", out], capture_output=True, text=True)
+        print((r.stdout + r.stderr)[-3000:])
+        if r.returncode:
+            sys.exit(1)
+        print("linked", out)
+    if "--web" in sys.argv:
+        os.makedirs(os.path.join(OUT, "web"), exist_ok=True)
+        out = os.path.join(OUT, "web", "nostale.js")
+        web = [f for f in LINK if not f.startswith("-sNODERAWFS")] + [
+            "-sENVIRONMENT=worker", "-sFORCE_FILESYSTEM=1", "-sINVOKE_RUN=0",
+            "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV"]
+        r = subprocess.run([EMCC, *web, *objs, "-o", out], capture_output=True, text=True)
         print((r.stdout + r.stderr)[-3000:])
         if r.returncode:
             sys.exit(1)
