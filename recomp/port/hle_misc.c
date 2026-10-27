@@ -236,8 +236,6 @@ static void u_LoadCursorFromFileA(CPU* c) { RET(0x00060100u); }
 static void u_DestroyIcon(CPU* c) { RET(1); }
 static void u_GetWindowDC(CPU* c) { RET(0x00300000u + (ARG(0) & 0xffff)); }
 static void g_GetCurrentPositionEx(CPU* c) { if (ARG(1)) { M32(ARG(1)) = 0; M32(ARG(1) + 4) = 0; } RET(1); }
-static void g_GetTextExtentPoint32W(CPU* c) { M32(ARG(3)) = 7 * ARG(2); M32(ARG(3) + 4) = 16; RET(1); }
-static void g_AddFontResourceA(CPU* c) { RET(1); }
 static void g_GetBitmapBits(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, ARG(1)); RET(ARG(1)); }
 static uint32_t gdi_misc_next = 0x00280000u;
 static void g_NewHandle(CPU* c) { RET(gdi_misc_next += 4); }
@@ -269,6 +267,7 @@ static void ail_file_size(CPU* c) {
     RET(stat(path, &st) ? 0xFFFFFFFFu : (uint32_t)st.st_size);
 }
 static void ail_sample_status(CPU* c) { RET(2); }
+static void ail_sample_ms_position(CPU* c) { if (ARG(1)) M32(ARG(1)) = 0; if (ARG(2)) M32(ARG(2)) = 0; }
 
 /* ---- Gameforge wrapper (noscore_gf.dll): same answers as NosCore.DeveloperTools.GfStub ----
    The session ticket is the _NC_AUTH_CODE GUID as ASCII text; the client sends it verbatim in NoS0577. */
@@ -532,12 +531,9 @@ static const Hle misc[] = {
     {"user32.dll", "DestroyIcon", 1, u_DestroyIcon},
     {"user32.dll", "GetWindowDC", 1, u_GetWindowDC},
     {"gdi32.dll", "GetCurrentPositionEx", 2, g_GetCurrentPositionEx},
-    {"gdi32.dll", "GetTextExtentPoint32W", 4, g_GetTextExtentPoint32W},
-    {"gdi32.dll", "AddFontResourceA", 1, g_AddFontResourceA},
     {"gdi32.dll", "GetBitmapBits", 3, g_GetBitmapBits},
     {"gdi32.dll", "CreatePenIndirect", 1, g_NewHandle},
     {"gdi32.dll", "CreateHalftonePalette", 1, g_NewHandle},
-    {"gdi32.dll", "TextOutW", 5, r_one},
     {"imm32.dll", "ImmAssociateContext", 2, i_ImmAssociateContext},
     {"imm32.dll", "ImmNotifyIME", 4, i_ImmNotifyIME},
     {"winmm.dll", "timeGetDevCaps", 2, w_timeGetDevCaps},
@@ -557,6 +553,14 @@ static const Hle misc[] = {
     {"mss32.dll", "_AIL_mem_free_lock@4", 1, r_zero},
     {"mss32.dll", "_AIL_init_sample@12", 3, r_zero},
     {"mss32.dll", "_AIL_set_named_sample_file@20", 5, r_one},
+    {"mss32.dll", "_AIL_set_sample_file@12", 3, r_one},
+    {"mss32.dll", "_AIL_file_type@8", 2, r_one},
+    {"mss32.dll", "_AIL_WAV_info@8", 2, r_zero},
+    {"mss32.dll", "_AIL_decompress_ADPCM@12", 3, r_zero},
+    {"mss32.dll", "_AIL_sample_ms_position@12", 3, ail_sample_ms_position},
+    {"mss32.dll", "_AIL_set_sample_3D_position@16", 4, r_zero},
+    {"mss32.dll", "_AIL_set_sample_3D_orientation@28", 7, r_zero},
+    {"mss32.dll", "_AIL_set_sample_3D_distances@16", 4, r_zero},
     {"mss32.dll", "_AIL_set_sample_volume_pan@12", 3, r_zero},
     {"mss32.dll", "_AIL_set_sample_loop_count@8", 2, r_zero},
     {"mss32.dll", "_AIL_start_sample@4", 1, r_zero},

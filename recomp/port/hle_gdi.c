@@ -34,6 +34,23 @@ static uint32_t bmp_new(int32_t w, int32_t h, uint32_t bpp, int dib) {
     return 0;
 }
 
+int gdi_bitmap(uint32_t h, GdiBitmap* out) {
+    Bmp* b = bmp_get(h);
+    if (!b) return 0;
+    out->w = b->w < 0 ? -b->w : b->w;
+    out->h = b->h < 0 ? -b->h : b->h;
+    out->top_down = b->h < 0;
+    out->bpp = b->bpp; out->stride = b->stride; out->bits = b->bits;
+    return 1;
+}
+int gdi_delete_bitmap(uint32_t h) {
+    Bmp* b = bmp_get(h);
+    if (!b) return 0;
+    guest_free(b->bits);
+    b->used = 0;
+    return 1;
+}
+
 static void g_CreateDIBSection(CPU* c) {
     uint32_t bmi = ARG(1);
     int32_t w = (int32_t)M32(bmi + 4), h = (int32_t)M32(bmi + 8);

@@ -902,9 +902,23 @@ def reloc_code_seeds(L, fns):
                 pos += dec[0].size
         return False
 
-    out = []
+    # A code address stored to memory by an instruction ('mov dword ptr [eax], 0x571b60' in a unit's init assigning a
+    # procedural variable) is an entry point whatever its prologue looks like.
+    stored = set()
+    for slot, val in L.reloc_slots.items():
+        if not (is_code(L, slot) and is_code(L, val)) or covered(val):
+            continue
+        for k in range(2, 11):
+            dec = L.disasm_range(slot - k, slot - k + 1)
+            if (dec and dec[0].address + dec[0].size == slot + 4 and dec[0].mnemonic == "mov"
+                    and len(dec[0].operands) == 2 and dec[0].operands[0].type == X.X86_OP_MEM
+                    and dec[0].operands[1].type == X.X86_OP_IMM and dec[0].operands[1].imm & 0xFFFFFFFF == val):
+                stored.add(val)
+                break
+
+    out = sorted(stored)
     for t in sorted(L.reloc_targets):
-        if covered(t) or not entry_shape(t):
+        if t in stored or covered(t) or not entry_shape(t):
             continue
         pos, ok = t, False
         for _ in range(24):

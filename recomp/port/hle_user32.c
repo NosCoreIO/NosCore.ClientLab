@@ -187,14 +187,77 @@ static int pop_msg(uint32_t m, int remove) {
     return 1;
 }
 
+/* ---- input from the page: events arrive in a SharedArrayBuffer ring and become window messages ---- */
+
+static uint32_t input_hwnd;
+static int cursor_x, cursor_y;
+static uint8_t key_down[256];
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+EM_JS(int, js_input_poll, (int* out), {
+    const ring = self.inputRing;
+    if (!ring) return 0;
+    const head = Atomics.load(ring, 0), tail = Atomics.load(ring, 1);
+    if (head === tail) return 0;
+    const cap = (ring.length - 2) >> 2, at = 2 + (tail % cap) * 4;
+    for (let i = 0; i < 4; i++) HEAP32[(out >> 2) + i] = ring[at + i];
+    Atomics.store(ring, 1, tail + 1);
+    return 1;
+});
+#else
+static int js_input_poll(int* out) { (void)out; return 0; }
+#endif
+
+static void post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
+    queue[q_tail] = (QMsg){hwnd, msg, wp, lp};
+    q_tail = (q_tail + 1) % 1024;
+}
+
+static uint32_t mouse_keys(void) {
+    return (key_down[1] ? 1 : 0) | (key_down[2] ? 2 : 0) | (key_down[0x10] ? 4 : 0) | (key_down[0x11] ? 8 : 0) |
+           (key_down[4] ? 0x10 : 0);
+}
+
+enum { IN_MOVE = 1, IN_DOWN, IN_UP, IN_WHEEL, IN_KEYDOWN, IN_KEYUP, IN_CHAR };
+
+static void pump_input(void) {
+    int e[4];
+    while (input_hwnd && js_input_poll(e)) {
+        uint32_t lp = ((uint32_t)e[3] & 0xffff) << 16 | ((uint32_t)e[2] & 0xffff);
+        static const uint32_t vk[3] = {1, 4, 2}, down[3] = {0x201, 0x207, 0x204};
+        int b = e[1] >= 0 && e[1] < 3 ? e[1] : 0;
+        if (e[0] <= IN_WHEEL) { cursor_x = e[2]; cursor_y = e[3]; }
+        static int logged;
+        if (e[0] != IN_MOVE && logged++ < 10) port_log("input %d %d (%d,%d) -> %08x", e[0], e[1], e[2], e[3], input_hwnd);
+        switch (e[0]) {
+        case IN_MOVE: post(input_hwnd, 0x200, mouse_keys(), lp); break;
+        case IN_DOWN: key_down[vk[b]] = 1; post(input_hwnd, down[b], mouse_keys(), lp); break;
+        case IN_UP: key_down[vk[b]] = 0; post(input_hwnd, down[b] + 1, mouse_keys(), lp); break;
+        case IN_WHEEL: post(input_hwnd, 0x20A, (uint32_t)(e[1] & 0xffff) << 16 | mouse_keys(), lp); break;
+        case IN_KEYDOWN:
+            key_down[e[1] & 0xff] = 1;
+            post(input_hwnd, 0x100, (uint32_t)e[1], 1u | ((uint32_t)e[2] & 0xff) << 16);
+            break;
+        case IN_KEYUP:
+            key_down[e[1] & 0xff] = 0;
+            post(input_hwnd, 0x101, (uint32_t)e[1], 0xC0000001u | ((uint32_t)e[2] & 0xff) << 16);
+            break;
+        case IN_CHAR: post(input_hwnd, 0x102, (uint32_t)e[1], 1); break;
+        }
+    }
+}
+
 static uint32_t idle_peeks;
 static void u_PeekMessageA(CPU* c) {
+    pump_input();
     int got = pop_msg(ARG(0), ARG(4) & 1);
     if (!got && ++idle_peeks % 10000 == 0) port_log("PeekMessage idle x%u", idle_peeks);
     RET(got);
 }
 static void u_GetMessageA(CPU* c) {
     if (quit_posted) { RET(0); return; }
+    pump_input();
     if (!pop_msg(ARG(0), 1)) port_fatal("GetMessage with an empty queue (nothing would wake the guest)");
     RET(1);
 }
@@ -211,6 +274,10 @@ static void u_ShowWindow(CPU* c) {
     int was = w ? w->visible : 0;
     if (w) w->visible = ARG(1) != 0;
     if (w) port_log("ShowWindow %08x \"%s\" %u (%dx%d)", ARG(0), w->text, ARG(1), w->w, w->h);
+    if (w && ARG(1)) {
+        Win* cur = win_get(input_hwnd);
+        if (!cur || w->w * w->h > cur->w * cur->h) input_hwnd = ARG(0);
+    }
     if (w && ARG(1) && !was) {
         send_message(c, ARG(0), 0x0018, 1, 0);
         send_windowpos(c, ARG(0), 0x40);
@@ -288,21 +355,21 @@ static void k_GlobalDeleteAtom(CPU* c) { RET(0); }
 static void k_GlobalFindAtomA(CPU* c) { RET(0); }
 static void u_GetKeyboardLayout(CPU* c) { RET(0x04090409); }
 static void u_GetKeyboardLayoutList(CPU* c) { if (ARG(0) && ARG(1)) M32(ARG(1)) = 0x04090409; RET(1); }
-static void u_GetKeyboardState(CPU* c) { memset(GPTR(ARG(0)), 0, 256); RET(1); }
-static void u_GetKeyState(CPU* c) { RET(0); }
-static void u_GetAsyncKeyState(CPU* c) { RET(0); }
-static void u_GetCursorPos(CPU* c) { M32(ARG(0)) = 512; M32(ARG(0) + 4) = 384; RET(1); }
+static void u_GetKeyboardState(CPU* c) { for (int k = 0; k < 256; k++) M8(ARG(0) + k) = key_down[k] ? 0x80 : 0; RET(1); }
+static void u_GetKeyState(CPU* c) { RET(key_down[ARG(0) & 0xff] ? 0xFFFF8000u : 0); }
+static void u_GetAsyncKeyState(CPU* c) { RET(key_down[ARG(0) & 0xff] ? 0x8000u : 0); }
+static void u_GetCursorPos(CPU* c) { M32(ARG(0)) = (uint32_t)cursor_x; M32(ARG(0) + 4) = (uint32_t)cursor_y; RET(1); }
 static void u_SetCursorPos(CPU* c) { RET(1); }
 static void u_ShowCursor(CPU* c) { RET(1); }
 static void u_SetCursor(CPU* c) { RET(0); }
 static void u_LoadIconA(CPU* c) { RET(0x00050000u + (ARG(1) & 0xffff)); }
 static void u_LoadCursorA(CPU* c) { RET(0x00060000u + (ARG(1) & 0xffff)); }
 static void u_GetDesktopWindow(CPU* c) { RET(0x00000010u); }
-static void u_GetActiveWindow(CPU* c) { RET(0); }
-static void u_GetForegroundWindow(CPU* c) { RET(0); }
+static void u_GetActiveWindow(CPU* c) { RET(input_hwnd); }
+static void u_GetForegroundWindow(CPU* c) { RET(input_hwnd); }
 static void u_SetActiveWindow(CPU* c) { RET(0); }
 static void u_SetForegroundWindow(CPU* c) { RET(1); }
-static void u_GetFocus(CPU* c) { RET(0); }
+static void u_GetFocus(CPU* c) { RET(input_hwnd); }
 static void u_SetFocus(CPU* c) { RET(0); }
 static void u_GetCapture(CPU* c) { RET(0); }
 static void u_ReleaseCapture(CPU* c) { RET(1); }
@@ -321,7 +388,7 @@ static void u_UpdateWindow(CPU* c) { RET(1); }
 static void u_ValidateRect(CPU* c) { RET(1); }
 static void u_ScreenToClient(CPU* c) { RET(1); }
 static void u_ClientToScreen(CPU* c) { RET(1); }
-static void u_WindowFromPoint(CPU* c) { RET(0); }
+static void u_WindowFromPoint(CPU* c) { RET(input_hwnd); }
 static void u_GetWindow(CPU* c) { RET(0); }
 static void u_GetTopWindow(CPU* c) { RET(0); }
 static void u_EnumWindows(CPU* c) { RET(1); }
@@ -405,21 +472,10 @@ static void g_GetDeviceCaps(CPU* c) {
     }
 }
 static void g_GetObjectA(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, ARG(1)); RET(ARG(1)); }
-static void g_SelectObject(CPU* c) { RET(0x00100000u); }
-static void g_GetTextMetricsA(CPU* c) {
-    uint32_t p = ARG(1);
-    memset(GPTR(p), 0, 56);
-    M32(p) = 16; M32(p + 4) = 13; M32(p + 8) = 3; M32(p + 20) = 7; M32(p + 24) = 14;
-    RET(1);
-}
-static void g_GetTextExtentPoint32A(CPU* c) { M32(ARG(3)) = 7 * ARG(2); M32(ARG(3) + 4) = 16; RET(1); }
 static void g_GetDIBits(CPU* c) { RET(0); }
 static void g_GetPaletteEntries(CPU* c) { if (ARG(3)) memset(GPTR(ARG(3)), 0, 4 * ARG(2)); RET(ARG(2)); }
 static void g_GetSystemPaletteEntries(CPU* c) { if (ARG(3)) memset(GPTR(ARG(3)), 0, 4 * ARG(2)); RET(ARG(2)); }
 static void g_GetNearestColor(CPU* c) { RET(ARG(1)); }
-static void g_SetBkColor(CPU* c) { RET(0xffffff); }
-static void g_SetTextColor(CPU* c) { RET(0); }
-static void g_GetBkColor(CPU* c) { RET(0xffffff); }
 static void u_GetDC(CPU* c) { RET(0x00300000u + (ARG(0) & 0xffff)); }
 static void u_ReleaseDC(CPU* c) { RET(1); }
 static void u_BeginPaint(CPU* c) { memset(GPTR(ARG(1)), 0, 64); M32(ARG(1)) = 0x00300001u; RET(0x00300001u); }
@@ -459,18 +515,18 @@ static const Hle user32[] = {
     {"kernel32.dll", "GlobalAddAtomA", 1, k_GlobalAddAtomA}, {"kernel32.dll", "GlobalDeleteAtom", 1, k_GlobalDeleteAtom},
     {"kernel32.dll", "GlobalFindAtomA", 1, k_GlobalFindAtomA}, {"kernel32.dll", "MulDiv", 3, k_MulDiv},
     G(GetStockObject, 1, g_GetStockObject), G(GetDeviceCaps, 2, g_GetDeviceCaps), G(GetObjectA, 3, g_GetObjectA),
-    G(SelectObject, 2, g_SelectObject), G(DeleteObject, 1, g_True), G(CreatePalette, 1, g_NewHandle),
-    G(CreateFontIndirectA, 1, g_NewHandle), G(CreateSolidBrush, 1, g_NewHandle), G(CreatePen, 3, g_NewHandle),
-    G(CreateBrushIndirect, 1, g_NewHandle), G(CreateCompatibleDC, 1, g_NewHandle),
+    G(CreatePalette, 1, g_NewHandle),
+    G(CreateSolidBrush, 1, g_NewHandle), G(CreatePen, 3, g_NewHandle),
+    G(CreateBrushIndirect, 1, g_NewHandle), 
     G(CreateCompatibleBitmap, 3, g_NewHandle), G(CreateDIBSection, 6, g_NewHandle), G(CreateBitmap, 5, g_NewHandle),
-    G(DeleteDC, 1, g_True), G(SelectPalette, 3, g_Zero), G(RealizePalette, 1, g_Zero),
-    G(GetTextMetricsA, 2, g_GetTextMetricsA), G(GetTextExtentPoint32A, 4, g_GetTextExtentPoint32A),
+    G(SelectPalette, 3, g_Zero), G(RealizePalette, 1, g_Zero),
+    
     G(GetDIBits, 7, g_GetDIBits), G(GetPaletteEntries, 4, g_GetPaletteEntries),
     G(GetSystemPaletteEntries, 4, g_GetSystemPaletteEntries), G(GetNearestColor, 2, g_GetNearestColor),
-    G(SetBkColor, 2, g_SetBkColor), G(SetTextColor, 2, g_SetTextColor), G(GetBkColor, 1, g_GetBkColor),
-    G(SetBkMode, 2, g_True), G(SetStretchBltMode, 2, g_True), G(SetMapMode, 2, g_True), G(SetROP2, 2, g_True),
-    G(SetTextAlign, 2, g_Zero), G(BitBlt, 9, g_True), G(StretchBlt, 11, g_True), G(PatBlt, 6, g_True),
-    G(TextOutA, 5, g_True), G(ExtTextOutA, 8, g_True), G(Rectangle, 5, g_True), G(FillRect, 3, g_True),
+    
+    G(SetStretchBltMode, 2, g_True), G(SetMapMode, 2, g_True), G(SetROP2, 2, g_True),
+    G(BitBlt, 9, g_True), G(StretchBlt, 11, g_True), G(PatBlt, 6, g_True),
+    G(Rectangle, 5, g_True), G(FillRect, 3, g_True),
     G(MoveToEx, 4, g_True), G(LineTo, 3, g_True), G(SetWindowOrgEx, 4, g_True), G(SetViewportOrgEx, 4, g_True),
     G(IntersectClipRect, 5, g_True), G(ExcludeClipRect, 5, g_True), G(SaveDC, 1, g_True), G(RestoreDC, 2, g_True),
     G(UnrealizeObject, 1, g_True), G(GetClipBox, 2, g_True), G(SetDIBColorTable, 4, g_Zero),

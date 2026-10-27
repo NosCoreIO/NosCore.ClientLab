@@ -70,5 +70,10 @@ void hle_user32_register(void);
 void hle_window_client_size(uint32_t hwnd, uint32_t* w, uint32_t* h);
 void hle_misc_register(void);
 void hle_gdi_register(void);
+void hle_text_register(void);
+
+typedef struct { int32_t w, h; int top_down; uint32_t bpp, stride, bits; } GdiBitmap;
+int gdi_bitmap(uint32_t h, GdiBitmap* out);
+int gdi_delete_bitmap(uint32_t h);
 void hle_d3d9_register(void);
 void web_present(uint32_t surface);

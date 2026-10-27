@@ -405,6 +405,7 @@ int main(int argc, char** argv) {
     }
     port_trace = getenv("PORT_TRACE") != 0;
     tramps = calloc(MAX_TRAMP, sizeof(Tramp));
+    hle_text_register();
     hle_gdi_register();
     hle_kernel32_register();
     hle_user32_register();
