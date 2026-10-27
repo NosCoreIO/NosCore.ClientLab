@@ -15,7 +15,7 @@ typedef struct { float m[16]; } Mat;
 
 static struct {
     Mat world, view, proj, tex[8];
-    uint32_t rs[256], tss[8][33];
+    uint32_t rs[256], tss[8][33], samp[8][14];
     uint32_t tex_obj[8];
     uint32_t vb, vb_offset, vb_stride, ib, fvf;
     uint32_t vp_x, vp_y, vp_w, vp_h;
@@ -36,6 +36,8 @@ void r_init(uint32_t backbuffer) {
     for (int s = 0; s < 8; s++) {
         R.tss[s][1] = s ? 1 : 4; R.tss[s][2] = 2; R.tss[s][3] = 1;
         R.tss[s][4] = s ? 1 : 2; R.tss[s][5] = 2; R.tss[s][6] = 1;
+        R.samp[s][1] = R.samp[s][2] = R.samp[s][3] = 1;
+        R.samp[s][5] = R.samp[s][6] = 1;
     }
     R.target = backbuffer;
 }
@@ -54,6 +56,8 @@ void r_set_render_state(uint32_t s, uint32_t v) { if (s < 256) R.rs[s] = v; }
 uint32_t r_get_render_state(uint32_t s) { return s < 256 ? R.rs[s] : 0; }
 void r_set_tss(uint32_t st, uint32_t t, uint32_t v) { if (st < 8 && t < 33) R.tss[st][t] = v; }
 uint32_t r_get_tss(uint32_t st, uint32_t t) { return st < 8 && t < 33 ? R.tss[st][t] : 0; }
+void r_set_sampler(uint32_t s, uint32_t t, uint32_t v) { if (s < 8 && t < 14) R.samp[s][t] = v; }
+uint32_t r_get_sampler(uint32_t s, uint32_t t) { return s < 8 && t < 14 ? R.samp[s][t] : 0; }
 void r_set_texture(uint32_t st, uint32_t tex) { if (st < 8) R.tex_obj[st] = tex; }
 uint32_t r_get_texture(uint32_t st) { return st < 8 ? R.tex_obj[st] : 0; }
 void r_set_stream(uint32_t vb, uint32_t offset, uint32_t stride) { R.vb = vb; R.vb_offset = offset; R.vb_stride = stride; }
@@ -110,15 +114,34 @@ static uint32_t texel(uint32_t s, uint32_t x, uint32_t y) {
     }
 }
 
+static int32_t wrap(int32_t i, int32_t n, int clamp) {
+    if (clamp) return i < 0 ? 0 : i >= n ? n - 1 : i;
+    i %= n;
+    return i < 0 ? i + n : i;
+}
+
 static uint32_t sample(uint32_t tex, float u, float v) {
     if (!tex) return 0xffffffffu;
     uint32_t s = M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;  /* texture -> level 0 surface */
     int32_t w = (int32_t)SW(s), h = (int32_t)SH(s);
     if (w <= 0 || h <= 0 || !SBITS(s)) return 0xffffffffu;
-    int32_t x = (int32_t)floorf(u * w), y = (int32_t)floorf(v * h);
-    x %= w; if (x < 0) x += w;
-    y %= h; if (y < 0) y += h;
-    return texel(s, (uint32_t)x, (uint32_t)y);
+    int clamp_u = R.samp[0][1] == 3, clamp_v = R.samp[0][2] == 3;
+    if (R.samp[0][5] != 2 && R.samp[0][6] != 2) {
+        int32_t x = wrap((int32_t)floorf(u * w), w, clamp_u), y = wrap((int32_t)floorf(v * h), h, clamp_v);
+        return texel(s, (uint32_t)x, (uint32_t)y);
+    }
+    float fx = u * w - 0.5f, fy = v * h - 0.5f;
+    int32_t x0 = (int32_t)floorf(fx), y0 = (int32_t)floorf(fy);
+    uint32_t ax = (uint32_t)((fx - x0) * 256), ay = (uint32_t)((fy - y0) * 256);
+    int32_t xa = wrap(x0, w, clamp_u), xb = wrap(x0 + 1, w, clamp_u), ya = wrap(y0, h, clamp_v), yb = wrap(y0 + 1, h, clamp_v);
+    uint32_t t00 = texel(s, (uint32_t)xa, (uint32_t)ya), t10 = texel(s, (uint32_t)xb, (uint32_t)ya);
+    uint32_t t01 = texel(s, (uint32_t)xa, (uint32_t)yb), t11 = texel(s, (uint32_t)xb, (uint32_t)yb), out = 0;
+    for (int k = 0; k < 32; k += 8) {
+        uint32_t top = ((t00 >> k) & 255) * (256 - ax) + ((t10 >> k) & 255) * ax;
+        uint32_t bot = ((t01 >> k) & 255) * (256 - ax) + ((t11 >> k) & 255) * ax;
+        out |= ((top * (256 - ay) + bot * ay + 32768) >> 16) << k;
+    }
+    return out;
 }
 
 static uint32_t mul_color(uint32_t a, uint32_t b) {
@@ -275,7 +298,7 @@ static void triangle(const Vtx* a, const Vtx* b, const Vtx* c) {
     int flat = (a->diffuse == b->diffuse && b->diffuse == c->diffuse);
     for (int32_t y = y0; y < y1; y++)
         for (int32_t x = x0; x < x1; x++) {
-            float px = x + 0.5f, py = y + 0.5f;
+            float px = (float)x, py = (float)y; /* D3D9 samples pixels at integer coordinates */
             float w0 = ((b->x - px) * (c->y - py) - (b->y - py) * (c->x - px)) / area;
             float w1 = ((c->x - px) * (a->y - py) - (c->y - py) * (a->x - px)) / area;
             float w2 = 1 - w0 - w1;

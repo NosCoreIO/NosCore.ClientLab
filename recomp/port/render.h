@@ -9,6 +9,8 @@ void r_set_render_state(uint32_t s, uint32_t v);
 uint32_t r_get_render_state(uint32_t s);
 void r_set_tss(uint32_t stage, uint32_t type, uint32_t v);
 uint32_t r_get_tss(uint32_t stage, uint32_t type);
+void r_set_sampler(uint32_t sampler, uint32_t type, uint32_t v);
+uint32_t r_get_sampler(uint32_t sampler, uint32_t type);
 void r_set_texture(uint32_t stage, uint32_t tex);
 uint32_t r_get_texture(uint32_t stage);
 void r_set_stream(uint32_t vb, uint32_t offset, uint32_t stride);

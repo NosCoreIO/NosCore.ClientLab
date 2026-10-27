@@ -12,6 +12,7 @@ import os
 import socket
 import ssl
 import threading
+import time
 import urllib.parse
 import urllib.request
 
@@ -22,18 +23,32 @@ class Relay:
     """TCP connections held for the worker, which cannot open sockets itself and never yields to an event loop:
     it drives them with synchronous HTTP requests (/net/connect, /net/send, /net/recv, /net/close)."""
 
+    IDLE_SECONDS = 20
+
     def __init__(self, remap):
         self.remap = remap
         self.ids = itertools.count(1)
         self.conns = {}
         self.lock = threading.Lock()
+        threading.Thread(target=self._reaper, daemon=True).start()
+
+    def _reaper(self):
+        """A reloaded or closed page never sends /net/close; without this its sockets stay open and the server keeps
+        the account logged in."""
+        while True:
+            time.sleep(5)
+            now = time.monotonic()
+            with self.lock:
+                stale = [cid for cid, c in self.conns.items() if now - c["seen"] > self.IDLE_SECONDS]
+            for cid in stale:
+                self.close(cid)
 
     def connect(self, host, port):
         port = self.remap.get(port, port)
         s = socket.create_connection((host, port), timeout=5)
         s.settimeout(None)
         cid = next(self.ids)
-        conn = {"sock": s, "buf": bytearray(), "closed": False, "lock": threading.Lock()}
+        conn = {"sock": s, "buf": bytearray(), "closed": False, "lock": threading.Lock(), "seen": time.monotonic()}
         with self.lock:
             self.conns[cid] = conn
         threading.Thread(target=self._reader, args=(conn,), daemon=True).start()
@@ -55,6 +70,7 @@ class Relay:
         conn = self.conns.get(cid)
         if not conn or conn["closed"]:
             return False
+        conn["seen"] = time.monotonic()
         conn["sock"].sendall(data)
         return True
 
@@ -62,6 +78,7 @@ class Relay:
         conn = self.conns.get(cid)
         if not conn:
             return None
+        conn["seen"] = time.monotonic()
         with conn["lock"]:
             data, conn["buf"] = bytes(conn["buf"]), bytearray()
         if not data and conn["closed"]:

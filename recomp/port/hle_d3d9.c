@@ -196,6 +196,8 @@ static void v_GetTransformR(CPU* c) { r_get_transform(ARG(1), ARG(2)); RET(0); }
 static void v_SetRenderState(CPU* c) { r_set_render_state(ARG(1), ARG(2)); RET(0); }
 static void v_GetRenderStateR(CPU* c) { M32(ARG(2)) = r_get_render_state(ARG(1)); RET(0); }
 static void v_SetTextureStageState(CPU* c) { r_set_tss(ARG(1), ARG(2), ARG(3)); RET(0); }
+static void v_SetSamplerState(CPU* c) { r_set_sampler(ARG(1), ARG(2), ARG(3)); RET(0); }
+static void v_GetSamplerStateR(CPU* c) { M32(ARG(3)) = r_get_sampler(ARG(1), ARG(2)); RET(0); }
 static void v_GetTextureStageStateR(CPU* c) { M32(ARG(3)) = r_get_tss(ARG(1), ARG(2)); RET(0); }
 static void v_SetTexture(CPU* c) { r_set_texture(ARG(1), ARG(2)); RET(0); }
 static void v_GetTextureR(CPU* c) { M32(ARG(2)) = r_get_texture(ARG(1)); RET(0); }
@@ -234,8 +236,8 @@ static const Method device_methods[] = {
     {"SetClipPlane", 3, 0}, {"GetClipPlane", 3, 0}, {"SetRenderState", 3, v_SetRenderState}, {"GetRenderState", 3, v_GetRenderStateR},
     {"CreateStateBlock", 3, v_new_other_out2}, {"BeginStateBlock", 1, 0}, {"EndStateBlock", 2, v_new_other_out1},
     {"SetClipStatus", 2, 0}, {"GetClipStatus", 2, 0}, {"GetTexture", 3, v_GetTextureR}, {"SetTexture", 3, v_SetTexture},
-    {"GetTextureStageState", 4, v_GetTextureStageStateR}, {"SetTextureStageState", 4, v_SetTextureStageState}, {"GetSamplerState", 4, v_zero_out3},
-    {"SetSamplerState", 4, 0}, {"ValidateDevice", 2, v_ValidateDevice}, {"SetPaletteEntries", 3, 0},
+    {"GetTextureStageState", 4, v_GetTextureStageStateR}, {"SetTextureStageState", 4, v_SetTextureStageState}, {"GetSamplerState", 4, v_GetSamplerStateR},
+    {"SetSamplerState", 4, v_SetSamplerState}, {"ValidateDevice", 2, v_ValidateDevice}, {"SetPaletteEntries", 3, 0},
     {"GetPaletteEntries", 3, 0}, {"SetCurrentTexturePalette", 2, 0}, {"GetCurrentTexturePalette", 2, v_zero_out1},
     {"SetScissorRect", 2, 0}, {"GetScissorRect", 2, 0}, {"SetSoftwareVertexProcessing", 2, 0},
     {"GetSoftwareVertexProcessing", 1, 0}, {"SetNPatchMode", 2, 0}, {"GetNPatchMode", 1, 0},

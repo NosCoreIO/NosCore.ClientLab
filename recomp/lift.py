@@ -889,7 +889,8 @@ def reloc_code_seeds(L, fns):
             return True
         if a.mnemonic == "push" and a.op_str in ("ebx", "esi", "edi") and b.mnemonic in ("push", "mov", "add", "sub", "xor"):
             return True
-        if a.mnemonic in ("mov", "fild", "fld", "cmp", "test", "lea", "xor") and any(r in a.op_str for r in ("eax", "edx", "ecx")):
+        # Leaf methods referenced only from a VMT: a few register operations and a ret ('and al, 0x1f; ret').
+        if (a.mnemonic in SANE or a.mnemonic.startswith("f")) and any(r in a.op_str for r in ("eax", "edx", "ecx", "al", "ax")):
             pos = t
             for _ in range(24):
                 dec = L.disasm_range(pos, pos + 1)
