@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -550,11 +551,35 @@ static void u_LoadStringA(CPU* c) {
     RET(n);
 }
 
-/* ---- registry: nothing is there ---- */
+/* ---- registry: only the Gameforge client key, whose InstallationId goes into the login packet ---- */
 
-static void a_RegOpenKeyExA(CPU* c) { RET(2); }
+#define HKEY_GAMEFORGE 0x00400200u
+
+uint32_t port_reg_known_key(uint32_t subkey) {
+    char key[260];
+    snprintf(key, sizeof key, "%s", subkey ? GSTR(subkey) : "");
+    for (char* p = key; *p; p++) *p = (char)tolower((unsigned char)*p);
+    return strstr(key, "gameforge4d\\gameforgeclient\\mainapp") ? HKEY_GAMEFORGE : 0;
+}
+static void a_RegOpenKeyExA(CPU* c) {
+    uint32_t k = port_reg_known_key(ARG(1));
+    if (k && ARG(4)) { M32(ARG(4)) = k; RET(0); return; }
+    RET(2);
+}
 static void a_RegCloseKey(CPU* c) { RET(0); }
-static void a_RegQueryValueExA(CPU* c) { RET(2); }
+static void a_RegQueryValueExA(CPU* c) {
+    if (ARG(0) != HKEY_GAMEFORGE || !ARG(1) || strcasecmp(GSTR(ARG(1)), "InstallationId")) { RET(2); return; }
+    const char* id = getenv("NC_INSTALLATION_ID");
+    if (!id || !*id) id = "6b1c9b9e-6a3f-4d8e-9f2a-3c5d7e0f1a2b";
+    uint32_t need = (uint32_t)strlen(id) + 1;
+    if (ARG(3)) M32(ARG(3)) = 1;
+    uint32_t have = ARG(5) ? M32(ARG(5)) : 0;
+    if (ARG(5)) M32(ARG(5)) = need;
+    if (!ARG(4)) { RET(0); return; }
+    if (have < need) { RET(234); return; }
+    memcpy(GPTR(ARG(4)), id, need);
+    RET(0);
+}
 
 /* ---- SEH: walk the guest's fs:[0] chain the way the OS dispatcher does ---- */
 

@@ -22,12 +22,14 @@ class Relay:
     """TCP connections held for the worker, which cannot open sockets itself and never yields to an event loop:
     it drives them with synchronous HTTP requests (/net/connect, /net/send, /net/recv, /net/close)."""
 
-    def __init__(self):
+    def __init__(self, remap):
+        self.remap = remap
         self.ids = itertools.count(1)
         self.conns = {}
         self.lock = threading.Lock()
 
     def connect(self, host, port):
+        port = self.remap.get(port, port)
         s = socket.create_connection((host, port), timeout=5)
         s.settimeout(None)
         cid = next(self.ids)
@@ -225,9 +227,12 @@ def main():
     ap.add_argument("--auth-url", default="https://127.0.0.1:7001")
     ap.add_argument("--user", help="local NosCore account used to mint _NC_AUTH_CODE (dev only)")
     ap.add_argument("--password")
+    ap.add_argument("--remap", action="append", default=[], metavar="FROM=TO",
+                    help="relay the client's connections to port FROM to port TO instead")
     a = ap.parse_args()
     auth = {"url": a.auth_url, "user": a.user, "password": a.password}
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(a.game, a.build, Relay(), auth))
+    remap = {int(f): int(t) for f, t in (r.split("=") for r in a.remap)}
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(a.game, a.build, Relay(remap), auth))
     print(f"http://127.0.0.1:{a.port}/  (game: {a.game})")
     server.serve_forever()
 

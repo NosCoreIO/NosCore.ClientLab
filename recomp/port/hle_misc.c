@@ -177,7 +177,12 @@ static void k_GetExitCodeThread(CPU* c) { if (ARG(1)) M32(ARG(1)) = 259; RET(1);
 
 /* ---- registry ---- */
 
-static void a_RegCreateKeyExA(CPU* c) { if (ARG(7)) M32(ARG(7)) = 0x00400100u; if (ARG(8)) M32(ARG(8)) = 1; RET(0); }
+static void a_RegCreateKeyExA(CPU* c) {
+    uint32_t k = port_reg_known_key(ARG(1));
+    if (ARG(7)) M32(ARG(7)) = k ? k : 0x00400100u;
+    if (ARG(8)) M32(ARG(8)) = k ? 2 : 1;
+    RET(0);
+}
 static void a_RegSetValueExA(CPU* c) { RET(0); }
 
 /* ---- user32/gdi32 odds and ends ---- */
@@ -425,7 +430,11 @@ static void ws_recv(CPU* c) {
         memmove(k->rx, k->rx + n, k->rx_len - n);
         k->rx_len -= n;
         static int logged;
-        if (logged++ < 20) port_log("recv %08x: %u bytes", ARG(0), n);
+        if (logged++ < 20) {
+            char hex[3 * 64 + 1] = {0};
+            for (uint32_t i = 0; i < n && i < 64; i++) snprintf(hex + 3 * i, 4, "%02x ", M8(buf + i));
+            port_log("recv %08x: %u bytes %s", ARG(0), n, hex);
+        }
         RET(n);
         return;
     }
@@ -439,7 +448,11 @@ static void ws_send(CPU* c) {
     if (k && k->connected) {
         int n = js_net_send(k->remote, (const uint8_t*)GPTR(ARG(1)), (int)ARG(2));
         static int logged;
-        if (logged++ < 20) port_log("send %08x: %u bytes -> %d", ARG(0), ARG(2), n);
+        if (logged++ < 20) {
+            char hex[3 * 160 + 1] = {0};
+            for (uint32_t i = 0; i < ARG(2) && i < 160; i++) snprintf(hex + 3 * i, 4, "%02x ", M8(ARG(1) + i));
+            port_log("send %08x: %u bytes -> %d %s", ARG(0), ARG(2), n, hex);
+        }
         if (n >= 0) { RET(n); return; }
     }
 #endif
