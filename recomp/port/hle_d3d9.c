@@ -348,6 +348,49 @@ static void x_MatrixOrthoRH(CPU* c) {
 }
 static void x_MatrixMultiply(CPU* c) { mat_mul(ARG(0), ARG(1), ARG(2)); RET(ARG(0)); }
 static void x_MatrixIdentity(CPU* c) { mat_identity(ARG(0)); RET(ARG(0)); }
+
+/* Cofactor expansion; returns the determinant. */
+static double mat_inverse(const float* m, float* out) {
+    double inv[16], det;
+    inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+    inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+    inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+    inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+    inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+    inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+    inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+    inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+    inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+    inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+    inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+    inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+    inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+    inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+    inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+    inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+    det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (out && det != 0)
+        for (int k = 0; k < 16; k++) out[k] = (float)(inv[k] / det);
+    return det;
+}
+static void read_mat(uint32_t p, float* m) { for (int k = 0; k < 16; k++) m[k] = MF32(p + 4 * (uint32_t)k); }
+
+/* D3DXMatrixInverse(out, pDeterminant, m): NULL when the matrix is singular. */
+static void x_MatrixInverse(CPU* c) {
+    float m[16], r[16];
+    read_mat(ARG(2), m);
+    double det = mat_inverse(m, r);
+    if (ARG(1)) MF32(ARG(1)) = (float)det;
+    if (det == 0) { RET(0); return; }
+    for (int k = 0; k < 16; k++) MF32(ARG(0) + 4 * (uint32_t)k) = r[k];
+    RET(ARG(0));
+}
+/* Returns a float, so the result goes on the x87 stack. */
+static void x_MatrixDeterminant(CPU* c) {
+    float m[16];
+    read_mat(ARG(0), m);
+    FPUSH((double)(float)mat_inverse(m, 0));
+}
 static void x_CreateTexture(CPU* c) { M32(ARG(7)) = make_texture(ARG(1), ARG(2), ARG(3), ARG(5) ? ARG(5) : 21); RET(0); }
 
 /* ID3DXMatrixStack: +40 holds the stack array (32 matrices), +44 the depth. */
@@ -448,6 +491,8 @@ static const Hle d3d9[] = {
     {"d3dx9.dll", "D3DXMatrixOrthoRH", 5, x_MatrixOrthoRH},
     {"d3dx9.dll", "D3DXMatrixMultiply", 3, x_MatrixMultiply},
     {"d3dx9.dll", "D3DXMatrixIdentity", 1, x_MatrixIdentity},
+    {"d3dx9.dll", "D3DXMatrixInverse", 3, x_MatrixInverse},
+    {"d3dx9.dll", "D3DXMatrixDeterminant", 1, x_MatrixDeterminant},
     {"d3dx9.dll", "D3DXCreateTexture", 8, x_CreateTexture},
 };
 
