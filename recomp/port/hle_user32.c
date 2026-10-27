@@ -1,6 +1,7 @@
 #include "port.h"
 #include <ctype.h>
 #include <stdlib.h>
+#include <time.h>
 
 #define RET(v) (c->eax = (uint32_t)(v))
 
@@ -179,9 +180,39 @@ static void u_PostMessageA(CPU* c) {
 }
 static void u_PostQuitMessage(CPU* c) { quit_posted = 1; }
 
+/* ---- timers: due ones are posted as WM_TIMER when the guest polls its queue ---- */
+
+typedef struct { int used, pending; uint32_t hwnd, id, proc; double interval, next; } Timer;
+static Timer timers[64];
+static uint32_t timer_next_id = 0x7000;
+
+static double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static void pump_timers(void) {
+    double now = now_ms();
+    for (int k = 0; k < 64; k++) {
+        Timer* t = &timers[k];
+        if (!t->used || t->pending || now < t->next) continue;
+        t->pending = 1;
+        t->next = now + t->interval;
+        queue[q_tail] = (QMsg){t->hwnd, 0x113, t->id, t->proc};
+        q_tail = (q_tail + 1) % 1024;
+    }
+}
+
+static void timer_delivered(uint32_t hwnd, uint32_t id) {
+    for (int k = 0; k < 64; k++)
+        if (timers[k].used && timers[k].hwnd == hwnd && timers[k].id == id) timers[k].pending = 0;
+}
+
 static int pop_msg(uint32_t m, int remove) {
     if (q_head == q_tail) return 0;
     QMsg* q = &queue[q_head];
+    if (remove && q->msg == 0x113) timer_delivered(q->hwnd, q->wp);
     M32(m) = q->hwnd; M32(m + 4) = q->msg; M32(m + 8) = q->wp; M32(m + 12) = q->lp; M32(m + 16) = 0;
     if (remove) q_head = (q_head + 1) % 1024;
     return 1;
@@ -191,7 +222,7 @@ static int pop_msg(uint32_t m, int remove) {
 
 static uint32_t input_hwnd;
 static int cursor_x, cursor_y;
-static uint8_t key_down[256];
+static uint8_t key_down[256], key_pressed[256];
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -205,8 +236,17 @@ EM_JS(int, js_input_poll, (int* out), {
     Atomics.store(ring, 1, tail + 1);
     return 1;
 });
+EM_JS(int, js_input_peek_change, (void), {
+    const ring = self.inputRing;
+    if (!ring) return 0;
+    const head = Atomics.load(ring, 0), tail = Atomics.load(ring, 1);
+    if (head === tail) return 0;
+    const type = ring[2 + (tail % ((ring.length - 2) >> 2)) * 4];
+    return type === 2 || type === 3 || type === 5 || type === 6 ? 1 : 0;
+});
 #else
 static int js_input_poll(int* out) { (void)out; return 0; }
+static int js_input_peek_change(void) { return 0; }
 #endif
 
 static void post(uint32_t hwnd, uint32_t msg, uint32_t wp, uint32_t lp) {
@@ -221,9 +261,17 @@ static uint32_t mouse_keys(void) {
 
 enum { IN_MOVE = 1, IN_DOWN, IN_UP, IN_WHEEL, IN_KEYDOWN, IN_KEYUP, IN_CHAR };
 
-static void pump_input(void) {
+/* A button or key press and its release must not land in the same frame: the game also polls the key state once a
+   frame, so only one state change goes through per Present. */
+static uint32_t last_change_frame = 0xffffffffu;
+
+static void pump_input(CPU* c) {
     int e[4];
-    while (input_hwnd && js_input_poll(e)) {
+    while (input_hwnd) {
+        int change = js_input_peek_change();
+        if (change && last_change_frame == port_frames) break;
+        if (!js_input_poll(e)) break;
+        if (change) last_change_frame = port_frames;
         uint32_t lp = ((uint32_t)e[3] & 0xffff) << 16 | ((uint32_t)e[2] & 0xffff);
         static const uint32_t vk[3] = {1, 4, 2}, down[3] = {0x201, 0x207, 0x204};
         int b = e[1] >= 0 && e[1] < 3 ? e[1] : 0;
@@ -232,11 +280,12 @@ static void pump_input(void) {
         if (e[0] != IN_MOVE && logged++ < 10) port_log("input %d %d (%d,%d) -> %08x", e[0], e[1], e[2], e[3], input_hwnd);
         switch (e[0]) {
         case IN_MOVE: post(input_hwnd, 0x200, mouse_keys(), lp); break;
-        case IN_DOWN: key_down[vk[b]] = 1; post(input_hwnd, down[b], mouse_keys(), lp); break;
+        case IN_DOWN: key_down[vk[b]] = 1; key_pressed[vk[b]] = 1; if (getenv("PORT_TRACE_CLICK")) { port_trace_budget = 1500; port_fn_trace_start(c); } post(input_hwnd, down[b], mouse_keys(), lp); break;
         case IN_UP: key_down[vk[b]] = 0; post(input_hwnd, down[b] + 1, mouse_keys(), lp); break;
         case IN_WHEEL: post(input_hwnd, 0x20A, (uint32_t)(e[1] & 0xffff) << 16 | mouse_keys(), lp); break;
         case IN_KEYDOWN:
             key_down[e[1] & 0xff] = 1;
+            key_pressed[e[1] & 0xff] = 1;
             post(input_hwnd, 0x100, (uint32_t)e[1], 1u | ((uint32_t)e[2] & 0xff) << 16);
             break;
         case IN_KEYUP:
@@ -250,20 +299,34 @@ static void pump_input(void) {
 
 static uint32_t idle_peeks;
 static void u_PeekMessageA(CPU* c) {
-    pump_input();
+    pump_input(c);
+    pump_timers();
     int got = pop_msg(ARG(0), ARG(4) & 1);
     if (!got && ++idle_peeks % 10000 == 0) port_log("PeekMessage idle x%u", idle_peeks);
     RET(got);
 }
 static void u_GetMessageA(CPU* c) {
     if (quit_posted) { RET(0); return; }
-    pump_input();
+    pump_input(c);
+    pump_timers();
+    if (q_head == q_tail) {
+        double soonest = 0;
+        for (int k = 0; k < 64; k++)
+            if (timers[k].used && (!soonest || timers[k].next < soonest)) soonest = timers[k].next;
+        while (soonest && now_ms() < soonest) {}
+        pump_input(c);
+        pump_timers();
+    }
     if (!pop_msg(ARG(0), 1)) port_fatal("GetMessage with an empty queue (nothing would wake the guest)");
     RET(1);
 }
 static void u_TranslateMessage(CPU* c) { RET(0); }
 static void u_DispatchMessageA(CPU* c) {
     uint32_t m = ARG(0);
+    if (M32(m + 4) == 0x113 && M32(m + 12)) {
+        RET(guest_call(c, M32(m + 12), 4, M32(m), 0x113u, M32(m + 8), (uint32_t)now_ms()));
+        return;
+    }
     RET(send_message(c, M32(m), M32(m + 4), M32(m + 8), M32(m + 12)));
 }
 static void u_WaitMessage(CPU* c) { RET(1); }
@@ -357,7 +420,11 @@ static void u_GetKeyboardLayout(CPU* c) { RET(0x04090409); }
 static void u_GetKeyboardLayoutList(CPU* c) { if (ARG(0) && ARG(1)) M32(ARG(1)) = 0x04090409; RET(1); }
 static void u_GetKeyboardState(CPU* c) { for (int k = 0; k < 256; k++) M8(ARG(0) + k) = key_down[k] ? 0x80 : 0; RET(1); }
 static void u_GetKeyState(CPU* c) { RET(key_down[ARG(0) & 0xff] ? 0xFFFF8000u : 0); }
-static void u_GetAsyncKeyState(CPU* c) { RET(key_down[ARG(0) & 0xff] ? 0x8000u : 0); }
+static void u_GetAsyncKeyState(CPU* c) {
+    uint32_t k = ARG(0) & 0xff, r = (key_down[k] ? 0x8000u : 0) | key_pressed[k];
+    key_pressed[k] = 0;
+    RET(r);
+}
 static void u_GetCursorPos(CPU* c) { M32(ARG(0)) = (uint32_t)cursor_x; M32(ARG(0) + 4) = (uint32_t)cursor_y; RET(1); }
 static void u_SetCursorPos(CPU* c) { RET(1); }
 static void u_ShowCursor(CPU* c) { RET(1); }
@@ -381,8 +448,24 @@ static void u_MessageBoxA(CPU* c) {
     RET(1);
 }
 static void u_MessageBeep(CPU* c) { RET(1); }
-static void u_SetTimer(CPU* c) { RET(ARG(1) ? ARG(1) : 1); }
-static void u_KillTimer(CPU* c) { RET(1); }
+static void u_SetTimer(CPU* c) {
+    uint32_t hwnd = ARG(0), id = ARG(1);
+    Timer* t = 0;
+    for (int k = 0; k < 64 && hwnd; k++)
+        if (timers[k].used && timers[k].hwnd == hwnd && timers[k].id == id) t = &timers[k];
+    for (int k = 0; k < 64 && !t; k++)
+        if (!timers[k].used) t = &timers[k];
+    if (!t) { RET(0); return; }
+    if (!hwnd) id = timer_next_id++;
+    *t = (Timer){1, 0, hwnd, id, ARG(3), ARG(2) < 10 ? 10 : ARG(2), 0};
+    t->next = now_ms() + t->interval;
+    RET(id);
+}
+static void u_KillTimer(CPU* c) {
+    for (int k = 0; k < 64; k++)
+        if (timers[k].used && timers[k].hwnd == ARG(0) && timers[k].id == ARG(1)) timers[k].used = 0;
+    RET(1);
+}
 static void u_InvalidateRect(CPU* c) { RET(1); }
 static void u_UpdateWindow(CPU* c) { RET(1); }
 static void u_ValidateRect(CPU* c) { RET(1); }

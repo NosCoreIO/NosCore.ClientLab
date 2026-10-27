@@ -62,6 +62,7 @@ static uint32_t make_texture(uint32_t w, uint32_t h, uint32_t levels, uint32_t f
     for (lw = w, lh = h; n < levels; n++, lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1)
         M32(arr + 4 * n) = make_surface(lw, lh, fmt, t);
     M32(t + 40) = arr;
+    M32(t + 56) = 1;
     return t;
 }
 
@@ -138,6 +139,7 @@ static const Method d3d_methods[] = {
 /* ---- IDirect3DDevice9 ---- */
 
 static uint32_t frames;
+uint32_t port_frames;
 static void v_TestCooperativeLevel(CPU* c) { RET(0); }
 static void v_GetAvailableTextureMem(CPU* c) { RET(512u << 20); }
 static void v_GetDirect3D(CPU* c) { M32(ARG(1)) = the_d3d; M32(the_d3d + 4)++; RET(0); }
@@ -150,8 +152,9 @@ static void v_Present(CPU* c) {
     static const char* shot_dir;
     static int checked;
     if (!checked) { checked = 1; shot_dir = getenv("PORT_SHOT_DIR"); }
+    port_frames++;
     if (++frames % 300 == 1) port_log("Present frame %u", frames);
-    web_present(backbuffer);
+    if (!r_gl_present()) web_present(backbuffer);
     if (shot_dir && (frames == 1 || frames % 600 == 0)) {
         char path[400];
         snprintf(path, sizeof path, "%s/frame_%06u.bmp", shot_dir, frames);
@@ -180,7 +183,6 @@ static void v_GetViewport(CPU* c) {
 }
 static void v_zero_out1(CPU* c) { if (ARG(1)) M32(ARG(1)) = 0; RET(0); }
 static void v_zero_out2(CPU* c) { if (ARG(2)) M32(ARG(2)) = 0; RET(0); }
-static void v_zero_out3(CPU* c) { if (ARG(3)) M32(ARG(3)) = 0; RET(0); }
 static void v_zero_struct(CPU* c) { if (ARG(1)) memset(GPTR(ARG(1)), 0, 68); RET(0); }
 static void v_zero_struct2(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, 104); RET(0); }
 static void v_new_other_out2(CPU* c) { M32(ARG(2)) = make_obj(vt_other, O_OTHER); RET(0); }
@@ -273,10 +275,17 @@ static void t_LockRect(CPU* c) {
     if (!s) { RET(0x8876086cu); return; }
     M32(ARG(2)) = M32(s + 32);
     M32(ARG(2) + 4) = M32(s + 28);
+    M32(THIS + 56) = 1;
     RET(0);
 }
 static void s_GetDesc(CPU* c) { fill_surface_desc(THIS, ARG(1)); RET(0); }
-static void s_LockRect(CPU* c) { M32(ARG(1)) = M32(THIS + 32); M32(ARG(1) + 4) = M32(THIS + 28); RET(0); }
+static void s_LockRect(CPU* c) {
+    M32(ARG(1)) = M32(THIS + 32);
+    M32(ARG(1) + 4) = M32(THIS + 28);
+    M32(THIS + 56) = 1;
+    if (M32(THIS + 44)) M32(M32(THIS + 44) + 56) = 1;
+    RET(0);
+}
 static void s_GetContainer(CPU* c) { M32(ARG(2)) = M32(THIS + 44); RET(M32(THIS + 44) ? 0 : 0x80004002u); }
 static void s_GetDC(CPU* c) { M32(ARG(1)) = 0x00300100u; RET(0); }
 static void b_Lock(CPU* c) { M32(ARG(3)) = M32(THIS + 28) + ARG(1); RET(0); }

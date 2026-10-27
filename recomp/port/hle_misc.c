@@ -348,6 +348,7 @@ typedef struct {
     int used, remote, connected, closed;
     uint8_t* rx;
     uint32_t rx_len;
+    double last_poll;
 } Sock;
 static Sock socks[MAX_SOCK];
 #define RX_CAP (1u << 20)
@@ -357,6 +358,9 @@ static Sock* sock_get(uint32_t s) { return s >= SOCK_BASE && s < SOCK_BASE + MAX
 static void sock_poll(Sock* k) {
 #ifdef __EMSCRIPTEN__
     if (!k->connected || k->closed || k->rx_len >= RX_CAP / 2) return;
+    double now = emscripten_get_now();
+    if (now - k->last_poll < 8) return;
+    k->last_poll = now;
     int n = js_net_recv(k->remote, k->rx + k->rx_len, (int)(RX_CAP - k->rx_len));
     if (n == -2) k->closed = 1;
     else if (n > 0) k->rx_len += (uint32_t)n;

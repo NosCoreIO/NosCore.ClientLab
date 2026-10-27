@@ -13,6 +13,31 @@ uint32_t port_guest_cmdline_addr;
 static FILE* log_file;
 static CPU* main_cpu;
 static int port_trace;
+int port_trace_budget;
+
+/* While a click trace is running, each guest function seen in the entry ring is logged once. */
+static uint32_t fn_seen[4096];
+static uint32_t fn_trace_pos;
+static int fn_trace_active;
+
+void port_fn_trace_start(CPU* c) {
+    memset(fn_seen, 0, sizeof fn_seen);
+    fn_trace_pos = c->trace_pos;
+    fn_trace_active = 1;
+}
+
+static void fn_trace_drain(CPU* c) {
+    if (!fn_trace_active) return;
+    if (port_trace_budget <= 0) { fn_trace_active = 0; return; }
+    if (c->trace_pos - fn_trace_pos > 64) fn_trace_pos = c->trace_pos - 64;
+    for (; fn_trace_pos != c->trace_pos; fn_trace_pos++) {
+        uint32_t p = fn_trace_pos & 63, e = c->trace[p * 2], h = (e * 2654435761u) >> 20;
+        while (fn_seen[h] && fn_seen[h] != e) h = (h + 1) & 4095;
+        if (fn_seen[h]) continue;
+        fn_seen[h] = e;
+        port_log("fn %08x (ret %08x)", e, c->trace[p * 2 + 1]);
+    }
+}
 
 void port_log(const char* fmt, ...) {
     va_list ap;
@@ -229,10 +254,12 @@ void rt_call_host_raw(CPU* c, uint32_t target) {
             return;
         }
         if (!t->fn) port_fatal("unimplemented API %s!%s (called from %08x)", t->dll, t->name, M32(c->esp));
-        if (port_trace) port_log("api %s!%s from %08x esp=%08x args %08x %08x %08x %08x", t->dll, t->name, M32(c->esp), c->esp,
-                                 M32(c->esp + 4), M32(c->esp + 8), M32(c->esp + 12), M32(c->esp + 16));
+        fn_trace_drain(c);
+        int traced = port_trace || (port_trace_budget > 0 && !strstr(t->name, "::") && port_trace_budget--);
+        if (traced) port_log("api %s!%s from %08x esp=%08x args %08x %08x %08x %08x", t->dll, t->name, M32(c->esp), c->esp,
+                             M32(c->esp + 4), M32(c->esp + 8), M32(c->esp + 12), M32(c->esp + 16));
         t->fn(c);
-        if (port_trace) port_log("    -> %08x", c->eax);
+        if (traced) port_log("    -> %08x", c->eax);
         if (!c->pend) c->esp += 4 + (t->argc == CDECL_ARGS ? 0 : 4u * t->argc);
         return;
     }

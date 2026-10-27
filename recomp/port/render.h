@@ -24,3 +24,4 @@ void r_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t
 void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z);
 void r_dump_bmp(uint32_t surface, const char* path);
 void r_stats(void);
+int r_gl_present(void);

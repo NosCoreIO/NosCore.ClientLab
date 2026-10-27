@@ -40,6 +40,7 @@ self.Module = {
       postMessage({ type: 'log', text: code ? 'auth code from dev server' : `no auth code (${xhr.status} ${xhr.responseText})` });
     }
     if (code) Module.ENV._NC_AUTH_CODE = code;
+    if (params.get('trace')) Module.ENV.PORT_TRACE_CLICK = '1';
   }],
   onRuntimeInitialized() {
     mountGame(Module.FS);

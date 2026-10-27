@@ -23,10 +23,11 @@ LINK = ["-O1", "-sGLOBAL_BASE=536870912", "-sINITIAL_MEMORY=1024MB", "-sALLOW_ME
 
 def compile_one(src):
     obj = os.path.join(OUT, "obj", os.path.basename(src)[:-2] + ".o")
-    deps = [src, os.path.join(RT, "rt.h")] + ([] if src.startswith(GEN) else [os.path.join(PORT, "port.h")])
+    deps = [src, os.path.join(RT, "rt.h")] + ([] if src.startswith(GEN) else [os.path.join(PORT, "port.h")] + glob.glob(os.path.join(PORT, "*.inc")))
     if os.path.exists(obj) and os.path.getmtime(obj) > max(os.path.getmtime(d) for d in deps):
         return src, 0, ""
-    flags = FLAGS if src.startswith(GEN) else [f for f in FLAGS if f != "-w"] + ["-Wunused-function"]
+    # The host layer (renderer, HLE, runtime helpers) is small and hot: build it at -O2.
+    flags = FLAGS if src.startswith(GEN) else ["-O2"] + [f for f in FLAGS if f not in ("-w", "-O1")] + ["-Wunused-function"]
     r = subprocess.run([EMCC, *flags, "-I", RT, "-I", PORT, src, "-o", obj], capture_output=True, text=True)
     if r.returncode == 0 and "warning" in r.stderr and not src.startswith(GEN):
         print(r.stderr[-1500:])

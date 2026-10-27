@@ -4,6 +4,10 @@
 #include <math.h>
 #include <stdlib.h>
 
+static int gl_on;
+static void gl_start(uint32_t backbuffer);
+static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h);
+
 /* surface objects (see hle_d3d9.c): +12 width +16 height +20 format +28 bits +32 pitch; texture +24 levels +40 levels[] */
 #define SW(s) M32((s) + 12)
 #define SH(s) M32((s) + 16)
@@ -42,6 +46,7 @@ void r_init(uint32_t backbuffer) {
         R.samp[s][5] = R.samp[s][6] = 1;
     }
     R.target = backbuffer;
+    gl_start(backbuffer);
 }
 
 void r_set_render_target(uint32_t surface) { R.target = surface; R.vp_set = 0; }
@@ -375,7 +380,7 @@ static void log_state_combo(void) {
     uint32_t tex = R.tex_obj[0], s = tex && M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
     uint32_t key[8] = {s ? SFMT(s) : 0, s ? SW(s) << 16 | SH(s) : 0, R.rs[27] << 16 | R.rs[19] << 8 | R.rs[20], R.rs[171],
                        R.tss[0][1] << 16 | R.tss[0][2] << 8 | R.tss[0][3], R.tss[0][4] << 16 | R.tss[0][5] << 8 | R.tss[0][6],
-                       R.tss[1][1] << 16 | R.tex_obj[1] != 0, R.fvf};
+                       R.tss[1][1] << 16 | (R.tex_obj[1] != 0), R.fvf};
     for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) return;
     if (nseen >= 64) return;
     memcpy(seen[nseen++], key, sizeof key);
@@ -385,8 +390,11 @@ static void log_state_combo(void) {
              R.target ? SFMT(R.target) : 0);
 }
 
+static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n);
+
 static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
     S.draws++;
+    if (gl_on) { gl_draw_list(prim, v, n); return; }
     log_state_combo();
     if (!R.target || !SBITS(R.target) || (SFMT(R.target) != 21 && SFMT(R.target) != 22)) { S.skipped++; return; }
     if (prim == 4) for (uint32_t k = 0; k < count && 3 * k + 2 < n; k++) triangle(&v[3 * k], &v[3 * k + 1], &v[3 * k + 2]);
@@ -436,6 +444,11 @@ void r_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t
 
 void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z) {
     uint32_t t = R.target;
+    if (gl_on) {
+        gl_clear((int)flags, color, z, (int)(R.vp_set ? R.vp_x : 0), (int)(R.vp_set ? R.vp_y : 0),
+                 (int)(R.vp_set ? R.vp_w : SW(t)), (int)(R.vp_set ? R.vp_h : SH(t)));
+        return;
+    }
     if ((flags & 2) && t) {
         float* zp = depth_for_target();
         for (uint32_t k = 0; k < zw * zh; k++) zp[k] = z;
@@ -482,3 +495,5 @@ void r_stats(void) {
     }
     memset(&S, 0, sizeof S);
 }
+
+#include "render_gl.inc"

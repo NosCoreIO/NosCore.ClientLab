@@ -1,0 +1,253 @@
+/* WebGL2 backend, included at the end of render.c (it needs R, Vtx and texel). In the browser worker the vertices
+   are still transformed by fetch(); the GPU rasterises, shades the two texture stages, blends and depth-tests. */
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+
+EM_JS(int, js_gl_init, (int w, int h), {
+    if (typeof OffscreenCanvas === 'undefined' || typeof importScripts !== 'function') return 0;
+    const canvas = new OffscreenCanvas(w, h);
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, preserveDrawingBuffer: false, depth: true });
+    if (!gl) return 0;
+    const vs = '#version 300 es\n' +
+        'in vec4 aPos; in vec4 aCol; in vec4 aUV;\n' +
+        'out vec4 vCol; out vec4 vUV;\n' +
+        'void main() { gl_Position = aPos; vCol = aCol.bgra; vUV = aUV; }\n';
+    const fs = '#version 300 es\n' +
+        'precision highp float; precision highp int;\n' +
+        'in vec4 vCol; in vec4 vUV;\n' +
+        'uniform sampler2D uTex0, uTex1;\n' +
+        'uniform ivec4 uS0, uS1;\n' +
+        'uniform ivec4 uA0, uA1;\n' +
+        'uniform vec4 uTFactor;\n' +
+        'uniform ivec2 uATest;\n' +
+        'uniform float uARef;\n' +
+        'out vec4 outColor;\n' +
+        'vec4 arg(int a, vec4 tex, vec4 diff, vec4 cur) {\n' +
+        '  int s = a & 15; vec4 v = s == 0 ? diff : s == 1 ? cur : s == 2 ? tex : s == 3 ? uTFactor : vec4(1.0);\n' +
+        '  if ((a & 16) != 0) v = 1.0 - v;\n' +
+        '  if ((a & 32) != 0) v = vec4(v.a);\n' +
+        '  return v;\n' +
+        '}\n' +
+        'vec4 op(int o, vec4 a1, vec4 a2, vec4 cur) {\n' +
+        '  if (o == 1) return cur;\n' +
+        '  if (o == 2) return a1;\n' +
+        '  if (o == 3) return a2;\n' +
+        '  if (o == 5) return clamp(2.0 * a1 * a2, 0.0, 1.0);\n' +
+        '  if (o == 6) return clamp(4.0 * a1 * a2, 0.0, 1.0);\n' +
+        '  if (o == 7) return clamp(a1 + a2, 0.0, 1.0);\n' +
+        '  if (o == 8) return clamp(a1 + a2 - 0.5, 0.0, 1.0);\n' +
+        '  if (o == 9) return clamp(2.0 * (a1 + a2 - 0.5), 0.0, 1.0);\n' +
+        '  if (o == 10) return a1 - a2;\n' +
+        '  if (o == 11) return clamp(a1 + a2 - a1 * a2, 0.0, 1.0);\n' +
+        '  return a1 * a2;\n' +
+        '}\n' +
+        'vec4 stage(ivec4 s, ivec4 a, vec4 tex, vec4 diff, vec4 cur) {\n' +
+        '  vec3 c = op(s.x, arg(s.y, tex, diff, cur), arg(s.z, tex, diff, cur), cur).rgb;\n' +
+        '  float al = s.w == 1 ? cur.a : op(s.w, arg(a.x, tex, diff, cur), arg(a.y, tex, diff, cur), cur).a;\n' +
+        '  return vec4(c, al);\n' +
+        '}\n' +
+        'void main() {\n' +
+        '  vec4 cur = vCol;\n' +
+        '  if (uS0.x != 1) {\n' +
+        '    vec4 t0 = uA0.z != 0 ? texture(uTex0, vUV.xy) : vec4(1.0);\n' +
+        '    cur = stage(uS0, uA0, t0, vCol, cur);\n' +
+        '    if (uS1.x != 1) {\n' +
+        '      vec4 t1 = uA1.z != 0 ? texture(uTex1, vUV.zw) : vec4(1.0);\n' +
+        '      cur = stage(uS1, uA1, t1, vCol, cur);\n' +
+        '    }\n' +
+        '  }\n' +
+        '  if (uATest.x != 0) {\n' +
+        '    float a = floor(cur.a * 255.0 + 0.5); int f = uATest.y;\n' +
+        '    bool pass = f == 1 ? false : f == 2 ? a < uARef : f == 3 ? a == uARef : f == 4 ? a <= uARef :\n' +
+        '                f == 5 ? a > uARef : f == 6 ? a != uARef : f == 7 ? a >= uARef : true;\n' +
+        '    if (!pass) discard;\n' +
+        '  }\n' +
+        '  outColor = cur;\n' +
+        '}\n';
+    const sh = (type, src) => {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+        return s;
+    };
+    const prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+    gl.bindAttribLocation(prog, 0, 'aPos');
+    gl.bindAttribLocation(prog, 1, 'aCol');
+    gl.bindAttribLocation(prog, 2, 'aUV');
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+    const u = {};
+    for (const n of ['uTex0', 'uTex1', 'uS0', 'uS1', 'uA0', 'uA1', 'uTFactor', 'uATest', 'uARef']) u[n] = gl.getUniformLocation(prog, n);
+    gl.uniform1i(u.uTex0, 0);
+    gl.uniform1i(u.uTex1, 1);
+    const vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 36, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 36, 16);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 36, 20);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.enable(gl.SCISSOR_TEST);
+    self.__gl = { canvas, gl, u, textures: new Map(), w, h, last: 0 };
+    return 1;
+});
+
+EM_JS(void, js_gl_texture, (uint32_t id, int w, int h, const uint8_t* rgba), {
+    const G = self.__gl, gl = G.gl;
+    let t = G.textures.get(id);
+    if (!t) { t = gl.createTexture(); G.textures.set(id, t); }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, HEAPU8.subarray(rgba, rgba + w * h * 4));
+    gl.generateMipmap(gl.TEXTURE_2D);
+});
+
+/* st: 0..5 stage 0 (colorop carg1 carg2 alphaop aarg1 aarg2), 6..11 stage 1, 12/13 texture ids, 14 tfactor,
+   15 alpha test, 16 alpha func, 17 alpha ref, 18 blend, 19 src, 20 dst, 21 blend op, 22 z enable, 23 z write,
+   24 z func, 25..28 scissor x y w h, 29..33 stage 0 sampler (mag min mip addressu addressv), 34..38 stage 1 */
+EM_JS(void, js_gl_draw, (int prim, const uint8_t* verts, int n, const int32_t* st), {
+    const G = self.__gl, gl = G.gl, u = G.u, base = st >> 2, S = (i) => HEAP32[base + i];
+    gl.uniform4i(u.uS0, S(0), S(1), S(2), S(3));
+    gl.uniform4i(u.uA0, S(4), S(5), S(12) ? 1 : 0, 0);
+    gl.uniform4i(u.uS1, S(6), S(7), S(8), S(9));
+    gl.uniform4i(u.uA1, S(10), S(11), S(13) ? 1 : 0, 0);
+    const tf = S(14) >>> 0;
+    gl.uniform4f(u.uTFactor, ((tf >>> 16) & 255) / 255, ((tf >>> 8) & 255) / 255, (tf & 255) / 255, (tf >>> 24) / 255);
+    gl.uniform2i(u.uATest, S(15), S(16));
+    gl.uniform1f(u.uARef, S(17) & 255);
+    const wrap = (a) => a === 2 ? gl.MIRRORED_REPEAT : (a === 3 || a === 4) ? gl.CLAMP_TO_EDGE : gl.REPEAT;
+    for (let k = 0; k < 2; k++) {
+        const id = S(12 + k) >>> 0;
+        const t = id ? G.textures.get(id) : null;
+        if (!t) continue;
+        const b = 29 + 5 * k, magLinear = S(b) >= 2, minLinear = S(b + 1) >= 2;
+        gl.activeTexture(gl.TEXTURE0 + k);
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magLinear ? gl.LINEAR : gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minLinear ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap(S(b + 3)));
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap(S(b + 4)));
+    }
+    if (S(18)) {
+        const f = [gl.ONE, gl.ZERO, gl.ONE, gl.SRC_COLOR, gl.ONE_MINUS_SRC_COLOR, gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA,
+                   gl.DST_ALPHA, gl.ONE_MINUS_DST_ALPHA, gl.DST_COLOR, gl.ONE_MINUS_DST_COLOR, gl.SRC_ALPHA_SATURATE];
+        const eq = [gl.FUNC_ADD, gl.FUNC_ADD, gl.FUNC_SUBTRACT, gl.FUNC_REVERSE_SUBTRACT, gl.MIN, gl.MAX];
+        gl.enable(gl.BLEND);
+        gl.blendFunc(f[S(19)] ?? gl.ONE, f[S(20)] ?? gl.ZERO);
+        gl.blendEquation(eq[S(21)] ?? gl.FUNC_ADD);
+    } else gl.disable(gl.BLEND);
+    if (S(22)) {
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(0x1FF + Math.min(Math.max(S(24), 1), 8));
+        gl.depthMask(S(23) !== 0);
+    } else gl.disable(gl.DEPTH_TEST);
+    gl.scissor(S(25), G.h - S(26) - S(28), S(27), S(28));
+    gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(verts, verts + n * 36), gl.STREAM_DRAW);
+    gl.drawArrays(prim, 0, n);
+});
+
+EM_JS(void, js_gl_clear, (int flags, uint32_t color, float z, int x, int y, int w, int h), {
+    const G = self.__gl, gl = G.gl;
+    gl.scissor(x, G.h - y - h, w, h);
+    let bits = 0;
+    if (flags & 1) {
+        gl.clearColor(((color >>> 16) & 255) / 255, ((color >>> 8) & 255) / 255, (color & 255) / 255, 1);
+        bits |= gl.COLOR_BUFFER_BIT;
+    }
+    if (flags & 2) { gl.depthMask(true); gl.clearDepth(z); bits |= gl.DEPTH_BUFFER_BIT; }
+    if (bits) gl.clear(bits);
+});
+
+EM_JS(void, js_gl_present, (void), {
+    const G = self.__gl, now = performance.now();
+    if (now - G.last < 16) return;
+    G.last = now;
+    const bmp = G.canvas.transferToImageBitmap();
+    postMessage({ type: 'bitmap', bmp }, [bmp]);
+});
+
+static uint32_t gl_backbuffer;
+static uint8_t* gl_verts;
+static uint8_t* gl_rgba;
+static uint32_t gl_rgba_size;
+
+static void gl_start(uint32_t backbuffer) {
+    gl_backbuffer = backbuffer;
+    gl_on = js_gl_init((int)SW(backbuffer), (int)SH(backbuffer));
+    if (gl_on) {
+        gl_verts = malloc(65536 * 36);
+        port_log("render: WebGL2");
+    }
+}
+
+/* Textures are uploaded (level 0, then mipmapped) when Lock marked them dirty: +56 is 2 once uploaded. */
+static uint32_t gl_texture(uint32_t tex) {
+    if (!tex) return 0;
+    uint32_t s = M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
+    if (!s || !SBITS(s)) return 0;
+    if (M32(tex + 56) != 2) {
+        uint32_t w = SW(s), h = SH(s);
+        if (w * h * 4 > gl_rgba_size) { free(gl_rgba); gl_rgba_size = w * h * 4; gl_rgba = malloc(gl_rgba_size); }
+        uint8_t* p = gl_rgba;
+        for (uint32_t y = 0; y < h; y++)
+            for (uint32_t x = 0; x < w; x++, p += 4) {
+                uint32_t t = texel(s, x, y);
+                p[0] = (uint8_t)(t >> 16); p[1] = (uint8_t)(t >> 8); p[2] = (uint8_t)t; p[3] = (uint8_t)(t >> 24);
+            }
+        js_gl_texture(tex, (int)w, (int)h, gl_rgba);
+        M32(tex + 56) = 2;
+    }
+    return tex;
+}
+
+static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
+    if (R.target != gl_backbuffer || n == 0) return;
+    float tw = (float)SW(R.target), th = (float)SH(R.target);
+    for (uint32_t k = 0; k < n; k++) {
+        float* f = (float*)(gl_verts + 36 * k);
+        float w = v[k].w > 0 ? v[k].w : 1;
+        f[0] = ((v[k].x + 0.5f) / tw * 2 - 1) * w;
+        f[1] = (1 - (v[k].y + 0.5f) / th * 2) * w;
+        f[2] = (v[k].z * 2 - 1) * w;
+        f[3] = w;
+        memcpy(gl_verts + 36 * k + 16, &v[k].diffuse, 4);
+        memcpy(gl_verts + 36 * k + 20, v[k].uv, 16);
+    }
+    int32_t st[40] = {0};
+    for (int s = 0; s < 2; s++) {
+        for (int k = 0; k < 6; k++) st[6 * s + k] = (int32_t)R.tss[s][1 + k];
+        st[12 + s] = (int32_t)gl_texture(R.tex_obj[s]);
+        st[29 + 5 * s] = (int32_t)R.samp[s][5];
+        st[29 + 5 * s + 1] = (int32_t)R.samp[s][6];
+        st[29 + 5 * s + 2] = (int32_t)R.samp[s][7];
+        st[29 + 5 * s + 3] = (int32_t)R.samp[s][1];
+        st[29 + 5 * s + 4] = (int32_t)R.samp[s][2];
+    }
+    st[14] = (int32_t)R.rs[60]; st[15] = (int32_t)R.rs[15]; st[16] = (int32_t)R.rs[25]; st[17] = (int32_t)R.rs[24];
+    st[18] = (int32_t)R.rs[27]; st[19] = (int32_t)R.rs[19]; st[20] = (int32_t)R.rs[20];
+    st[21] = (int32_t)(R.rs[171] ? R.rs[171] : 1);
+    st[22] = (int32_t)R.rs[7]; st[23] = (int32_t)R.rs[14]; st[24] = (int32_t)R.rs[23];
+    st[25] = (int32_t)(R.vp_set ? R.vp_x : 0); st[26] = (int32_t)(R.vp_set ? R.vp_y : 0);
+    st[27] = (int32_t)(R.vp_set ? R.vp_w : SW(R.target)); st[28] = (int32_t)(R.vp_set ? R.vp_h : SH(R.target));
+    js_gl_draw((int)prim, gl_verts, (int)n, st);
+}
+
+static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h) { js_gl_clear(flags, color, z, x, y, w, h); }
+
+int r_gl_present(void) {
+    if (!gl_on) return 0;
+    js_gl_present();
+    return 1;
+}
+#else
+static void gl_start(uint32_t backbuffer) { (void)backbuffer; }
+static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) { (void)prim; (void)v; (void)n; }
+static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h) {
+    (void)flags; (void)color; (void)z; (void)x; (void)y; (void)w; (void)h;
+}
+int r_gl_present(void) { return 0; }
+#endif
