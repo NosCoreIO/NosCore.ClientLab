@@ -42,6 +42,10 @@ static Handle* handle_get(uint32_t h) {
     if (h < HANDLE_BASE || k >= 512 || handles[k].kind == H_FREE) return 0;
     return &handles[k];
 }
+int port_file_fd(uint32_t handle) {
+    Handle* h = handle_get(handle);
+    return h && h->kind == H_FILE ? h->fd : -1;
+}
 
 /* Guest paths are Windows paths; the host sees them with forward slashes. */
 static void host_path(const char* g, char* out, size_t n) { port_host_path(g, out, n); }

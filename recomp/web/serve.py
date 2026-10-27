@@ -5,15 +5,96 @@ usage: serve.py --game "C:/Program Files (x86)/Nostale" [--build C:/tools/re/wor
 """
 import argparse
 import http.server
+import itertools
 import json
 import mimetypes
 import os
+import socket
+import ssl
+import threading
 import urllib.parse
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def make_handler(game, build):
+class Relay:
+    """TCP connections held for the worker, which cannot open sockets itself and never yields to an event loop:
+    it drives them with synchronous HTTP requests (/net/connect, /net/send, /net/recv, /net/close)."""
+
+    def __init__(self):
+        self.ids = itertools.count(1)
+        self.conns = {}
+        self.lock = threading.Lock()
+
+    def connect(self, host, port):
+        s = socket.create_connection((host, port), timeout=5)
+        s.settimeout(None)
+        cid = next(self.ids)
+        conn = {"sock": s, "buf": bytearray(), "closed": False, "lock": threading.Lock()}
+        with self.lock:
+            self.conns[cid] = conn
+        threading.Thread(target=self._reader, args=(conn,), daemon=True).start()
+        return cid
+
+    def _reader(self, conn):
+        try:
+            while True:
+                data = conn["sock"].recv(65536)
+                if not data:
+                    break
+                with conn["lock"]:
+                    conn["buf"] += data
+        except OSError:
+            pass
+        conn["closed"] = True
+
+    def send(self, cid, data):
+        conn = self.conns.get(cid)
+        if not conn or conn["closed"]:
+            return False
+        conn["sock"].sendall(data)
+        return True
+
+    def recv(self, cid):
+        conn = self.conns.get(cid)
+        if not conn:
+            return None
+        with conn["lock"]:
+            data, conn["buf"] = bytes(conn["buf"]), bytearray()
+        if not data and conn["closed"]:
+            return None
+        return data
+
+    def close(self, cid):
+        conn = self.conns.pop(cid, None)
+        if conn:
+            try:
+                conn["sock"].close()
+            except OSError:
+                pass
+
+
+def fetch_auth_code(auth_url, user, password):
+    """Same two calls as NosCore.Launcher: credentials -> session token, then a short-lived auth code."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    def post(path, body, bearer=None):
+        req = urllib.request.Request(f"{auth_url.rstrip('/')}/{path}", data=json.dumps(body).encode(), method="POST",
+                                     headers={"Content-Type": "application/json", "Accept": "application/json"})
+        if bearer:
+            req.add_header("Authorization", f"Bearer {bearer}")
+        with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
+            return json.loads(r.read())
+
+    session = post("api/v1/auth/thin/sessions", {"identity": user, "password": password, "gfLang": "EN", "locale": "en-GB", "mfa": None})
+    code = post("api/v1/auth/thin/codes", {"platformGameAccountId": session["platformGameAccountId"]}, session["token"])
+    return code["code"]
+
+
+def make_handler(game, build, relay, auth):
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             pass
@@ -52,8 +133,44 @@ def make_handler(game, build):
             self.end_headers()
             self.wfile.write(body)
 
+        def reply(self, status, body=b"", ctype="application/octet-stream"):
+            self.send_response(status)
+            self.headers_common(ctype, len(body))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def net(self, url):
+            q = urllib.parse.parse_qs(url.query)
+            op = url.path[len("/net/"):]
+            try:
+                if op == "connect":
+                    return self.reply(200, str(relay.connect(q["host"][0], int(q["port"][0]))).encode(), "text/plain")
+                cid = int(q["id"][0])
+                if op == "send":
+                    body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                    return self.reply(200 if relay.send(cid, body) else 410)
+                if op == "recv":
+                    data = relay.recv(cid)
+                    return self.reply(410) if data is None else self.reply(200, data)
+                if op == "close":
+                    relay.close(cid)
+                    return self.reply(200)
+            except OSError as e:
+                return self.reply(502, str(e).encode(), "text/plain")
+            self.reply(404)
+
         def serve(self, head):
-            if urllib.parse.urlparse(self.path).path == "/game-index.json":
+            url = urllib.parse.urlparse(self.path)
+            if url.path.startswith("/net/"):
+                return self.net(url)
+            if url.path == "/auth-code":
+                if not auth["user"]:
+                    return self.reply(404)
+                try:
+                    return self.reply(200, fetch_auth_code(auth["url"], auth["user"], auth["password"]).encode(), "text/plain")
+                except Exception as e:
+                    return self.reply(502, str(e).encode(), "text/plain")
+            if url.path == "/game-index.json":
                 return self.game_index()
             full = self.resolve()
             if not full or not os.path.isfile(full):
@@ -91,6 +208,9 @@ def make_handler(game, build):
         def do_GET(self):
             self.serve(False)
 
+        def do_POST(self):
+            self.serve(False)
+
         def do_HEAD(self):
             self.serve(True)
 
@@ -102,8 +222,12 @@ def main():
     ap.add_argument("--game", required=True)
     ap.add_argument("--build", default=r"C:\tools\re\work\wasm\web")
     ap.add_argument("--port", type=int, default=8077)
+    ap.add_argument("--auth-url", default="https://127.0.0.1:7001")
+    ap.add_argument("--user", help="local NosCore account used to mint _NC_AUTH_CODE (dev only)")
+    ap.add_argument("--password")
     a = ap.parse_args()
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(a.game, a.build))
+    auth = {"url": a.auth_url, "user": a.user, "password": a.password}
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(a.game, a.build, Relay(), auth))
     print(f"http://127.0.0.1:{a.port}/  (game: {a.game})")
     server.serve_forever()
 

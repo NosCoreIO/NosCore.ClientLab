@@ -26,7 +26,14 @@ self.Module = {
   print: (text) => postMessage({ type: 'log', text }),
   printErr: (text) => postMessage({ type: 'log', text }),
   preRun: [() => {
-    const code = params.get('auth');
+    let code = params.get('auth');
+    if (!code) {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', '/auth-code', false);
+      xhr.send();
+      if (xhr.status === 200) code = xhr.responseText;
+      postMessage({ type: 'log', text: code ? 'auth code from dev server' : `no auth code (${xhr.status} ${xhr.responseText})` });
+    }
     if (code) Module.ENV._NC_AUTH_CODE = code;
   }],
   onRuntimeInitialized() {

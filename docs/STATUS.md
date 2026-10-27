@@ -28,7 +28,9 @@ python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale"   # http://12
 
 - **Worker:** the client runs in a Web Worker and its loop never yields. Each `Present` posts an RGBA copy of the backbuffer, capped at about 30/s, and the page draws it on a canvas.
 - **Game files:** your own game folder is served by `serve.py` with HTTP Range support and mounted lazily, in lower case, at `/c:/nostale`. Windows paths are case-insensitive, so `port_host_path` lowercases them in the browser.
-- **Next:** input (canvas events → window messages, through a SharedArrayBuffer since the worker never yields; `serve.py` already sends COOP/COEP), a WebSocket↔TCP bridge for the login and world servers, GDI text (dialog text is missing), and threads.
+- **Network:** the worker cannot open sockets and never yields, so Winsock is relayed through `serve.py` with synchronous XHR (`/net/connect|send|recv|close`; the server holds the real TCP connection and buffers what arrives). Against a local NosCore stack the client connects to the login server on :4000, sends its 79-byte login packet and gets a 47-byte answer.
+- **Auth code:** the page takes `?auth=<_NC_AUTH_CODE>`. Otherwise the worker asks `serve.py /auth-code`, which mints one from `--user`/`--password` against the NosCore WebApi (same two calls as `NosCore.Launcher`). Without either, the login server rejects the client.
+- **Next:** input (canvas events → window messages, through a SharedArrayBuffer since the worker never yields; `serve.py` already sends COOP/COEP), GDI text (dialog text is missing), and threads.
 
 ### WebAssembly (portable host), as of 2026-10-27
 
@@ -39,7 +41,7 @@ The same generated C, built with Emscripten and linked with `recomp/port/` (a ho
 - Unimplemented APIs with a known stdcall argument count are soft stubs: logged once, return 0. Counts come from the SDK import libraries plus `EWDL.EWS`, which is actually D3DX9. `argc_table.c` is generated.
 - No `setjmp` in portable mode: Delphi's non-local except jumps propagate outward by returning (`guest_call` / `rt_call_host_raw`). Emscripten's setjmp transform takes forever on the huge generated functions.
 - VCL's runtime-written window thunks (`call` / `pop ecx` / `jmp StdWndProc`) are emulated.
-- Still missing: real rendering (WebGL/WebGPU), input, threads (`CreateThread` is logged and not run), networking (Winsock fails cleanly; it needs the WebSocket bridge), audio (Miles is silent), and a browser page.
+- Still missing: real rendering (WebGL/WebGPU), input, threads (`CreateThread` is logged and not run), audio (Miles is silent). Networking is relayed only in the browser build; under Node, `connect` is refused.
 
 ## Pipeline
 

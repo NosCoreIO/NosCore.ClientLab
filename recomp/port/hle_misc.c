@@ -4,12 +4,12 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define RET(v) (c->eax = (uint32_t)(v))
 
 static void r_zero(CPU* c) { RET(0); }
 static void r_one(CPU* c) { RET(1); }
-static void r_fail(CPU* c) { RET(0xFFFFFFFFu); }
 
 /* ---- OLE automation strings (BSTR: length prefix in bytes, then UTF-16, then NUL) ---- */
 
@@ -152,9 +152,19 @@ static void k_CreateFileMappingA(CPU* c) { RET(ARG(0) != 0xFFFFFFFFu ? ARG(0) | 
 static void k_MapViewOfFile(CPU* c) {
     uint32_t file = ARG(0) & 0x7fffffffu, size = ARG(4);
     if (!file) { RET(guest_alloc(size ? size : 0x10000, 0x1000)); return; }
-    /* The handle is one of our file handles: size it with GetFileSize semantics via the guest-visible API. */
-    port_log("MapViewOfFile of file handle %08x (size %u) not supported yet", file, size);
-    RET(0);
+    int fd = port_file_fd(file);
+    struct stat st;
+    uint32_t off = ARG(3);
+    if (fd < 0 || fstat(fd, &st) || off > (uint32_t)st.st_size) { RET(0); return; }
+    if (!size) size = (uint32_t)st.st_size - off;
+    uint32_t p = guest_alloc(size ? size : 1, 0x1000);
+    uint32_t got = 0;
+    while (got < size) {
+        ssize_t n = pread(fd, GPTR(p + got), size - got, off + got);
+        if (n <= 0) break;
+        got += (uint32_t)n;
+    }
+    RET(p);
 }
 static void k_UnmapViewOfFile(CPU* c) { RET(1); }
 
@@ -293,18 +303,163 @@ static void ws_inet_addr(CPU* c) {
     RET(a | b << 8 | d << 16 | e << 24);
 }
 static void ws_htons(CPU* c) { RET(((ARG(0) & 0xff) << 8) | ((ARG(0) >> 8) & 0xff)); }
-static uint32_t sock_next = 0x100;
-static void ws_socket(CPU* c) { RET(sock_next++); }
+/* In the browser, sockets are relayed by the dev server (recomp/web/serve.py, the /net endpoints) through synchronous XHR: the
+   worker never yields, so it cannot use a WebSocket. Under Node there is no network and connections are refused. */
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+EM_JS(int, js_net_connect, (const char* host, int port), {
+    var x = new XMLHttpRequest();
+    x.open('POST', '/net/connect?host=' + UTF8ToString(host) + '&port=' + port, false);
+    try { x.send(); } catch (e) { return -1; }
+    return x.status === 200 ? parseInt(x.responseText, 10) : -1;
+});
+EM_JS(int, js_net_send, (int id, const uint8_t* p, int n), {
+    var x = new XMLHttpRequest();
+    x.open('POST', '/net/send?id=' + id, false);
+    x.send(HEAPU8.slice(p, p + n));
+    return x.status === 200 ? n : -1;
+});
+EM_JS(int, js_net_recv, (int id, uint8_t* p, int cap), {
+    var x = new XMLHttpRequest();
+    x.open('GET', '/net/recv?id=' + id, false);
+    x.responseType = 'arraybuffer';
+    x.send();
+    if (x.status === 410) return -2;
+    if (x.status !== 200) return -1;
+    var d = new Uint8Array(x.response);
+    var n = Math.min(d.length, cap);
+    HEAPU8.set(d.subarray(0, n), p);
+    return n;
+});
+EM_JS(void, js_net_close, (int id), {
+    var x = new XMLHttpRequest();
+    x.open('POST', '/net/close?id=' + id, false);
+    x.send();
+});
+#endif
+
+#define MAX_SOCK 64
+#define SOCK_BASE 0x100u
+typedef struct {
+    int used, remote, connected, closed;
+    uint8_t* rx;
+    uint32_t rx_len;
+} Sock;
+static Sock socks[MAX_SOCK];
+#define RX_CAP (1u << 20)
+
+static Sock* sock_get(uint32_t s) { return s >= SOCK_BASE && s < SOCK_BASE + MAX_SOCK && socks[s - SOCK_BASE].used ? &socks[s - SOCK_BASE] : 0; }
+
+static void sock_poll(Sock* k) {
+#ifdef __EMSCRIPTEN__
+    if (!k->connected || k->closed || k->rx_len >= RX_CAP / 2) return;
+    int n = js_net_recv(k->remote, k->rx + k->rx_len, (int)(RX_CAP - k->rx_len));
+    if (n == -2) k->closed = 1;
+    else if (n > 0) k->rx_len += (uint32_t)n;
+#else
+    (void)k;
+#endif
+}
+
+static void ws_socket(CPU* c) {
+    for (int k = 0; k < MAX_SOCK; k++)
+        if (!socks[k].used) {
+            memset(&socks[k], 0, sizeof socks[k]);
+            socks[k].used = 1;
+            socks[k].rx = malloc(RX_CAP);
+            RET(SOCK_BASE + (uint32_t)k);
+            return;
+        }
+    RET(0xFFFFFFFFu);
+}
 static void ws_connect(CPU* c) {
-    uint32_t sa = ARG(1);
-    port_log("connect to %u.%u.%u.%u:%u refused (no network bridge yet)", M8(sa + 4), M8(sa + 5), M8(sa + 6), M8(sa + 7),
-             (M8(sa + 2) << 8) | M8(sa + 3));
+    Sock* k = sock_get(ARG(0));
+    uint32_t sa = ARG(1), port = (M8(sa + 2) << 8) | M8(sa + 3);
+    char host[32];
+    snprintf(host, sizeof host, "%u.%u.%u.%u", M8(sa + 4), M8(sa + 5), M8(sa + 6), M8(sa + 7));
+#ifdef __EMSCRIPTEN__
+    if (k && port_is_web()) {
+        k->remote = js_net_connect(host, (int)port);
+        port_log("connect %s:%u -> %s", host, port, k->remote > 0 ? "ok (relayed)" : "refused");
+        if (k->remote > 0) { k->connected = 1; RET(0); return; }
+    } else
+#endif
+        port_log("connect to %s:%u refused (network is only relayed in the browser)", host, port);
+    (void)k;
     set_last_error(10061);
     RET(0xFFFFFFFFu);
 }
-static void ws_select(CPU* c) { RET(0); }
-static void ws_fdisset(CPU* c) { RET(0); }
-static void ws_recv(CPU* c) { set_last_error(10057); RET(0xFFFFFFFFu); }
+static void fdset_filter(uint32_t set, int want_read) {
+    if (!set) return;
+    uint32_t n = M32(set), out = 0;
+    for (uint32_t k = 0; k < n && k < 64; k++) {
+        uint32_t s = M32(set + 4 + 4 * k);
+        Sock* so = sock_get(s);
+        int ready = 0;
+        if (so && want_read) { if (!so->rx_len) sock_poll(so); ready = so->rx_len > 0 || so->closed; }
+        else if (so) ready = so->connected;
+        if (ready) M32(set + 4 + 4 * out++) = s;
+    }
+    M32(set) = out;
+}
+static void ws_select(CPU* c) {
+    fdset_filter(ARG(1), 1);
+    fdset_filter(ARG(2), 0);
+    if (ARG(3)) M32(ARG(3)) = 0;
+    RET((ARG(1) ? M32(ARG(1)) : 0) + (ARG(2) ? M32(ARG(2)) : 0));
+}
+static void ws_fdisset(CPU* c) {
+    uint32_t s = ARG(0), set = ARG(1), n = M32(set);
+    for (uint32_t k = 0; k < n && k < 64; k++)
+        if (M32(set + 4 + 4 * k) == s) { RET(1); return; }
+    RET(0);
+}
+static void ws_recv(CPU* c) {
+    Sock* k = sock_get(ARG(0));
+    uint32_t buf = ARG(1), len = ARG(2);
+    if (!k) { set_last_error(10038); RET(0xFFFFFFFFu); return; }
+    if (!k->rx_len) sock_poll(k);
+    if (k->rx_len) {
+        uint32_t n = k->rx_len < len ? k->rx_len : len;
+        memcpy(GPTR(buf), k->rx, n);
+        memmove(k->rx, k->rx + n, k->rx_len - n);
+        k->rx_len -= n;
+        static int logged;
+        if (logged++ < 20) port_log("recv %08x: %u bytes", ARG(0), n);
+        RET(n);
+        return;
+    }
+    if (k->closed) { RET(0); return; }
+    set_last_error(10035);
+    RET(0xFFFFFFFFu);
+}
+static void ws_send(CPU* c) {
+    Sock* k = sock_get(ARG(0));
+#ifdef __EMSCRIPTEN__
+    if (k && k->connected) {
+        int n = js_net_send(k->remote, (const uint8_t*)GPTR(ARG(1)), (int)ARG(2));
+        static int logged;
+        if (logged++ < 20) port_log("send %08x: %u bytes -> %d", ARG(0), ARG(2), n);
+        if (n >= 0) { RET(n); return; }
+    }
+#endif
+    (void)k;
+    set_last_error(10057);
+    RET(0xFFFFFFFFu);
+}
+static void ws_closesocket(CPU* c) {
+    Sock* k = sock_get(ARG(0));
+    if (k) {
+#ifdef __EMSCRIPTEN__
+        if (k->connected) js_net_close(k->remote);
+#endif
+        port_log("closesocket %08x", ARG(0));
+        free(k->rx);
+        k->used = 0;
+    }
+    RET(0);
+}
+static void ws_WSAGetLastError(CPU* c) { RET(get_last_error()); }
 
 static void n_RtlGetVersion(CPU* c) {
     uint32_t p = ARG(0);
@@ -410,7 +565,7 @@ static const Hle misc[] = {
     {"noscore_gf.dll", "Steam_SetOverlayActivateCallback", CDECL_ARGS, r_zero},
     {"wsock32.dll", "WSAStartup", 2, ws_WSAStartup},
     {"wsock32.dll", "WSACleanup", 0, r_zero},
-    {"wsock32.dll", "WSAGetLastError", 0, r_zero},
+    {"wsock32.dll", "WSAGetLastError", 0, ws_WSAGetLastError},
     {"wsock32.dll", "inet_addr", 1, ws_inet_addr},
     {"wsock32.dll", "htons", 1, ws_htons},
     {"wsock32.dll", "ntohs", 1, ws_htons},
@@ -420,9 +575,9 @@ static const Hle misc[] = {
     {"wsock32.dll", "connect", 3, ws_connect},
     {"wsock32.dll", "select", 5, ws_select},
     {"wsock32.dll", "__WSAFDIsSet", 2, ws_fdisset},
-    {"wsock32.dll", "send", 4, r_fail},
+    {"wsock32.dll", "send", 4, ws_send},
     {"wsock32.dll", "recv", 4, ws_recv},
-    {"wsock32.dll", "closesocket", 1, r_zero},
+    {"wsock32.dll", "closesocket", 1, ws_closesocket},
 };
 
 void hle_misc_register(void) { hle_register(misc, sizeof misc / sizeof misc[0]); }
