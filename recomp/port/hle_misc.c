@@ -447,7 +447,8 @@ static void ws_send(CPU* c) {
     if (k && k->connected) {
         int n = js_net_send(k->remote, (const uint8_t*)GPTR(ARG(1)), (int)ARG(2));
         static int logged;
-        if (logged++ < 20) {
+        if (logged++ >= 20) port_log("send %08x: %u bytes", ARG(0), ARG(2));
+        else {
             char hex[3 * 160 + 1] = {0};
             for (uint32_t i = 0; i < ARG(2) && i < 160; i++) snprintf(hex + 3 * i, 4, "%02x ", M8(ARG(1) + i));
             port_log("send %08x: %u bytes -> %d %s", ARG(0), ARG(2), n, hex);

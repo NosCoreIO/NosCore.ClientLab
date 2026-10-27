@@ -205,7 +205,7 @@ static void v_SetStreamSource(CPU* c) { if (ARG(1) == 0) r_set_stream(ARG(2), AR
 static void v_SetIndices(CPU* c) { r_set_indices(ARG(1)); RET(0); }
 static void v_SetViewport(CPU* c) { r_set_viewport(ARG(1)); RET(0); }
 static void v_SetRenderTarget(CPU* c) { if (ARG(1) == 0) r_set_render_target(ARG(2) ? ARG(2) : backbuffer); RET(0); }
-static void v_Clear(CPU* c) { r_clear(ARG(1), ARG(2), ARG(3), ARG(4)); RET(0); }
+static void v_Clear(CPU* c) { uint32_t zb = ARG(5); float z; memcpy(&z, &zb, 4); r_clear(ARG(1), ARG(2), ARG(3), ARG(4), z); RET(0); }
 static void v_DrawPrimitive(CPU* c) { r_draw(ARG(1), ARG(2), ARG(3)); RET(0); }
 static void v_DrawPrimitiveUP(CPU* c) { r_draw_up(ARG(1), ARG(2), ARG(3), ARG(4)); RET(0); }
 static void v_DrawIndexedPrimitive(CPU* c) { r_draw_indexed(ARG(1), (int32_t)ARG(2), ARG(5), ARG(6)); RET(0); }

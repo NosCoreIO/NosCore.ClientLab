@@ -29,6 +29,8 @@ void r_init(uint32_t backbuffer) {
     identity(&R.world); identity(&R.view); identity(&R.proj);
     for (int k = 0; k < 8; k++) identity(&R.tex[k]);
     R.rs[7] = 1;          /* ZENABLE */
+    R.rs[14] = 1;         /* ZWRITEENABLE */
+    R.rs[23] = 4;         /* ZFUNC LESSEQUAL */
     R.rs[19] = 2;         /* SRCBLEND ONE */
     R.rs[20] = 1;         /* DESTBLEND ZERO */
     R.rs[25] = 8;         /* ALPHAFUNC ALWAYS */
@@ -120,13 +122,13 @@ static int32_t wrap(int32_t i, int32_t n, int clamp) {
     return i < 0 ? i + n : i;
 }
 
-static uint32_t sample(uint32_t tex, float u, float v) {
+static uint32_t sample(int st, uint32_t tex, float u, float v) {
     if (!tex) return 0xffffffffu;
     uint32_t s = M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;  /* texture -> level 0 surface */
     int32_t w = (int32_t)SW(s), h = (int32_t)SH(s);
     if (w <= 0 || h <= 0 || !SBITS(s)) return 0xffffffffu;
-    int clamp_u = R.samp[0][1] == 3, clamp_v = R.samp[0][2] == 3;
-    if (R.samp[0][5] != 2 && R.samp[0][6] != 2) {
+    int clamp_u = R.samp[st][1] == 3, clamp_v = R.samp[st][2] == 3;
+    if (R.samp[st][5] != 2 && R.samp[st][6] != 2) {
         int32_t x = wrap((int32_t)floorf(u * w), w, clamp_u), y = wrap((int32_t)floorf(v * h), h, clamp_v);
         return texel(s, (uint32_t)x, (uint32_t)y);
     }
@@ -180,12 +182,22 @@ static uint32_t stage_op(uint32_t op, uint32_t a1, uint32_t a2, uint32_t current
     }
 }
 
-static uint32_t shade(uint32_t diffuse, float u, float v) {
-    uint32_t tex = R.tex_obj[0] ? sample(R.tex_obj[0], u, v) : 0xffffffffu;
-    uint32_t color, alpha;
-    color = stage_op(R.tss[0][1], stage_arg(R.tss[0][2], tex, diffuse, diffuse), stage_arg(R.tss[0][3], tex, diffuse, diffuse), diffuse);
-    alpha = stage_op(R.tss[0][4], stage_arg(R.tss[0][5], tex, diffuse, diffuse), stage_arg(R.tss[0][6], tex, diffuse, diffuse), diffuse);
-    return (alpha & 0xff000000u) | (color & 0xffffff);
+#define STAGES 2
+
+/* Fixed-function texture stages, evaluated until the first disabled colour op. */
+static uint32_t shade(uint32_t diffuse, const float* uv) {
+    uint32_t current = diffuse;
+    for (int s = 0; s < STAGES; s++) {
+        if (R.tss[s][1] == 1) break;
+        uint32_t tex = R.tex_obj[s] ? sample(s, R.tex_obj[s], uv[2 * s], uv[2 * s + 1]) : 0xffffffffu;
+        uint32_t color = stage_op(R.tss[s][1], stage_arg(R.tss[s][2], tex, diffuse, current),
+                                  stage_arg(R.tss[s][3], tex, diffuse, current), current);
+        uint32_t alpha = R.tss[s][4] == 1 ? current
+                       : stage_op(R.tss[s][4], stage_arg(R.tss[s][5], tex, diffuse, current),
+                                  stage_arg(R.tss[s][6], tex, diffuse, current), current);
+        current = (alpha & 0xff000000u) | (color & 0xffffff);
+    }
+    return current;
 }
 
 static int alpha_pass(uint32_t a) {
@@ -222,10 +234,43 @@ static uint32_t blend_factor(uint32_t f, uint32_t src, uint32_t dst, int ch) {
 
 static struct { uint32_t draws, tris, covered, written, skipped; } S;
 
-static void put(uint32_t x, uint32_t y, uint32_t src) {
+/* Depth buffer for the render target, kept host-side. */
+static float* zbuf;
+static uint32_t zw, zh;
+
+static float* depth_for_target(void) {
+    uint32_t w = SW(R.target), h = SH(R.target);
+    if (!zbuf || zw != w || zh != h) {
+        free(zbuf);
+        zbuf = malloc(sizeof(float) * w * h);
+        zw = w; zh = h;
+        for (uint32_t k = 0; k < w * h; k++) zbuf[k] = 1.0f;
+    }
+    return zbuf;
+}
+
+static int depth_pass(float z, float d) {
+    switch (R.rs[23]) {
+    case 1: return 0;
+    case 2: return z < d;
+    case 3: return z == d;
+    case 4: return z <= d;
+    case 5: return z > d;
+    case 6: return z != d;
+    case 7: return z >= d;
+    default: return 1;
+    }
+}
+
+static void put(uint32_t x, uint32_t y, float z, uint32_t src) {
     uint32_t t = R.target, addr = SBITS(t) + y * SPITCH(t) + 4 * x;
     S.covered++;
     if (!alpha_pass(src >> 24)) return;
+    if (R.rs[7]) {
+        float* zp = depth_for_target() + y * zw + x;
+        if (!depth_pass(z, *zp)) return;
+        if (R.rs[14]) *zp = z;
+    }
     S.written++;
     if (!R.rs[27]) { M32(addr) = src; return; }
     uint32_t dst = M32(addr), out = 0;
@@ -239,7 +284,7 @@ static void put(uint32_t x, uint32_t y, uint32_t src) {
 
 /* ---- vertices ---- */
 
-typedef struct { float x, y, z, w, u, v; uint32_t diffuse; } Vtx;
+typedef struct { float x, y, z, w, uv[2 * STAGES]; uint32_t diffuse; } Vtx;
 
 static void xform(const Mat* m, const float in[4], float out[4]) {
     for (int j = 0; j < 4; j++) out[j] = in[0] * m->m[j] + in[1] * m->m[4 + j] + in[2] * m->m[8 + j] + in[3] * m->m[12 + j];
@@ -255,22 +300,29 @@ static void fetch(uint32_t p, Vtx* o) {
     o->diffuse = 0xffffffffu;
     if (fvf & 0x40) { o->diffuse = M32(p + off); off += 4; }
     if (fvf & 0x80) off += 4;
-    uint32_t tsize = (fvf >> 16) & 3;
-    float tc[4] = {0, 0, 0, 1};
-    if (((fvf >> 8) & 15) > 0) {
+    float sets[4][4];
+    uint32_t nsets = (fvf >> 8) & 15;
+    for (uint32_t k = 0; k < 4; k++) {
+        float* tc = sets[k];
+        tc[0] = tc[1] = 0; tc[2] = 1; tc[3] = 0;
+        if (k >= nsets) continue;
+        uint32_t tsize = (fvf >> (16 + 2 * k)) & 3;
         int n = tsize == 0 ? 2 : tsize == 1 ? 3 : tsize == 2 ? 4 : 1;
-        for (int k = 0; k < n; k++) tc[k] = MF32(p + off + 4 * k);
-        if (n == 2) tc[2] = 1, tc[3] = 0;
+        for (int j = 0; j < n; j++) tc[j] = MF32(p + off + 4 * j);
+        if (n == 3) tc[3] = 1;
+        off += 4 * n;
     }
-    uint32_t ttff = R.tss[0][24];
-    if (ttff & 7) {
-        float r[4];
-        xform(&R.tex[0], tc, r);
-        if (ttff & 256) { o->u = r[0] / r[(ttff & 7) - 1]; o->v = r[1] / r[(ttff & 7) - 1]; }
-        else { o->u = r[0]; o->v = r[1]; }
-    } else {
-        o->u = tc[0];
-        o->v = tc[1];
+    for (int st = 0; st < STAGES; st++) {
+        const float* tc = sets[R.tss[st][11] & 3];
+        uint32_t ttff = R.tss[st][24];
+        if (ttff & 7) {
+            float r[4];
+            xform(&R.tex[st], tc, r);
+            float q = (ttff & 256) ? r[(ttff & 7) - 1] : 1;
+            o->uv[2 * st] = r[0] / q; o->uv[2 * st + 1] = r[1] / q;
+        } else {
+            o->uv[2 * st] = tc[0]; o->uv[2 * st + 1] = tc[1];
+        }
     }
     uint32_t vw = R.vp_set ? R.vp_w : SW(R.target), vh = R.vp_set ? R.vp_h : SH(R.target), vx = R.vp_set ? R.vp_x : 0, vy = R.vp_set ? R.vp_y : 0;
     if (pos == 4) { o->x = in[0]; o->y = in[1]; o->z = in[2]; o->w = 1; return; }
@@ -303,7 +355,8 @@ static void triangle(const Vtx* a, const Vtx* b, const Vtx* c) {
             float w1 = ((c->x - px) * (a->y - py) - (c->y - py) * (a->x - px)) / area;
             float w2 = 1 - w0 - w1;
             if (w0 < 0 || w1 < 0 || w2 < 0) continue;
-            float u = w0 * a->u + w1 * b->u + w2 * c->u, v = w0 * a->v + w1 * b->v + w2 * c->v;
+            float uv[2 * STAGES];
+            for (int k = 0; k < 2 * STAGES; k++) uv[k] = w0 * a->uv[k] + w1 * b->uv[k] + w2 * c->uv[k];
             uint32_t d = a->diffuse;
             if (!flat) {
                 d = 0;
@@ -312,12 +365,29 @@ static void triangle(const Vtx* a, const Vtx* b, const Vtx* c) {
                     d |= (uint32_t)(f + 0.5f) << ch;
                 }
             }
-            put((uint32_t)x, (uint32_t)y, shade(d, u, v));
+            put((uint32_t)x, (uint32_t)y, w0 * a->z + w1 * b->z + w2 * c->z, shade(d, uv));
         }
+}
+
+static void log_state_combo(void) {
+    static uint32_t seen[64][8];
+    static int nseen;
+    uint32_t tex = R.tex_obj[0], s = tex && M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
+    uint32_t key[8] = {s ? SFMT(s) : 0, s ? SW(s) << 16 | SH(s) : 0, R.rs[27] << 16 | R.rs[19] << 8 | R.rs[20], R.rs[171],
+                       R.tss[0][1] << 16 | R.tss[0][2] << 8 | R.tss[0][3], R.tss[0][4] << 16 | R.tss[0][5] << 8 | R.tss[0][6],
+                       R.tss[1][1] << 16 | R.tex_obj[1] != 0, R.fvf};
+    for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) return;
+    if (nseen >= 64) return;
+    memcpy(seen[nseen++], key, sizeof key);
+    port_log("draw combo: fmt %u %ux%u blend %u src %u dst %u op %u | c %u(%u,%u) a %u(%u,%u) | st1 op %u tex %u | fvf %x target fmt %u",
+             key[0], key[1] >> 16, key[1] & 0xffff, R.rs[27], R.rs[19], R.rs[20], R.rs[171], R.tss[0][1], R.tss[0][2],
+             R.tss[0][3], R.tss[0][4], R.tss[0][5], R.tss[0][6], R.tss[1][1], R.tex_obj[1] != 0, R.fvf,
+             R.target ? SFMT(R.target) : 0);
 }
 
 static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
     S.draws++;
+    log_state_combo();
     if (!R.target || !SBITS(R.target) || (SFMT(R.target) != 21 && SFMT(R.target) != 22)) { S.skipped++; return; }
     if (prim == 4) for (uint32_t k = 0; k < count && 3 * k + 2 < n; k++) triangle(&v[3 * k], &v[3 * k + 1], &v[3 * k + 2]);
     else if (prim == 5) for (uint32_t k = 0; k < count && k + 2 < n; k++) triangle(&v[k], &v[k + 1], &v[k + 2]);
@@ -364,8 +434,12 @@ void r_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t
     draw_list(prim, count, vbuf, n);
 }
 
-void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color) {
+void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z) {
     uint32_t t = R.target;
+    if ((flags & 2) && t) {
+        float* zp = depth_for_target();
+        for (uint32_t k = 0; k < zw * zh; k++) zp[k] = z;
+    }
     if (!(flags & 1) || !t || !SBITS(t) || (SFMT(t) != 21 && SFMT(t) != 22)) return;
     for (uint32_t y = 0; y < SH(t); y++)
         for (uint32_t x = 0; x < SW(t); x++) M32(SBITS(t) + y * SPITCH(t) + 4 * x) = color;
@@ -391,7 +465,7 @@ void r_dump_bmp(uint32_t surface, const char* path) {
 void r_stats(void) {
     port_log("render: %u draws (%u skipped), %u triangles, %u pixels covered, %u written; target %ux%u fmt %u; sample v0 x=%.1f y=%.1f u=%.3f v=%.3f",
              S.draws, S.skipped, S.tris, S.covered, S.written, R.target ? SW(R.target) : 0, R.target ? SH(R.target) : 0,
-             R.target ? SFMT(R.target) : 0, vbuf[0].x, vbuf[0].y, vbuf[0].u, vbuf[0].v);
+             R.target ? SFMT(R.target) : 0, vbuf[0].x, vbuf[0].y, vbuf[0].uv[0], vbuf[0].uv[1]);
     static int dumped;
     if (!dumped++) {
         const Mat* ms[4] = {&R.world, &R.view, &R.proj, &R.tex[0]};

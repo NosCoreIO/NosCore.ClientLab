@@ -21,6 +21,6 @@ void r_draw(uint32_t prim, uint32_t start, uint32_t count);
 void r_draw_up(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride);
 void r_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t start_index, uint32_t count);
 void r_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t idx_fmt, uint32_t data, uint32_t stride);
-void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color);
+void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z);
 void r_dump_bmp(uint32_t surface, const char* path);
 void r_stats(void);
