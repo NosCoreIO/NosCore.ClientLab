@@ -17,6 +17,19 @@ The client (`NosCore.exe`, Delphi 7, md5 `51bbff3ec09d67c8425f88d74c6d5df5`) is 
 - Each run still stops now and then on a function nobody discovered. `recomp/iterate.ps1` seeds these automatically (28 so far, in `symbols/<md5>/recomp_seeds.txt`).
 - The differential tester passes 398 of 409 instruction shapes against Unicorn. The 11 remaining are junk decodes that never execute (`in`, `sldt`, `das`) and Unicorn's own x87 transcendental imprecision.
 
+### In the browser, as of 2026-10-27
+
+**NosTale renders its title screen in Chromium** (1680×1050, about 12 frames/s shown on the canvas):
+
+```powershell
+python recomp\wasm\compile_all.py --web          # worker build into C:\tools\re\work\wasm\web
+python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale"   # http://127.0.0.1:8077/  (?auth=<_NC_AUTH_CODE>)
+```
+
+- **Worker:** the client runs in a Web Worker and its loop never yields. Each `Present` posts an RGBA copy of the backbuffer, capped at about 30/s, and the page draws it on a canvas.
+- **Game files:** your own game folder is served by `serve.py` with HTTP Range support and mounted lazily, in lower case, at `/c:/nostale`. Windows paths are case-insensitive, so `port_host_path` lowercases them in the browser.
+- **Next:** input (canvas events → window messages, through a SharedArrayBuffer since the worker never yields; `serve.py` already sends COOP/COEP), a WebSocket↔TCP bridge for the login and world servers, GDI text (dialog text is missing), and threads.
+
 ### WebAssembly (portable host), as of 2026-10-27
 
 The same generated C, built with Emscripten and linked with `recomp/port/` (a host that implements Windows instead of calling it), **runs the client's main game loop headless under Node.** It goes through Delphi RTL and VCL init, the Gameforge stub (`Steam_*`, same answers as `NosCore.DeveloperTools.GfStub`), Direct3D 9 device creation on a null device, and `ShowWindow` of the main form, then presents frames continuously.
