@@ -17,20 +17,31 @@ The client (`NosCore.exe`, Delphi 7, md5 `51bbff3ec09d67c8425f88d74c6d5df5`) is 
 - Each run still stops now and then on a function nobody discovered. `recomp/iterate.ps1` seeds these automatically (28 so far, in `symbols/<md5>/recomp_seeds.txt`).
 - The differential tester passes 398 of 409 instruction shapes against Unicorn. The 11 remaining are junk decodes that never execute (`in`, `sldt`, `das`) and Unicorn's own x87 transcendental imprecision.
 
-### In the browser, as of 2026-10-27
+### In the browser, as of 2026-10-28
 
-**NosTale renders its title screen in Chromium** (1680×1050, about 12 frames/s shown on the canvas):
+**The browser client logs in to a local NosCore stack and enters the world**: login, server and channel lists, character selection, then NosVille with HUD, minimap, NPCs and chat. WebGL2 rendering: about 57 frames/s on the login screens, 15-20 in town.
 
 ```powershell
 python recomp\wasm\compile_all.py --web          # worker build into C:\tools\re\work\wasm\web
-python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale"   # http://127.0.0.1:8077/  (?auth=<_NC_AUTH_CODE>)
+python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user admin --password test   # http://127.0.0.1:8077/
 ```
 
-- **Worker:** the client runs in a Web Worker and its loop never yields. Each `Present` posts an RGBA copy of the backbuffer, capped at about 30/s, and the page draws it on a canvas.
-- **Game files:** your own game folder is served by `serve.py` with HTTP Range support and mounted lazily, in lower case, at `/c:/nostale`. Windows paths are case-insensitive, so `port_host_path` lowercases them in the browser.
-- **Network:** the worker cannot open sockets and never yields, so Winsock is relayed through `serve.py` with synchronous XHR (`/net/connect|send|recv|close`; the server holds the real TCP connection and buffers what arrives). Against a local NosCore stack the client connects to the login server on :4000, sends its 79-byte login packet and gets a 47-byte answer.
-- **Auth code:** the page takes `?auth=<_NC_AUTH_CODE>`. Otherwise the worker asks `serve.py /auth-code`, which mints one from `--user`/`--password` against the NosCore WebApi (same two calls as `NosCore.Launcher`). Without either, the login server rejects the client.
-- **Next:** input (canvas events → window messages, through a SharedArrayBuffer since the worker never yields; `serve.py` already sends COOP/COEP), GDI text (dialog text is missing), and threads.
+- **Worker:** the client runs in a Web Worker and its loop never yields, so everything it talks to is synchronous: input arrives through a SharedArrayBuffer ring, network through sync XHR, frames leave as ImageBitmaps.
+- **Rendering:** vertices are transformed on the CPU (`render.c` `fetch`); WebGL2 on an OffscreenCanvas (`render_gl.inc`) rasterises, evaluates two texture stages, alpha-tests, blends and depth-tests. Textures upload once per Lock (object +56 is the dirty flag) and are mipmapped. Under Node the software rasteriser in `render.c` is still used. D3D9 samples pixels at integer coordinates: the GL path offsets by half a pixel, the software path samples at x, y.
+- **Text:** `hle_text.c` tracks DCs, fonts and selected bitmaps; glyphs are rasterised by the worker's OffscreenCanvas 2D context. The client builds its own glyph atlas from `TextOutA` per character.
+- **Game files:** served by `serve.py` with HTTP Range support and mounted lazily, in lower case, at `/c:/nostale`.
+- **Network:** Winsock is relayed through `serve.py` (`/net/connect|send|recv|close`). Sockets the page stops polling are closed after 20 s; otherwise a reloaded page keeps the account logged in on the world server (`failc` AlreadyConnected). `--remap FROM=TO` redirects a port when :4000 is taken locally.
+- **Login packet:** the GF InstallationId is read from `HKLM\...\Gameforge4d\GameforgeClient\MainApp` through `TRegistry.OpenKey(..., True)`, i.e. RegCreateKeyExA; the registry HLE answers it (`NC_INSTALLATION_ID` overrides). Without it the client sends `NONE_CII` and the server rejects the GUID.
+- **Auth code:** `?auth=<code>`, or `serve.py --user/--password` mints one per page load from the NosCore WebApi.
+- **Input:** canvas events -> ring -> WM_* for the largest visible window (VCL forms are owned by the TApplication window, so "no parent" does not find it). One button/key state change per Present. SetTimer posts real WM_TIMER.
+- **Debugging:** `?trace=1` logs the API calls and the guest functions (from the RT_TRACE ring) that follow each mouse-down. The page keeps 1000 log lines; `window.allLog` has everything.
+- **Memory:** the build reserves 1 GB and may grow to 2 GB; several reloads in one Playwright browser reached 4 GB. Reload one tab and close the browser after testing.
+
+**Open, in priority order (2026-10-28):**
+1. In-game clicks and keys do not move the character: WM_LBUTTONDOWN reaches the form and VCL passes it on to DefWindowProc, but no `walk` packet (`Send.walk` at 0x727440) is sent. Next: run `?trace=1`, click the ground once, read the `fn` lines to see where the click path stops.
+2. Rocks and trees render white/lilac: probably fixed-function lighting (SetLight/SetMaterial are ignored).
+3. Speed: 15-20 fps in town; build the generated code at -O2 next.
+4. Audio (Miles is stubbed), helper threads (CreateThread is not run), CEF.
 
 ### WebAssembly (portable host), as of 2026-10-27
 
