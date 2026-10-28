@@ -1,6 +1,6 @@
 """Compile the generated C and the portable host to WebAssembly, then link nostale.js (incremental).
 
-usage: compile_all.py [--link]
+usage: compile_all.py [--link] [--web [--web-out DIR]]
 """
 import concurrent.futures as cf
 import glob
@@ -57,8 +57,9 @@ def main():
             sys.exit(1)
         print("linked", out)
     if "--web" in sys.argv:
-        os.makedirs(os.path.join(OUT, "web"), exist_ok=True)
-        out = os.path.join(OUT, "web", "nostale.js")
+        web_dir = sys.argv[sys.argv.index("--web-out") + 1] if "--web-out" in sys.argv else os.path.join(OUT, "web")
+        os.makedirs(web_dir, exist_ok=True)
+        out = os.path.join(web_dir, "nostale.js")
         web = [f for f in LINK if not f.startswith("-sNODERAWFS")] + [
             "-sENVIRONMENT=worker", "-sFORCE_FILESYSTEM=1", "-sINVOKE_RUN=0",
             "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV"]

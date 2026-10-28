@@ -100,7 +100,9 @@ static void k_GlobalGetAtomNameA(CPU* c) {
     snprintf(GSTR(ARG(1)), ARG(2), "%s", n);
     RET(strlen(GSTR(ARG(1))));
 }
-static void u_RegisterWindowMessageA(CPU* c) { RET(ARG(0) ? hle_atom_add(GSTR(ARG(0))) : 0); }
+static void u_RegisterWindowMessageA(CPU* c) {
+    RET(ARG(0) ? hle_atom_add(GSTR(ARG(0))) : 0);
+}
 
 /* ---- classes ---- */
 
@@ -170,6 +172,7 @@ typedef struct {
     Prop* props;
     int nprops;
     int inval, erase, frame, internal;
+    int need_size;                  /* WM_SIZE and WM_MOVE are reported again on the first show */
     int il, it, ir, ib;             /* bounding box of the update region, client coordinates */
     Scroll sb[3];
 } Win;
@@ -741,6 +744,10 @@ static int set_window_pos(CPU* c, uint32_t hwnd, uint32_t after, int x, int y, i
             }
         }
     }
+    if ((f & SWP_SHOWWINDOW) && w->need_size) {
+        w->need_size = 0;
+        f &= ~(uint32_t)(SWP_NOSIZE | SWP_NOMOVE);
+    }
     M32(wp + 8) = (uint32_t)x; M32(wp + 12) = (uint32_t)y; M32(wp + 16) = (uint32_t)cx; M32(wp + 20) = (uint32_t)cy;
     M32(wp + 24) = f;
     send_message(c, hwnd, WM_WINDOWPOSCHANGED, 0, wp);
@@ -964,6 +971,7 @@ static uint32_t create_window(CPU* c, uint32_t exstyle, uint32_t cls_name, uint3
     guest_free(wpos);
     w = win_get(hwnd);
     if (!w) return 0;
+    w->need_size = 1;
     if (is_child(w) && !(w->exstyle & WS_EX_NOPARENTNOTIFY)) {
         uint32_t p = w->parent;
         for (Win* pw = win_get(p); pw; pw = is_child(pw) ? win_get(pw->parent) : 0) {

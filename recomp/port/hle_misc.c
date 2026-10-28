@@ -248,12 +248,14 @@ static void s_GetAuthSessionTicket(CPU* c) {
     const char* code = getenv("_NC_AUTH_CODE");
     uint32_t buf = ARG(0), size = ARG(1), psize = ARG(2);
     if (!code || !*code || !buf) {
+        port_log("auth ticket requested but none is available");
         if (psize) M32(psize) = 0;
         RET(0);
         return;
     }
     uint32_t n = (uint32_t)strlen(code);
     if (n > size) n = size;
+    port_log("auth ticket handed to the client (%u chars)", n);
     memcpy(GPTR(buf), code, n);
     if (psize) M32(psize) = n;
     RET(1);
@@ -410,6 +412,9 @@ static void ws_recv(CPU* c) {
             char hex[3 * 64 + 1] = {0};
             for (uint32_t i = 0; i < n && i < 64; i++) snprintf(hex + 3 * i, 4, "%02x ", M8(buf + i));
             port_log("recv %08x: %u bytes %s", ARG(0), n, hex);
+        } else if (n >= 1000) {
+            /* Large reads mark the map arriving; drive.mjs waits for them. */
+            port_log("recv %08x: %u bytes", ARG(0), n);
         }
         RET(n);
         return;
