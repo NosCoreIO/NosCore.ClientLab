@@ -178,10 +178,15 @@ EM_JS(void, js_gl_clear, (int flags, uint32_t color, float z, int x, int y, int 
     if (G.prev) { G.prev[22] = G.prev[23] = G.prev[24] = -1; G.prev[25] = -1; }
 });
 
+/* The client never sleeps between frames: left alone it renders hundreds of frames a second, saturating the GPU
+   process until the page itself stalls. Present holds it to about 60 frames a second, like vsync, with a real
+   blocking wait (Atomics.wait is allowed in a worker). */
 EM_JS(void, js_gl_present, (void), {
-    const G = self.__gl, now = performance.now();
-    if (now - G.last < 16) return;
-    G.last = now;
+    const G = self.__gl;
+    const pace = G.pace || (G.pace = new Int32Array(new SharedArrayBuffer(4)));
+    const wait = 16.6 - (performance.now() - G.last);
+    if (wait > 0) Atomics.wait(pace, 0, 0, wait);
+    G.last = performance.now();
     const bmp = G.canvas.transferToImageBitmap();
     postMessage({ type: 'bitmap', bmp }, [bmp]);
 });

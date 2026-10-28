@@ -168,6 +168,8 @@ class FnGen:
         self.ins.sort(key=lambda i: i.address)
         self.out = []
         self.uses_seh = any(self._writes_fs_esp(i) for i in self.ins)
+        self.call_owner = {}
+        self.callees = set()
 
     def _absorb_orphans(self, covered):
         """Pull in code this function reaches (pushed return labels, jump targets) that no function owns,
@@ -652,7 +654,13 @@ class FnGen:
         if m == "call":
             if ops[0].type == X.X86_OP_IMM:
                 t = ops[0].imm & 0xFFFFFFFF
-                self.e(f"PUSH(0x{nxt:08x}u); rt_call(c, 0x{t:08x}u, 0x{nxt:08x}u);")
+                callee = self.call_owner.get(t)
+                if callee is not None:
+                    # The owner of the target is known at lift time: a plain C call, no label lookup.
+                    self.callees.add(callee)
+                    self.e(f"PUSH(0x{nxt:08x}u); f_{callee:08x}(c, 0x{t:08x}u, 0x{nxt:08x}u);")
+                else:
+                    self.e(f"PUSH(0x{nxt:08x}u); rt_call(c, 0x{t:08x}u, 0x{nxt:08x}u);")
             else:
                 self.e(f"t = {self.rd(ops[0], 4)}; PUSH(0x{nxt:08x}u); rt_call(c, t, 0x{nxt:08x}u);")
             self.e(f"if (c->pend) {{ c->pend = 0; if (c->pend_target != 0x{nxt:08x}u) {{ tgt = c->pend_target; ind = 0; goto dispatch; }} }}")
@@ -1192,14 +1200,24 @@ def main():
     fns.sort()
     covered = make_covered(fns)
 
+    # Which recompiled function to call for a direct call target: its own function for an entry, the owner for a
+    # mid-function call target (those are labels there, see extra_labels).
+    call_owner = {e: e for e, _, _ in fns}
+    for owner_e, labs in extra_labels.items():
+        for t in labs:
+            call_owner.setdefault(t, owner_e)
+
     table = []
     chunks, unimpl = defaultdict(list), defaultdict(int)
+    chunk_callees = defaultdict(set)
 
     absorbed = 0
     lifted = bytearray(L.code_hi - L.code_lo)
     for e, name, rs in fns:
         g = FnGen(L, e, name, rs, covered)
         g.extra_labels = extra_labels.get(e, set())
+        g.call_owner = call_owner
+        g.callees = set()
         absorbed += sum(1 for i in g.ins if not covered(i.address))
         for i in g.ins:
             lifted[i.address - L.code_lo: i.address - L.code_lo + i.size] = b"\1" * i.size
@@ -1208,6 +1226,7 @@ def main():
             if "rt_unimpl" in line:
                 unimpl[line.split('"')[1].split()[0]] += 1
         chunks[e >> 15].append(src)
+        chunk_callees[e >> 15] |= g.callees
         for lab in sorted(g.labelset):
             table.append((lab, e))
 
@@ -1215,7 +1234,8 @@ def main():
     for key, srcs in chunks.items():
         name = f"fn_{key << 15:08x}.c"
         wanted.add(name)
-        write_if_changed(os.path.join(a.outdir, name), '#include "rt.h"\n\n' + "\n\n".join(srcs) + "\n")
+        protos = "".join(f"void f_{t:08x}(CPU*, uint32_t, uint32_t);\n" for t in sorted(chunk_callees[key]))
+        write_if_changed(os.path.join(a.outdir, name), '#include "rt.h"\n\n' + protos + "\n" + "\n\n".join(srcs) + "\n")
     for old in os.listdir(a.outdir):
         if old.startswith("fn_") and old.endswith(".c") and old not in wanted:
             os.remove(os.path.join(a.outdir, old))

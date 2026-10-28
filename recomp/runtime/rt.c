@@ -1,4 +1,5 @@
 #include "rt.h"
+#include <stdlib.h>
 #include <string.h>
 
 void rt_fatal(const char* fmt, ...);
@@ -24,16 +25,30 @@ void rt_call_host(CPU* c, uint32_t target) {
 
 static int is_guest(uint32_t a) { return a >= rt_code_lo && a < rt_code_hi; }
 
-RtFn rt_lookup(uint32_t addr, uint32_t* is_entry) {
-    uint32_t lo = 0, hi = rt_label_count;
-    while (lo < hi) {
-        uint32_t mid = (lo + hi) / 2;
-        if (rt_labels[mid].addr < addr) lo = mid + 1;
-        else hi = mid;
+/* Indirect calls and jumps (virtual methods, callbacks, jump tables) resolve through a flat table over the code
+   range instead of a binary search over every label. Where an address is a label in several functions, the first
+   one in rt_labels wins, as the search did. */
+static RtFn* label_fn;
+static uint8_t* label_is_entry;
+
+static void build_label_table(void) {
+    uint32_t span = rt_code_hi - rt_code_lo;
+    label_fn = (RtFn*)calloc(span, sizeof *label_fn);
+    label_is_entry = (uint8_t*)calloc(span, 1);
+    for (uint32_t k = 0; k < rt_label_count; k++) {
+        uint32_t off = rt_labels[k].addr - rt_code_lo;
+        if (off >= span || label_fn[off]) continue;
+        label_fn[off] = rt_labels[k].fn;
+        label_is_entry[off] = (uint8_t)rt_labels[k].is_entry;
     }
-    if (lo < rt_label_count && rt_labels[lo].addr == addr) {
-        if (is_entry) *is_entry = rt_labels[lo].is_entry;
-        return rt_labels[lo].fn;
+}
+
+RtFn rt_lookup(uint32_t addr, uint32_t* is_entry) {
+    if (!label_fn) build_label_table();
+    if (addr >= rt_code_lo && addr < rt_code_hi) {
+        uint32_t off = addr - rt_code_lo;
+        if (label_fn[off] && is_entry) *is_entry = label_is_entry[off];
+        return label_fn[off];
     }
     return 0;
 }
