@@ -146,6 +146,22 @@ try {
   console.log((await logText()).slice(beforeChat).split('\n').filter((l) => /^(send |FATAL)/.test(l)).join('\n'));
   console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
   console.log('sounds:', JSON.stringify(await page.evaluate(() => window.soundStats)));
+
+  step('game windows');
+  const beforeWindows = (await logText()).length;
+  // The chat line keeps focus after a message is sent; Escape hands the keyboard back to the game.
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(500);
+  for (const key of ['i', 'c', 'k', 'p', 'l', 'f', 'm']) {
+    await page.keyboard.press(key);
+    await page.waitForTimeout(1500);
+    await shot(`7-window-${key}.png`);
+    await page.keyboard.press(key);
+    await page.waitForTimeout(500);
+  }
+  const windowErrors = (await logText()).slice(beforeWindows).split('\n')
+    .filter((l) => /FATAL|exited|Delphi|fault|STUB/.test(l));
+  console.log(windowErrors.slice(0, 12).join('\n') || 'windows: no errors');
   }
 } catch (e) {
   console.log('error:', e.message);
