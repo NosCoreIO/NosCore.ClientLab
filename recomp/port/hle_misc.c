@@ -1,5 +1,5 @@
-/* The long tail of startup imports: version info, menus, file mappings, threads, plus no-op Miles,
-   Steam and Winsock stand-ins until audio and the WebSocket bridge exist. */
+/* The long tail of imports: version info, file mappings, registry writes, user32/gdi32 odds and ends, Winsock over
+   the dev server's relay, and the Steam and Gameforge entry points. */
 #include "port.h"
 #include <ctype.h>
 #include <stdlib.h>
@@ -144,13 +144,6 @@ static void k_MapViewOfFile(CPU* c) {
 }
 static void k_UnmapViewOfFile(CPU* c) { RET(1); }
 
-/* ---- threads: not run yet; the startup code only resumes helper threads ---- */
-
-static void k_ResumeThread(CPU* c) { port_log("ResumeThread(%08x) ignored", ARG(0)); RET(1); }
-static void k_SleepEx(CPU* c) { RET(0); }
-static void k_SetThreadPriority(CPU* c) { RET(1); }
-static void k_GetExitCodeThread(CPU* c) { if (ARG(1)) M32(ARG(1)) = 259; RET(1); }
-
 /* ---- registry ---- */
 
 static void a_RegCreateKeyExA(CPU* c) {
@@ -241,13 +234,15 @@ static void s_GetPersonaName(CPU* c) { if (!persona_addr) persona_addr = guest_s
 static void s_GetSteamLanguage(CPU* c) { if (!language_addr) language_addr = guest_strdup("english"); RET(language_addr); }
 static void s_GetConnectedBetaBranch(CPU* c) { if (!branch_addr) branch_addr = guest_strdup("live"); RET(branch_addr); }
 
-/* ---- Winsock: no network yet; connections fail cleanly ---- */
+/* ---- Winsock ---- */
 
+static int wsa_started;
 static void ws_WSAStartup(CPU* c) {
     uint32_t d = ARG(1);
     memset(GPTR(d), 0, 400);
     M16(d) = 0x0101;
     M16(d + 2) = 0x0202;
+    wsa_started++;
     RET(0);
 }
 static void ws_inet_addr(CPU* c) {
@@ -299,9 +294,11 @@ EM_JS(void, js_net_close, (int id), {
 #define MAX_SOCK 64
 #define SOCK_BASE 0x100u
 typedef struct {
-    int used, remote, connected, closed;
+    int used, remote, connected, closed, nonblocking;
     uint8_t* rx;
     uint32_t rx_len;
+    struct { uint32_t level, name, value; } opts[8];
+    int nopts;
 } Sock;
 static Sock socks[MAX_SOCK];
 #define RX_CAP (1u << 20)
@@ -322,6 +319,7 @@ static void sock_poll(Sock* k) {
 }
 
 static void ws_socket(CPU* c) {
+    if (!wsa_started) { set_last_error(10093); RET(0xFFFFFFFFu); return; }   /* WSANOTINITIALISED */
     for (int k = 0; k < MAX_SOCK; k++)
         if (!socks[k].used) {
             memset(&socks[k], 0, sizeof socks[k]);
@@ -362,11 +360,27 @@ static void fdset_filter(uint32_t set, int want_read) {
     }
     M32(set) = out;
 }
+/* Waits for readiness up to the timeval (forever when it is NULL); the sets come back holding only ready sockets. */
 static void ws_select(CPU* c) {
-    fdset_filter(ARG(1), 1);
-    fdset_filter(ARG(2), 0);
-    if (ARG(3)) M32(ARG(3)) = 0;
-    RET((ARG(1) ? M32(ARG(1)) : 0) + (ARG(2) ? M32(ARG(2)) : 0));
+    uint32_t rd = ARG(1), wr = ARG(2), tv = ARG(4), saved[2][65];
+    double deadline = tv ? port_now_ms() + M32(tv) * 1000.0 + M32(tv + 4) / 1000.0 : -1;
+    if (rd) memcpy(saved[0], GPTR(rd), 4 * (1 + (M32(rd) < 64 ? M32(rd) : 64)));
+    if (wr) memcpy(saved[1], GPTR(wr), 4 * (1 + (M32(wr) < 64 ? M32(wr) : 64)));
+    for (;;) {
+        fdset_filter(rd, 1);
+        fdset_filter(wr, 0);
+        uint32_t n = (rd ? M32(rd) : 0) + (wr ? M32(wr) : 0);
+        double now = port_now_ms();
+        if (n || (deadline >= 0 && now >= deadline)) {
+            if (ARG(3)) M32(ARG(3)) = 0;
+            RET(n);
+            return;
+        }
+        if (rd) memcpy(GPTR(rd), saved[0], 4 * (1 + (saved[0][0] < 64 ? saved[0][0] : 64)));
+        if (wr) memcpy(GPTR(wr), saved[1], 4 * (1 + (saved[1][0] < 64 ? saved[1][0] : 64)));
+        if (deadline < 0) port_idle_ms(16);
+        else port_sleep_ms(deadline - now < 16 ? deadline - now : 16);
+    }
 }
 static void ws_fdisset(CPU* c) {
     uint32_t s = ARG(0), set = ARG(1), n = M32(set);
@@ -379,6 +393,10 @@ static void ws_recv(CPU* c) {
     uint32_t buf = ARG(1), len = ARG(2);
     if (!k) { set_last_error(10038); RET(0xFFFFFFFFu); return; }
     if (!k->rx_len) sock_poll(k);
+    while (!k->rx_len && !k->closed && !k->nonblocking && k->connected) {   /* a blocking socket waits for data */
+        port_idle_ms(16);
+        sock_poll(k);
+    }
     if (k->rx_len) {
         uint32_t n = k->rx_len < len ? k->rx_len : len;
         memcpy(GPTR(buf), k->rx, n);
@@ -397,6 +415,7 @@ static void ws_recv(CPU* c) {
         return;
     }
     if (k->closed) { RET(0); return; }
+    if (!k->connected) { set_last_error(10057); RET(0xFFFFFFFFu); return; }   /* WSAENOTCONN */
     set_last_error(10035);
     RET(0xFFFFFFFFu);
 }
@@ -430,7 +449,52 @@ static void ws_closesocket(CPU* c) {
         port_log("closesocket %08x", ARG(0));
         free(k->rx);
         k->used = 0;
+        RET(0);
+        return;
     }
+    set_last_error(10038);
+    RET(0xFFFFFFFFu);
+}
+/* FIONBIO switches blocking, FIONREAD counts what recv would return at once, SIOCATMARK: no urgent data exists. */
+static void ws_ioctlsocket(CPU* c) {
+    Sock* k = sock_get(ARG(0));
+    uint32_t arg = ARG(2);
+    if (!k) { set_last_error(10038); RET(0xFFFFFFFFu); return; }
+    if (!arg) { set_last_error(10014); RET(0xFFFFFFFFu); return; }
+    switch (ARG(1)) {
+    case 0x8004667Eu: k->nonblocking = M32(arg) != 0; break;
+    case 0x4004667Fu: sock_poll(k); M32(arg) = k->rx_len; break;
+    case 0x40047307u: M32(arg) = 1; break;
+    default: set_last_error(10022); RET(0xFFFFFFFFu); return;
+    }
+    RET(0);
+}
+/* Options are recorded per socket; the relay has no knobs for them to turn. */
+static void ws_setsockopt(CPU* c) {
+    Sock* k = sock_get(ARG(0));
+    if (!k) { set_last_error(10038); RET(0xFFFFFFFFu); return; }
+    if (!ARG(3) || (int32_t)ARG(4) < 1) { set_last_error(10014); RET(0xFFFFFFFFu); return; }
+    uint32_t value = (int32_t)ARG(4) >= 4 ? M32(ARG(3)) : M8(ARG(3));
+    int slot = 0;
+    while (slot < k->nopts && (k->opts[slot].level != ARG(1) || k->opts[slot].name != ARG(2))) slot++;
+    if (slot == 8) { set_last_error(10055); RET(0xFFFFFFFFu); return; }   /* WSAENOBUFS */
+    if (slot == k->nopts) k->nopts++;
+    k->opts[slot].level = ARG(1);
+    k->opts[slot].name = ARG(2);
+    k->opts[slot].value = value;
+    RET(0);
+}
+static void ws_WSACleanup(CPU* c) {
+    if (!wsa_started) { set_last_error(10093); RET(0xFFFFFFFFu); return; }
+    if (!--wsa_started)
+        for (int k = 0; k < MAX_SOCK; k++)
+            if (socks[k].used) {
+#ifdef __EMSCRIPTEN__
+                if (socks[k].connected) js_net_close(socks[k].remote);
+#endif
+                free(socks[k].rx);
+                socks[k].used = 0;
+            }
     RET(0);
 }
 static void ws_WSAGetLastError(CPU* c) { RET(get_last_error()); }
@@ -459,10 +523,6 @@ static const Hle misc[] = {
     K(CreateFileMappingA, 6, k_CreateFileMappingA),
     K(MapViewOfFile, 5, k_MapViewOfFile),
     K(UnmapViewOfFile, 1, k_UnmapViewOfFile),
-    K(ResumeThread, 1, k_ResumeThread),
-    K(SleepEx, 2, k_SleepEx),
-    K(SetThreadPriority, 2, k_SetThreadPriority),
-    K(GetExitCodeThread, 2, k_GetExitCodeThread),
     {"advapi32.dll", "RegCreateKeyExA", 9, a_RegCreateKeyExA},
     {"advapi32.dll", "RegSetValueExA", 6, a_RegSetValueExA},
     {"user32.dll", "InflateRect", 3, u_InflateRect},
@@ -498,14 +558,14 @@ static const Hle misc[] = {
     S(Steam_Shutdown),
     {"noscore_gf.dll", "Steam_SetOverlayActivateCallback", CDECL_ARGS, r_zero},
     {"wsock32.dll", "WSAStartup", 2, ws_WSAStartup},
-    {"wsock32.dll", "WSACleanup", 0, r_zero},
+    {"wsock32.dll", "WSACleanup", 0, ws_WSACleanup},
     {"wsock32.dll", "WSAGetLastError", 0, ws_WSAGetLastError},
     {"wsock32.dll", "inet_addr", 1, ws_inet_addr},
     {"wsock32.dll", "htons", 1, ws_htons},
     {"wsock32.dll", "ntohs", 1, ws_htons},
     {"wsock32.dll", "socket", 3, ws_socket},
-    {"wsock32.dll", "setsockopt", 5, r_zero},
-    {"wsock32.dll", "ioctlsocket", 3, r_zero},
+    {"wsock32.dll", "setsockopt", 5, ws_setsockopt},
+    {"wsock32.dll", "ioctlsocket", 3, ws_ioctlsocket},
     {"wsock32.dll", "connect", 3, ws_connect},
     {"wsock32.dll", "select", 5, ws_select},
     {"wsock32.dll", "__WSAFDIsSet", 2, ws_fdisset},

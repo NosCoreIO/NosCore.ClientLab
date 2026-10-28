@@ -2335,9 +2335,24 @@ static void u_WaitMessage(CPU* c) {
     RET(1);
 }
 /* Kernel objects are not waitable here, so only the input part of the wait can complete it. */
+/* WAIT_OBJECT_0 + i for the first signalled handle (all of them with fWaitAll), WAIT_OBJECT_0 + count when input
+   arrives. */
+static int handles_ready(uint32_t count, uint32_t list, int all) {
+    if (all) {
+        for (uint32_t k = 0; k < count; k++)
+            if (port_handle_take(M32(list + 4 * k), 0) <= 0) return -1;
+        for (uint32_t k = 0; k < count; k++) port_handle_take(M32(list + 4 * k), 1);
+        return 0;
+    }
+    for (uint32_t k = 0; k < count; k++)
+        if (port_handle_take(M32(list + 4 * k), 1) > 0) return (int)k;
+    return -1;
+}
 static void u_MsgWaitForMultipleObjects(CPU* c) {
     double deadline = ARG(3) == 0xFFFFFFFFu ? -1 : port_now_ms() + ARG(3);
     for (;;) {
+        int ready = handles_ready(ARG(0), ARG(1), ARG(2) != 0);
+        if (ready >= 0) { RET(ready); return; }
         pump_all(c);
         uint32_t m = guest_alloc(28, 4);
         int got = get_msg(c, m, 0, 0, 0, 0);

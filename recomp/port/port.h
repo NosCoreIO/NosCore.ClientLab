@@ -65,6 +65,9 @@ extern int port_trace_budget;
 extern int port_trace_methods;
 void port_fn_trace_start(CPU* c);
 void port_threads_pump(CPU* c);
+int port_handle_take(uint32_t handle, int take);
+void port_sleep_ms(double ms);
+void port_idle_ms(double ms);
 uint32_t port_reg_known_key(uint32_t subkey);
 
 uint32_t port_global_alloc(uint32_t size);

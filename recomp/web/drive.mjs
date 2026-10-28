@@ -105,10 +105,11 @@ try {
   await click(CHARACTER_SLOT);
   await page.waitForTimeout(2000);
   const beforeStart = (await logText()).length;
-  // The map arrives as several large packets; a START pressed too early is ignored, so press it again once.
+  // In the world a frame has thousands of draws (the profile line every 5 s); a START pressed too early is ignored,
+  // so press it again once.
   const entered = async (seconds) => {
     for (let i = 0; i < seconds; i++) {
-      if (/recv 00000100: \d{4,} bytes/.test((await logText()).slice(beforeStart))) return true;
+      if (/profile: .*, \d{4,} draw calls/.test((await logText()).slice(beforeStart))) return true;
       await page.waitForTimeout(1000);
     }
     return false;

@@ -23,6 +23,9 @@ enum { H_FREE, H_FILE, H_FIND, H_EVENT, H_THREAD, H_MAPPING };
 typedef struct {
     int kind;
     int fd;
+    int signaled, manual;                 /* events */
+    int suspended, exited;                /* threads */
+    uint32_t exit_code;
     DIR* dir;
     char pattern[260];
     char dirpath[260];
@@ -296,15 +299,98 @@ static void k_TlsFree(CPU* c) { if (ARG(0) < 64) tls_used[ARG(0)] = 0; RET(1); }
 static void k_TlsGetValue(CPU* c) { set_last_error(0); RET(ARG(0) < 64 ? tls_values[ARG(0)] : 0); }
 static void k_TlsSetValue(CPU* c) { if (ARG(0) < 64) tls_values[ARG(0)] = ARG(1); RET(1); }
 
-/* ---- synchronisation (single guest thread for now) ---- */
+/* ---- synchronisation ---- */
 
-static void k_Nop1(CPU* c) { RET(1); }
+/* One guest thread runs; the only other thread the client starts is emulated by port_threads_pump. A critical
+   section therefore only ever has this thread as owner, but its fields are kept as Windows keeps them. */
+#define GUEST_THREAD_ID 1u
 static void k_InitializeCriticalSection(CPU* c) { memset(GPTR(ARG(0)), 0, 24); M32(ARG(0) + 4) = 0xFFFFFFFFu; }
-static void k_EnterCriticalSection(CPU* c) { M32(ARG(0) + 4) += 1; }
-static void k_LeaveCriticalSection(CPU* c) { M32(ARG(0) + 4) -= 1; }
-static void k_DeleteCriticalSection(CPU* c) {}
-static void k_CreateEventA(CPU* c) { RET(handle_new(H_EVENT)); }
-static void k_WaitForSingleObject(CPU* c) { RET(0); }
+static void k_EnterCriticalSection(CPU* c) {
+    uint32_t cs = ARG(0);
+    M32(cs + 4) += 1;
+    M32(cs + 8) += 1;
+    M32(cs + 12) = GUEST_THREAD_ID;
+}
+static void k_LeaveCriticalSection(CPU* c) {
+    uint32_t cs = ARG(0);
+    M32(cs + 4) -= 1;
+    if (M32(cs + 8) && !--M32(cs + 8)) M32(cs + 12) = 0;
+}
+static void k_DeleteCriticalSection(CPU* c) { memset(GPTR(ARG(0)), 0, 24); }
+
+static void k_CreateEventA(CPU* c) {
+    uint32_t h = handle_new(H_EVENT);
+    Handle* e = handle_get(h);
+    e->manual = ARG(1) != 0;
+    e->signaled = ARG(2) != 0;
+    RET(h);
+}
+static void event_set(CPU* c, int on) {
+    Handle* e = handle_get(ARG(0));
+    if (!e || e->kind != H_EVENT) { set_last_error(6); RET(0); return; }
+    e->signaled = on;
+    RET(1);
+}
+static void k_SetEvent(CPU* c) { event_set(c, 1); }
+static void k_ResetEvent(CPU* c) { event_set(c, 0); }
+
+/* A timed Atomics.wait in the worker rounds up to the 15.6 ms Windows timer tick, while the client asks for 1 ms
+   timers (timeBeginPeriod). A precise sleep blocks until the last tick before the deadline and spins the rest; a
+   coarse one, for waits with no deadline, only blocks. */
+#ifdef __EMSCRIPTEN__
+EM_JS(void, js_sleep, (double ms, int precise), {
+    const g = globalThis, cell = g.__sleepCell || (g.__sleepCell = new Int32Array(new SharedArrayBuffer(4)));
+    const end = performance.now() + ms;
+    if (!precise) { Atomics.wait(cell, 0, 0, ms); return; }
+    if (ms > 20) Atomics.wait(cell, 0, 0, ms - 17);
+    while (performance.now() < end) {}
+});
+#else
+static void js_sleep(double ms, int precise) { (void)precise; usleep((useconds_t)(ms * 1000)); }
+#endif
+void port_sleep_ms(double ms) { if (ms > 0) js_sleep(ms, 1); }
+void port_idle_ms(double ms) { if (ms > 0) js_sleep(ms, 0); }
+
+/* Whether a handle is signalled, taking the signal (when take is set) from an auto-reset event; -1 for a handle that
+   cannot be waited on. A thread counts as finished once something waits for it, since the emulated thread stops as soon as
+   its owner asks it to. */
+int port_handle_take(uint32_t handle, int take) {
+    Handle* h = handle_get(handle);
+    if (!h) return -1;
+    switch (h->kind) {
+    case H_EVENT:
+        if (!h->signaled) return 0;
+        if (take && !h->manual) h->signaled = 0;
+        return 1;
+    case H_THREAD:
+        if (take) h->exited = 1;
+        return 1;
+    case H_FILE: return 1;
+    default: return -1;
+    }
+}
+
+/* Waits up to ms, letting the emulated thread run meanwhile: WAIT_OBJECT_0, WAIT_TIMEOUT or WAIT_FAILED. */
+static uint32_t wait_handle(CPU* c, uint32_t handle, uint32_t ms) {
+    double start = port_now_ms(), deadline = ms == 0xFFFFFFFFu ? -1 : start + ms;
+    int warned = 0;
+    for (;;) {
+        int got = port_handle_take(handle, 1);
+        if (got < 0) { set_last_error(6); return 0xFFFFFFFFu; }
+        if (got) return 0;
+        double now = port_now_ms();
+        if (deadline >= 0 && now >= deadline) return 0x102;
+        if (!warned && now - start > 5000) {
+            warned = 1;
+            port_log("WaitForSingleObject(%08x) still waiting after 5 s; only the emulated thread could signal it", handle);
+        }
+        port_threads_pump(c);
+        if (c->pend) return 0xFFFFFFFFu;
+        if (deadline < 0) port_idle_ms(16);
+        else port_sleep_ms(deadline - now < 16 ? deadline - now : 16);
+    }
+}
+static void k_WaitForSingleObject(CPU* c) { RET(wait_handle(c, ARG(0), ARG(1))); }
 static void k_InterlockedIncrement(CPU* c) { RET(++M32(ARG(0))); }
 static void k_InterlockedDecrement(CPU* c) { RET(--M32(ARG(0))); }
 static void k_InterlockedExchange(CPU* c) { uint32_t o = M32(ARG(0)); M32(ARG(0)) = ARG(1); RET(o); }
@@ -314,17 +400,27 @@ static void k_InterlockedCompareExchange(CPU* c) {
     RET(o);
 }
 static void k_InterlockedExchangeAdd(CPU* c) { uint32_t o = M32(ARG(0)); M32(ARG(0)) = o + ARG(1); RET(o); }
-static void k_Sleep(CPU* c) {}
+static void sleep_ms(CPU* c, uint32_t ms) {
+    double until = port_now_ms() + ms;
+    for (double now = port_now_ms(); now < until && !c->pend; now = port_now_ms()) {
+        port_threads_pump(c);
+        port_sleep_ms(until - now < 100 ? until - now : 100);
+    }
+}
+static void k_Sleep(CPU* c) { sleep_ms(c, ARG(0)); }
+/* No asynchronous procedure call is ever queued, so an alertable sleep only ends on its timeout. */
+static void k_SleepEx(CPU* c) { sleep_ms(c, ARG(0)); RET(0); }
 /* The client's only thread is a TCkThread: every 10 minutes it raises an event (method pointer at +0x40/+0x44,
    arguments at +0x54/+0x58), through Synchronize, i.e. on the main thread. Threads cannot run here, so the message
    pump raises that event on the same schedule. */
 static uint64_t now_ms(void);
 #define CK_INTERVAL_MS 600000.0
-static uint32_t ck_thread;
+static uint32_t ck_thread, ck_handle;
 static double ck_next;
 
 void port_threads_pump(CPU* c) {
-    if (!ck_thread || now_ms() < ck_next) return;
+    Handle* t = handle_get(ck_handle);
+    if (!ck_thread || !t || t->kind != H_THREAD || t->suspended || t->exited || now_ms() < ck_next) return;
     ck_next = now_ms() + CK_INTERVAL_MS;
     if (!M16(ck_thread + 0x42)) return;
     uint32_t saved[3] = {c->eax, c->edx, c->ecx};
@@ -341,14 +437,37 @@ static void k_CreateThread(CPU* c) {
     uint32_t rec = ARG(3), obj = rec ? M32(rec + 4) : 0, vmt = obj ? M32(obj) : 0, name = vmt ? M32(vmt - 44) : 0;
     char cls[64] = "?";
     if (name >= 0x400000u && name < 0x10000000u) snprintf(cls, sizeof cls, "%.*s", M8(name), GSTR(name + 1));
+    uint32_t h = handle_new(H_THREAD);
+    Handle* t = handle_get(h);
+    t->suspended = (ARG(4) & 4) != 0;   /* CREATE_SUSPENDED */
+    t->exit_code = 259;                 /* STILL_ACTIVE */
     if (!strcmp(cls, "TCkThread")) {
         ck_thread = obj;
+        ck_handle = h;
         ck_next = now_ms() + CK_INTERVAL_MS;
         port_log("CreateThread: %s emulated as a main-thread timer", cls);
     } else
         port_log("CreateThread(start=%08x, param=%08x) func=%08x class=%s not run", ARG(2), rec, rec ? M32(rec) : 0, cls);
-    if (ARG(5)) M32(ARG(5)) = 2;
-    RET(handle_new(H_THREAD));
+    if (ARG(5)) M32(ARG(5)) = GUEST_THREAD_ID + 1 + (uint32_t)(t - handles);
+    RET(h);
+}
+static void k_ResumeThread(CPU* c) {
+    Handle* t = handle_get(ARG(0));
+    if (!t || t->kind != H_THREAD) { set_last_error(6); RET(0xFFFFFFFFu); return; }
+    RET(t->suspended);
+    if (t->suspended) t->suspended--;
+}
+static void k_SetThreadPriority(CPU* c) {
+    Handle* t = handle_get(ARG(0));
+    int ok = (t && t->kind == H_THREAD) || ARG(0) == 0xFFFFFFFEu;
+    if (!ok) set_last_error(6);
+    RET(ok);
+}
+static void k_GetExitCodeThread(CPU* c) {
+    Handle* t = handle_get(ARG(0));
+    if (!t || t->kind != H_THREAD) { set_last_error(6); RET(0); return; }
+    if (ARG(1)) M32(ARG(1)) = t->exited ? 0 : t->exit_code;
+    RET(1);
 }
 
 /* ---- time ---- */
@@ -777,8 +896,12 @@ static const Hle kernel32[] = {
     {"kernel32.dll", "LeaveCriticalSection", 1, k_LeaveCriticalSection},
     {"kernel32.dll", "DeleteCriticalSection", 1, k_DeleteCriticalSection},
     {"kernel32.dll", "CreateEventA", 4, k_CreateEventA},
-    {"kernel32.dll", "SetEvent", 1, k_Nop1},
-    {"kernel32.dll", "ResetEvent", 1, k_Nop1},
+    {"kernel32.dll", "SetEvent", 1, k_SetEvent},
+    {"kernel32.dll", "ResetEvent", 1, k_ResetEvent},
+    {"kernel32.dll", "SleepEx", 2, k_SleepEx},
+    {"kernel32.dll", "ResumeThread", 1, k_ResumeThread},
+    {"kernel32.dll", "SetThreadPriority", 2, k_SetThreadPriority},
+    {"kernel32.dll", "GetExitCodeThread", 2, k_GetExitCodeThread},
     {"kernel32.dll", "WaitForSingleObject", 2, k_WaitForSingleObject},
     {"kernel32.dll", "InterlockedIncrement", 1, k_InterlockedIncrement},
     {"kernel32.dll", "InterlockedDecrement", 1, k_InterlockedDecrement},
