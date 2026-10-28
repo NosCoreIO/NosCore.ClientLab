@@ -20,6 +20,10 @@
   .msgbox p { margin: 0; padding: 16px 14px; white-space: pre-wrap; }
   .msgbox footer { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 14px; background: #e6e6e6; }
   .msgbox button { min-width: 76px; padding: 3px 10px; font: inherit; }
+  .notice { position: absolute; top: 8px; right: 8px; z-index: 5; max-width: 420px; padding: 8px 28px 8px 10px; background: rgb(20 20 26 / 0.9);
+            color: #e8e8f0; border-left: 3px solid #d9a441; font: 12px/1.4 system-ui, sans-serif; white-space: pre-wrap; cursor: pointer; }
+  .notice b { display: block; margin-bottom: 2px; }
+  .notice::after { content: '\00D7'; position: absolute; top: 4px; right: 8px; color: #9a9aa6; }
   .menu { position: absolute; z-index: 10; min-width: 160px; padding: 3px 0; margin: 0; list-style: none; background: #f2f2f2;
           color: #000; border: 1px solid #999; box-shadow: 2px 3px 8px rgb(0 0 0 / 0.4); font: 13px/1.6 Tahoma, system-ui, sans-serif; }
   .menu li { position: relative; display: flex; gap: 24px; padding: 0 22px 0 24px; white-space: nowrap; cursor: default; }
@@ -205,6 +209,19 @@
   function messageBox(d, done) {
     const fallback = d.buttons[d.default < d.buttons.length ? d.default : 0];
     if (autoDismiss) { window.allLog.push(`message box "${d.caption}" dismissed with ${BUTTON[fallback]}: ${d.text}`); done(fallback); return; }
+    // A box with a single button has only one possible answer, so the game is not held up: the text stays visible as
+    // a notice instead.
+    if (d.buttons.length === 1) {
+      const note = stage.appendChild(document.createElement('div'));
+      note.className = 'notice';
+      note.title = 'Dismiss';
+      note.appendChild(document.createElement('b')).textContent = d.caption;
+      note.append(d.text);
+      note.onclick = () => note.remove();
+      setTimeout(() => note.remove(), 15000);
+      done(fallback);
+      return;
+    }
     const box = document.createElement('div');
     box.className = 'msgbox';
     const panel = box.appendChild(document.createElement('div'));

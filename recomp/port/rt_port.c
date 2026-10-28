@@ -287,7 +287,14 @@ void rt_call_host_raw(CPU* c, uint32_t target) {
         }
         if (!t->fn) port_fatal("unimplemented API %s!%s (called from %08x)", t->dll, t->name, M32(c->esp));
         fn_trace_drain(c);
-        int traced = port_trace || (port_trace_budget > 0 && (port_trace_methods || !strstr(t->name, "::")) && port_trace_budget--);
+        static const char* trace_dll;
+        static int trace_dll_read;
+        if (!trace_dll_read) { trace_dll_read = 1; trace_dll = getenv("PORT_TRACE_DLL"); }
+        static int trace_game = -1;
+        if (trace_game < 0) trace_game = getenv("PORT_TRACE_GAME") != 0;
+        uint32_t from = M32(c->esp);
+        int game_ok = !trace_game || (from >= 0x460000u && from < 0x800000u);
+        int traced = (port_trace && game_ok && (!trace_dll || !strcmp(t->dll, trace_dll))) || (port_trace_budget > 0 && (port_trace_methods || !strstr(t->name, "::")) && port_trace_budget--);
         if (traced) port_log("api %s!%s from %08x esp=%08x args %08x %08x %08x %08x", t->dll, t->name, M32(c->esp), c->esp,
                              M32(c->esp + 4), M32(c->esp + 8), M32(c->esp + 12), M32(c->esp + 16));
         if (api_timing) {
