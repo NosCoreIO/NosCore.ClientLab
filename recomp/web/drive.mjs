@@ -35,6 +35,7 @@ const browser = await chromium.launch({
 });
 let page;
 try {
+  scenario: {
   page = await browser.newPage({ viewport: { width: 1800, height: 1200 } });
   page.on('pageerror', (e) => console.log('pageerror', e.message));
   await page.goto(url);
@@ -83,6 +84,22 @@ try {
   await page.waitForTimeout(3000);
   await shot('2-characters.png');
 
+  if (flag('--charselect-input')) {
+    step('input on the character screen');
+    const beforeInput = (await logText()).length;
+    await click(GROUND);
+    await page.waitForTimeout(1500);
+    await page.focus('#screen');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('hello', { delay: 100 });
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(5000);
+    await shot('2b-after-input.png');
+    const lines = (await logText()).slice(beforeInput).split('\n');
+    console.log(lines.filter((l) => /FATAL|exited|RaiseException|Delphi|fault/.test(l)).slice(0, 10).join('\n') || 'no errors');
+    break scenario;
+  }
+
   step('enter world');
   await click(CHARACTER_SLOT);
   await page.waitForTimeout(2000);
@@ -129,6 +146,7 @@ try {
   console.log((await logText()).slice(beforeChat).split('\n').filter((l) => /^(send |FATAL)/.test(l)).join('\n'));
   console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
   console.log('sounds:', JSON.stringify(await page.evaluate(() => window.soundStats)));
+  }
 } catch (e) {
   console.log('error:', e.message);
 } finally {

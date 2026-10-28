@@ -1,4 +1,7 @@
 #include "port.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten/heap.h>
+#endif
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -611,18 +614,16 @@ static void a_RegQueryValueExA(CPU* c) {
     RET(0);
 }
 
-/* The low 64 KB is never mapped on Windows; everything else in linear memory is readable here. The client uses this
-   to walk its SEH chain in an integrity check, so the first walks are logged. */
+/* Unmapped on Windows: the low 64 KB, and here anything past the end of linear memory. The client calls this while
+   walking its own call stack in an integrity check, and that walk can wander into garbage. */
 static void k_IsBadReadPtr(CPU* c) {
-    uint32_t p = ARG(0);
-    static int logged;
-    if (ARG(1) == 8 && logged < 3) {
-        logged++;
-        port_log("IsBadReadPtr(%08x) from %08x, chain:", p, M32(c->esp));
-        for (uint32_t f = p, k = 0; f >= 0x10000 && f != 0xFFFFFFFFu && k < 24; f = M32(f), k++)
-            port_log("  frame %08x next %08x handler %08x", f, M32(f), M32(f + 4));
-    }
-    RET(p < 0x10000 ? 1 : 0);
+    uint32_t p = ARG(0), n = ARG(1);
+#ifdef __EMSCRIPTEN__
+    uint64_t end = (uint64_t)emscripten_get_heap_size();
+#else
+    uint64_t end = 0x100000000ull;
+#endif
+    RET(p < 0x10000 || (uint64_t)p + n > end ? 1 : 0);
 }
 
 /* ---- SEH: walk the guest's fs:[0] chain the way the OS dispatcher does ---- */
