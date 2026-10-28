@@ -67,7 +67,18 @@ void r_init(uint32_t backbuffer) {
     gl_start(backbuffer);
 }
 
-void r_set_render_target(uint32_t surface) { R.target = surface; R.vp_set = 0; }
+void r_set_render_target(uint32_t surface) {
+    static uint32_t seen[16];
+    static int nseen;
+    int known = 0;
+    for (int k = 0; k < nseen; k++) known |= seen[k] == surface;
+    if (!known && nseen < 16) {
+        seen[nseen++] = surface;
+        port_log("render target %08x: %ux%u format %u", surface, SW(surface), SH(surface), SFMT(surface));
+    }
+    R.target = surface;
+    R.vp_set = 0;
+}
 static int wvp_dirty = 1;
 void r_set_transform(uint32_t type, uint32_t addr) {
     Mat* m = type == 256 ? &R.world : type == 2 ? &R.view : type == 3 ? &R.proj : (type >= 16 && type < 24) ? &R.tex[type - 16] : 0;
@@ -530,7 +541,23 @@ static void log_state_combo(void) {
 
 static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n);
 
+/* Frame dump (F9 in the page): every draw of the next frame with its state, to debug a scene that renders wrong. */
+static int dump_state;   /* 1: armed, dump from the next Present; 2: dumping this frame */
+static uint32_t dump_draws;
+void r_dump_next_frame(void) { dump_state = 1; }
+
+static void dump_draw(uint32_t prim, Vtx* v, uint32_t n) {
+    uint32_t tex = R.tex_obj[0], s = tex && M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
+    port_log("draw %u: prim %u n %u tex %ux%u fmt %u | blend %u %u->%u atest %u/%u ref %u | z %u/%u/%u fog %u light %u "
+             "| s0 %u(%x,%x) a%u s1 %u tex1 %u | v0 (%.1f, %.1f, %.4f, w %.2f) diffuse %08x uv %.3f,%.3f",
+             dump_draws++, prim, n, s ? SW(s) : 0, s ? SH(s) : 0, s ? SFMT(s) : 0, R.rs[27], R.rs[19], R.rs[20], R.rs[15],
+             R.rs[25], R.rs[24] & 255, R.rs[7], R.rs[14], R.rs[23], R.rs[28], R.rs[137], R.tss[0][1], R.tss[0][2],
+             R.tss[0][3], R.tss[0][4], R.tss[1][1], R.tex_obj[1] != 0, v[0].x, v[0].y, v[0].z, v[0].w, v[0].diffuse,
+             v[0].uv[0], v[0].uv[1]);
+}
+
 static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
+    if (dump_state == 2 && n) dump_draw(prim, v, n);
     prof_fetch += prof_now() - fetch_t0;
     S.draws++;
     if (gl_on) { gl_draw_list(prim, v, n); return; }
@@ -543,12 +570,25 @@ static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
 
 static uint32_t vertex_count(uint32_t prim, uint32_t count) { return prim == 4 ? 3 * count : prim == 5 || prim == 6 ? count + 2 : 0; }
 
-static Vtx vbuf[65536];
+/* Vertex scratch, grown on demand: a large map's terrain is a single draw of well over 64k vertices. */
+static Vtx* vbuf;
+static uint32_t vbuf_cap;
+static Vtx* vcache;
+static uint32_t vcache_cap;
+
+static int reserve(Vtx** buf, uint32_t* cap, uint32_t n) {
+    if (n <= *cap) return 1;
+    Vtx* grown = realloc(*buf, sizeof(Vtx) * n);
+    if (!grown) return 0;
+    *buf = grown;
+    *cap = n;
+    return 1;
+}
 
 static void draw_impl_draw(uint32_t prim, uint32_t start, uint32_t count) {
     layout_begin();
     uint32_t n = vertex_count(prim, count);
-    if (!R.vb || !n || n > 65536 || !R.vb_stride) return;
+    if (!R.vb || !n || !R.vb_stride || !reserve(&vbuf, &vbuf_cap, n)) return;
     uint32_t base = M32(R.vb + 28) + R.vb_offset;
     for (uint32_t k = 0; k < n; k++) fetch(base + (start + k) * R.vb_stride, &vbuf[k]);
     draw_list(prim, count, vbuf, n);
@@ -557,14 +597,13 @@ static void draw_impl_draw(uint32_t prim, uint32_t start, uint32_t count) {
 static void draw_impl_draw_up(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride) {
     layout_begin();
     uint32_t n = vertex_count(prim, count);
-    if (!n || n > 65536) return;
+    if (!n || !reserve(&vbuf, &vbuf_cap, n)) return;
     for (uint32_t k = 0; k < n; k++) fetch(data + k * stride, &vbuf[k]);
     draw_list(prim, count, vbuf, n);
 }
 
 /* Indexed meshes share vertices between triangles: each referenced vertex is transformed and lit once, then the
    index list picks from that cache. */
-static Vtx vcache[65536];
 
 static void draw_indexed_cached(uint32_t prim, uint32_t count, uint32_t n, uint32_t vb, uint32_t stride,
                                 uint32_t indices, int idx32, int32_t base_vertex) {
@@ -574,7 +613,7 @@ static void draw_indexed_cached(uint32_t prim, uint32_t count, uint32_t n, uint3
         if (i < lo) lo = i;
         if (i > hi) hi = i;
     }
-    if (hi - lo >= 65536) return;
+    if (hi < lo || !reserve(&vcache, &vcache_cap, hi - lo + 1)) return;
     for (uint32_t i = lo; i <= hi; i++) fetch(vb + (uint32_t)((int32_t)i + base_vertex) * stride, &vcache[i - lo]);
     for (uint32_t k = 0; k < n; k++) {
         uint32_t i = idx32 ? M32(indices + 4 * k) : M16(indices + 2 * k);
@@ -586,7 +625,7 @@ static void draw_indexed_cached(uint32_t prim, uint32_t count, uint32_t n, uint3
 static void draw_impl_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t start_index, uint32_t count) {
     layout_begin();
     uint32_t n = vertex_count(prim, count);
-    if (!R.vb || !R.ib || !n || n > 65536) return;
+    if (!R.vb || !R.ib || !n || !reserve(&vbuf, &vbuf_cap, n)) return;
     int idx32 = M32(R.ib + 20) == 102;
     uint32_t ib = M32(R.ib + 28) + start_index * (idx32 ? 4 : 2);
     draw_indexed_cached(prim, count, n, M32(R.vb + 28) + R.vb_offset, R.vb_stride, ib, idx32, base_vertex);
@@ -595,7 +634,7 @@ static void draw_impl_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t 
 static void draw_impl_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t idx_fmt, uint32_t data, uint32_t stride) {
     layout_begin();
     uint32_t n = vertex_count(prim, count);
-    if (!n || n > 65536) return;
+    if (!n || !reserve(&vbuf, &vbuf_cap, n)) return;
     draw_indexed_cached(prim, count, n, data, stride, indices, idx_fmt == 102, 0);
 }
 
@@ -633,6 +672,8 @@ void r_dump_bmp(uint32_t surface, const char* path) {
 }
 
 void r_prof_frame(void) {
+    if (dump_state == 2) { dump_state = 0; port_log("frame dump: %u draws", dump_draws); }
+    else if (dump_state == 1) { dump_state = 2; dump_draws = 0; }
     double now = prof_now();
     if (prof_frame_start > 0) prof_frames_ms += now - prof_frame_start;
     prof_frame_start = now;

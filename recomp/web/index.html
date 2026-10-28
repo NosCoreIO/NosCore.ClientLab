@@ -159,7 +159,7 @@
   }
 
   // Same event codes as pump_input in hle_user32.c.
-  const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7 };
+  const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7, dumpFrame: 8 };
   let ring = null;
   function send(type, a, x = 0, y = 0) {
     if (!ring) return;
@@ -180,6 +180,8 @@
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   const charKeys = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27 };
   canvas.addEventListener('keydown', (e) => {
+    // F9 is not a game key: it asks the renderer to log every draw of the next frame.
+    if (e.key === 'F9') { send(IN.dumpFrame, 0); e.preventDefault(); return; }
     send(IN.keydown, e.keyCode);
     const ch = e.key.length === 1 ? e.key.charCodeAt(0) : charKeys[e.key];
     if (ch !== undefined && !e.ctrlKey && !e.altKey) send(IN.char, ch);

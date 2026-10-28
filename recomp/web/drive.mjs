@@ -164,17 +164,23 @@ try {
   console.log(windowErrors.slice(0, 12).join('\n') || 'windows: no errors');
 
   // The test characters are game masters, so a map change is a chat command away.
-  step('teleport');
-  const beforeTeleport = (await logText()).length;
-  await page.keyboard.press('Enter');
-  await page.waitForTimeout(500);
-  await page.keyboard.type(`$Teleport ${arg('--map', '2')}`, { delay: 60 });
-  await page.keyboard.press('Enter');
-  await page.waitForTimeout(15000);
-  await shot('8-teleported.png');
-  const teleportLog = (await logText()).slice(beforeTeleport).split('\n');
-  console.log(teleportLog.filter((l) => /FATAL|exited|Delphi|fault|STUB/.test(l)).slice(0, 12).join('\n') || 'teleport: no errors');
-  console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
+  for (const map of arg('--maps', '2').split(',')) {
+    step(`teleport to map ${map}`);
+    const beforeTeleport = (await logText()).length;
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(500);
+    await page.keyboard.type(`$Teleport ${map}`, { delay: 60 });
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(500);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(14000);
+    await shot(`8-map-${map}.png`);
+    if (flag('--dump-frame')) { await page.keyboard.press('F9'); await page.waitForTimeout(2000); }
+    const teleportLog = (await logText()).slice(beforeTeleport).split('\n');
+    console.log(teleportLog.filter((l) => /FATAL|exited|Delphi|fault|STUB/.test(l)).slice(0, 12).join('\n') || `map ${map}: no errors`);
+    console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
+    if (teleportLog.some((l) => /FATAL|exited/.test(l))) break;
+  }
   }
 } catch (e) {
   console.log('error:', e.message);

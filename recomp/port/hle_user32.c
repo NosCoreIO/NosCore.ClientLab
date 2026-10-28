@@ -1,4 +1,5 @@
 #include "port.h"
+#include "render.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <time.h>
@@ -259,7 +260,7 @@ static uint32_t mouse_keys(void) {
            (key_down[4] ? 0x10 : 0);
 }
 
-enum { IN_MOVE = 1, IN_DOWN, IN_UP, IN_WHEEL, IN_KEYDOWN, IN_KEYUP, IN_CHAR };
+enum { IN_MOVE = 1, IN_DOWN, IN_UP, IN_WHEEL, IN_KEYDOWN, IN_KEYUP, IN_CHAR, IN_DUMP_FRAME };
 
 /* A button or key press and its release must not land in the same frame: the game also polls the key state once a
    frame, so only one state change goes through per Present. */
@@ -293,6 +294,7 @@ static void pump_input(CPU* c) {
             post(input_hwnd, 0x101, (uint32_t)e[1], 0xC0000001u | ((uint32_t)e[2] & 0xff) << 16);
             break;
         case IN_CHAR: post(input_hwnd, 0x102, (uint32_t)e[1], 1); break;
+        case IN_DUMP_FRAME: r_dump_next_frame(); break;
         }
     }
 }

@@ -245,7 +245,8 @@ static void gl_flush(void) {
 
 static void put_vertex(uint8_t* dst, const Vtx* v, float tw, float th) {
     float* f = (float*)dst;
-    float w = v->w > 0 ? v->w : 1;
+    /* The real w, negative behind the camera, so the GPU clips triangles that cross the camera plane. */
+    float w = v->w != 0 ? v->w : 1e-6f;
     f[0] = ((v->x + 0.5f) / tw * 2 - 1) * w;
     f[1] = (1 - (v->y + 0.5f) / th * 2) * w;
     f[2] = (v->z * 2 - 1) * w;
@@ -267,8 +268,23 @@ static void log_stage_setup(void) {
              key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7], key[8], key[9], R.fvf);
 }
 
+/* Each distinct blend / alpha-test / depth / texture-format combination is logged once (first 64). */
+static void log_raster_setup(void) {
+    static uint32_t seen[64][6];
+    static int nseen;
+    uint32_t tex = R.tex_obj[0], s = tex && M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
+    uint32_t key[6] = {R.rs[27] << 16 | R.rs[19] << 8 | R.rs[20], R.rs[15] << 16 | R.rs[25] << 8 | (R.rs[24] & 255),
+                       R.rs[7] << 16 | R.rs[14] << 8 | R.rs[23], s ? SFMT(s) : 0, R.rs[28], R.rs[22]};
+    for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) return;
+    if (nseen >= 64) return;
+    memcpy(seen[nseen++], key, sizeof key);
+    port_log("raster setup: blend %u %u->%u | alpha test %u func %u ref %u | z %u write %u func %u | tex fmt %u | fog %u cull %u",
+             R.rs[27], R.rs[19], R.rs[20], R.rs[15], R.rs[25], R.rs[24] & 255, R.rs[7], R.rs[14], R.rs[23], key[3], R.rs[28], R.rs[22]);
+}
+
 static void gl_state(int32_t* st) {
     log_stage_setup();
+    log_raster_setup();
     memset(st, 0, 40 * sizeof *st);
     for (int s = 0; s < 2; s++) {
         for (int k = 0; k < 6; k++) st[6 * s + k] = (int32_t)R.tss[s][1 + k];
