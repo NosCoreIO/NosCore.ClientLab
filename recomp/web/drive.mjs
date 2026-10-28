@@ -98,6 +98,20 @@ try {
   const after = (await logText()).slice(before);
   writeFileSync(join(out, 'after-click.log'), after);
   console.log(after.split('\n').filter((l) => /^(fn |send |input |FATAL)/.test(l)).slice(0, 60).join('\n'));
+
+  step('chat');
+  const beforeChat = (await logText()).length;
+  await page.focus('#screen');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(800);
+  for (const ch of 'hello from the browser') { await page.keyboard.type(ch); await page.waitForTimeout(120); }
+  await page.waitForTimeout(500);
+  await shot('5-typing.png');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(3000);
+  await shot('6-after-chat.png');
+  console.log((await logText()).slice(beforeChat).split('\n').filter((l) => /^(send |FATAL)/.test(l)).join('\n'));
+  console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
 } catch (e) {
   console.log('error:', e.message);
 } finally {
