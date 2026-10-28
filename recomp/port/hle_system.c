@@ -378,8 +378,18 @@ static void st_CancelAuthSessionTicket(CPU* c) { RET(0); }
 /* Steam would dispatch its callbacks here; none are ever registered in the browser. */
 static void st_OnFrameTick(CPU* c) { RET(0); }
 
+/* No visual style is loaded (the classic look), so controls draw themselves without theme parts. */
+static void ux_IsAppThemed(CPU* c) { RET(0); }
+static void ux_IsThemeActive(CPU* c) { RET(0); }
+static void ux_OpenThemeData(CPU* c) { set_last_error(0x80070490u); RET(0); }
+static void ux_CloseThemeData(CPU* c) { RET(0); }
+static void ux_GetThemeAppProperties(CPU* c) { RET(0); }
+
 #define K(n, a) {"kernel32.dll", #n, a, k_##n}
 static const Hle sys[] = {
+    {"uxtheme.dll", "IsAppThemed", 0, ux_IsAppThemed}, {"uxtheme.dll", "IsThemeActive", 0, ux_IsThemeActive},
+    {"uxtheme.dll", "OpenThemeData", 2, ux_OpenThemeData}, {"uxtheme.dll", "CloseThemeData", 1, ux_CloseThemeData},
+    {"uxtheme.dll", "GetThemeAppProperties", 0, ux_GetThemeAppProperties},
     K(GetPrivateProfileStringA, 6), K(WritePrivateProfileStringA, 4), K(GetDateFormatA, 6), K(EnumCalendarInfoA, 4),
     K(IsValidLocale, 2), K(GetComputerNameA, 2), K(GetFileTime, 4), K(SetEndOfFile, 1), K(MoveFileA, 2),
     K(RemoveDirectoryA, 1), K(ExitThread, 1), K(SetProcessShutdownParameters, 2),

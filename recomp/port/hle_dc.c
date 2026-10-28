@@ -1356,14 +1356,42 @@ static void u_ReleaseDC(CPU* c) {
     RET(0);
 }
 static void u_BeginPaint(CPU* c) {
-    uint32_t hwnd = ARG(0), ps = ARG(1), w, h;
+    uint32_t hwnd = ARG(0), ps = ARG(1);
     uint32_t dc = window_dc(hwnd);
-    hle_window_client_size(hwnd, &w, &h);
     memset(GPTR(ps), 0, 64);
     M32(ps) = dc;
-    M32(ps + 4) = 0;   /* fErase: the background was erased */
-    M32(ps + 8) = 0; M32(ps + 12) = 0; M32(ps + 16) = w; M32(ps + 20) = h;
+    M32(ps + 4) = hle_window_begin_paint(c, hwnd, dc, ps + 8);
     RET(dc);
+}
+
+void hle_dc_fill(uint32_t dc, int l, int t, int r, int b, uint32_t brush) {
+    Dc* d = dc_get(dc);
+    GdiBitmap bm;
+    if (dc_target(d, &bm)) fill_rect_dev(d, &bm, lx(d, l), ly(d, t), lx(d, r), ly(d, b), brush, 0xf00021);
+}
+
+/* Moves the pixels of the window's surface inside the given client rectangle. */
+void hle_dc_scroll_window(uint32_t hwnd, int dx, int dy, int l, int t, int r, int b) {
+    GdiBitmap bm;
+    if (!gdi_bitmap(window_surface(hwnd), &bm) || bm.bpp != 32) return;
+    if (l < 0) l = 0;
+    if (t < 0) t = 0;
+    if (r > bm.w) r = bm.w;
+    if (b > abs(bm.h)) b = abs(bm.h);
+    int w = r - l;
+    if (w <= 0 || b <= t) return;
+    uint8_t* bits = (uint8_t*)GPTR(bm.bits);
+    int rows = b - t;
+    for (int k = 0; k < rows; k++) {
+        int y = dy > 0 ? b - 1 - k : t + k, sy = y - dy;
+        if (sy < t || sy >= b) continue;
+        int x0 = l, x1 = r, sx0 = l - dx;
+        if (sx0 < l) { x0 += l - sx0; sx0 = l; }
+        if (sx0 + (x1 - x0) > r) x1 = x0 + (r - sx0);
+        if (x1 <= x0) continue;
+        uint32_t row = bm.top_down ? (uint32_t)y : (uint32_t)(abs(bm.h) - 1 - y), srow = bm.top_down ? (uint32_t)sy : (uint32_t)(abs(bm.h) - 1 - sy);
+        memmove(bits + row * bm.stride + (uint32_t)x0 * 4, bits + srow * bm.stride + (uint32_t)sx0 * 4, (size_t)(x1 - x0) * 4);
+    }
 }
 static void u_EndPaint(CPU* c) {
     Dc* d = dc_get(M32(ARG(1)));

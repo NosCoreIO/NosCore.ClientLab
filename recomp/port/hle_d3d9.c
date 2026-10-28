@@ -153,6 +153,13 @@ static void v_Present(CPU* c) {
     static int checked;
     if (!checked) { checked = 1; shot_dir = getenv("PORT_SHOT_DIR"); }
     port_frames++;
+    /* PORT_TRACE_FRAME=n logs the next few thousand API calls once frame n is presented. */
+    static long trace_frame = -2;
+    if (trace_frame == -2) trace_frame = getenv("PORT_TRACE_FRAME") ? atol(getenv("PORT_TRACE_FRAME")) : -1;
+    if ((long)port_frames == trace_frame) {
+        port_trace_budget = getenv("PORT_TRACE_BUDGET") ? atoi(getenv("PORT_TRACE_BUDGET")) : 4000;
+        port_trace_methods = !getenv("PORT_TRACE_NOMETHODS");
+    }
     r_prof_frame();
     if (++frames % 300 == 1) port_log("Present frame %u", frames);
     if (!r_gl_present()) web_present(backbuffer);

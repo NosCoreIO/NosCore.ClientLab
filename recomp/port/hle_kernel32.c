@@ -261,6 +261,10 @@ static uint32_t block_realloc(uint32_t p, uint32_t size) {
     return q;
 }
 
+uint32_t port_global_alloc(uint32_t size) { return block_alloc(size, 1); }
+uint32_t port_global_size(uint32_t h) { return block_size(h); }
+void port_global_free(uint32_t h) { block_free(h); }
+
 static void k_GlobalAlloc(CPU* c) { RET(block_alloc(ARG(1), 1)); }
 static void k_GlobalReAlloc(CPU* c) { RET(block_realloc(ARG(0), ARG(1))); }
 static void k_GlobalFree(CPU* c) { block_free(ARG(0)); RET(0); }

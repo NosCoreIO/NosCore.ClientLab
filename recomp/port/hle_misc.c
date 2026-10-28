@@ -9,7 +9,6 @@
 #define RET(v) (c->eax = (uint32_t)(v))
 
 static void r_zero(CPU* c) { RET(0); }
-static void r_one(CPU* c) { RET(1); }
 
 /* ---- OLE automation strings (BSTR: length prefix in bytes, then UTF-16, then NUL) ---- */
 
@@ -232,7 +231,6 @@ static void u_GetMonitorInfoA(CPU* c) {
     if (size >= 72) strcpy(GSTR(p + 40), "\\\\.\\DISPLAY1");
     RET(1);
 }
-static void u_GetWindowDC(CPU* c) { RET(0x00300000u + (ARG(0) & 0xffff)); }
 static void g_GetCurrentPositionEx(CPU* c) { if (ARG(1)) { M32(ARG(1)) = 0; M32(ARG(1) + 4) = 0; } RET(1); }
 static void g_GetBitmapBits(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, ARG(1)); RET(ARG(1)); }
 static uint32_t gdi_misc_next = 0x00280000u;
@@ -494,13 +492,11 @@ static const Hle misc[] = {
     K(GetExitCodeThread, 2, k_GetExitCodeThread),
     {"advapi32.dll", "RegCreateKeyExA", 9, a_RegCreateKeyExA},
     {"advapi32.dll", "RegSetValueExA", 6, a_RegSetValueExA},
-    {"user32.dll", "SetMenu", 2, r_one},
     {"user32.dll", "InflateRect", 3, u_InflateRect},
     {"user32.dll", "OffsetRect", 3, u_OffsetRect},
     {"user32.dll", "SetRect", 5, u_SetRect},
     {"user32.dll", "CopyRect", 2, u_CopyRect},
     {"user32.dll", "PtInRect", 3, u_PtInRect},
-    {"user32.dll", "RedrawWindow", 4, r_one},
     {"user32.dll", "EnumDisplaySettingsA", 3, u_EnumDisplaySettingsA},
     {"user32.dll", "ChangeDisplaySettingsA", 2, u_ChangeDisplaySettingsA},
     {"user32.dll", "EnumDisplayMonitors", 4, u_EnumDisplayMonitors},
@@ -508,7 +504,6 @@ static const Hle misc[] = {
     {"user32.dll", "MonitorFromPoint", 3, u_MonitorFrom},
     {"user32.dll", "MonitorFromRect", 2, u_MonitorFrom},
     {"user32.dll", "GetMonitorInfoA", 2, u_GetMonitorInfoA},
-    {"user32.dll", "GetWindowDC", 1, u_GetWindowDC},
     {"gdi32.dll", "GetCurrentPositionEx", 2, g_GetCurrentPositionEx},
     {"gdi32.dll", "GetBitmapBits", 3, g_GetBitmapBits},
     {"gdi32.dll", "CreatePenIndirect", 1, g_NewHandle},

@@ -12,11 +12,29 @@
   #status { color: var(--muted); }
   #log { width: min(100%, 1100px); height: 180px; overflow: auto; background: #0a0a0d; color: var(--muted);
          font: 12px/1.35 ui-monospace, monospace; padding: 8px; box-sizing: border-box; white-space: pre-wrap; }
+  #stage { position: relative; max-width: 100%; }
+  .msgbox { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgb(0 0 0 / 0.35); }
+  .msgbox > div { min-width: 280px; max-width: 70%; background: #f0f0f0; color: #000; border: 1px solid #888;
+                  box-shadow: 0 6px 24px rgb(0 0 0 / 0.5); font: 13px/1.4 Tahoma, system-ui, sans-serif; }
+  .msgbox h1 { margin: 0; padding: 6px 10px; font: inherit; font-weight: 600; background: #fff; border-bottom: 1px solid #ddd; }
+  .msgbox p { margin: 0; padding: 16px 14px; white-space: pre-wrap; }
+  .msgbox footer { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 14px; background: #e6e6e6; }
+  .msgbox button { min-width: 76px; padding: 3px 10px; font: inherit; }
+  .menu { position: absolute; z-index: 10; min-width: 160px; padding: 3px 0; margin: 0; list-style: none; background: #f2f2f2;
+          color: #000; border: 1px solid #999; box-shadow: 2px 3px 8px rgb(0 0 0 / 0.4); font: 13px/1.6 Tahoma, system-ui, sans-serif; }
+  .menu li { position: relative; display: flex; gap: 24px; padding: 0 22px 0 24px; white-space: nowrap; cursor: default; }
+  .menu li:hover:not(.off):not(.sep) { background: #3875d7; color: #fff; }
+  .menu li.off { color: #8a8a8a; }
+  .menu li.sep { height: 1px; margin: 3px 2px; padding: 0; background: #ccc; }
+  .menu li.default { font-weight: 600; }
+  .menu li .mark { position: absolute; left: 8px; }
+  .menu li .acc { margin-left: auto; }
+  .menu li.sub::after { content: '\25B8'; position: absolute; right: 8px; }
 </style>
 </head>
 <body>
 <main>
-  <canvas id="screen" width="1024" height="768" tabindex="0"></canvas>
+  <div id="stage"><canvas id="screen" width="1024" height="768" tabindex="0"></canvas></div>
   <div id="status">starting…</div>
   <div id="log"></div>
 </main>
@@ -61,6 +79,25 @@
     } else if (m.type === 'input') {
       ring = m.ring;
       audioDone = m.audioDone;
+      pasteBuf = m.paste;
+    } else if (m.type === 'cursor') {
+      if (!m.visible) canvas.style.cursor = 'none';
+      else if (!m.rgba) canvas.style.cursor = 'default';
+      else {
+        const cv = document.createElement('canvas');
+        cv.width = m.w; cv.height = m.h;
+        cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(m.rgba.buffer), m.w, m.h), 0, 0);
+        canvas.style.cursor = `url(${cv.toDataURL()}) ${m.hx} ${m.hy}, default`;
+      }
+    } else if (m.type === 'modal') {
+      (m.kind === 'msgbox' ? messageBox : popupMenu)(m.data, (v) => {
+        Atomics.store(m.reply, 1, v);
+        Atomics.store(m.reply, 0, 1);
+        Atomics.notify(m.reply, 0);
+        canvas.focus();
+      });
+    } else if (m.type === 'clipboard') {
+      navigator.clipboard?.writeText(m.text).catch(() => { });
     } else if (m.type === 'open-url') {
       window.open(m.url, '_blank', 'noopener');
     } else if (m.type === 'sound') {
@@ -160,6 +197,104 @@
     source.start();
   }
 
+  // Message boxes and popup menus (hle_user32.c, hle_menu.c): the worker waits on the reply while its timers keep running.
+  // ?autodismiss answers them at once with the default button, for unattended runs.
+  const stage = document.getElementById('stage');
+  const autoDismiss = new URLSearchParams(location.search).has('autodismiss');
+  const BUTTON = { 1: 'OK', 2: 'Cancel', 3: 'Abort', 4: 'Retry', 5: 'Ignore', 6: 'Yes', 7: 'No', 10: 'Try Again', 11: 'Continue' };
+  function messageBox(d, done) {
+    const fallback = d.buttons[d.default < d.buttons.length ? d.default : 0];
+    if (autoDismiss) { window.allLog.push(`message box "${d.caption}" dismissed with ${BUTTON[fallback]}: ${d.text}`); done(fallback); return; }
+    const box = document.createElement('div');
+    box.className = 'msgbox';
+    const panel = box.appendChild(document.createElement('div'));
+    panel.setAttribute('role', 'alertdialog');
+    panel.appendChild(document.createElement('h1')).textContent = d.caption;
+    panel.appendChild(document.createElement('p')).textContent = d.text;
+    const footer = panel.appendChild(document.createElement('footer'));
+    const finish = (v) => { box.remove(); done(v); };
+    let focus = null;
+    for (const id of d.buttons) {
+      const b = footer.appendChild(document.createElement('button'));
+      b.textContent = BUTTON[id];
+      b.onclick = () => finish(id);
+      if (id === fallback) focus = b;
+    }
+    box.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && (d.buttons.includes(2) || d.buttons.length === 1)) finish(d.buttons.includes(2) ? 2 : d.buttons[0]);
+      e.stopPropagation();
+    });
+    stage.appendChild(box);
+    focus?.focus();
+  }
+  function addSpan(li, cls, text) {
+    const span = li.appendChild(document.createElement('span'));
+    span.className = cls;
+    span.textContent = text;
+  }
+  function menuLabel(li, text) {
+    const [label, acc] = text.split('\t');
+    const span = li.appendChild(document.createElement('span'));
+    for (let i = 0; i < label.length; i++) {
+      if (label[i] === '&' && i + 1 < label.length) {
+        i++;
+        if (label[i] === '&') span.append('&');
+        else span.appendChild(document.createElement('u')).textContent = label[i];
+      } else span.append(label[i]);
+    }
+    if (acc) addSpan(li, 'acc', acc);
+  }
+  function popupMenu(d, done) {
+    if (autoDismiss) { window.allLog.push('popup menu dismissed'); done(0); return; }
+    const scale = stage.getBoundingClientRect().width / canvas.width;
+    const open = [];
+    const close = (v) => { for (const ul of open) ul.remove(); document.removeEventListener('mousedown', outside, true); done(v); };
+    const outside = (e) => { if (!open.some((ul) => ul.contains(e.target))) close(0); };
+    function build(items, x, y, level) {
+      while (open.length > level) open.pop().remove();
+      const ul = stage.appendChild(document.createElement('ul'));
+      ul.className = 'menu';
+      ul.style.left = `${x}px`;
+      ul.style.top = `${y}px`;
+      open.push(ul);
+      for (const it of items) {
+        const li = ul.appendChild(document.createElement('li'));
+        if (it.separator) { li.className = 'sep'; continue; }
+        if (it.disabled) li.classList.add('off');
+        if (it.default) li.classList.add('default');
+        if (it.sub) li.classList.add('sub');
+        if (it.checked) addSpan(li, 'mark', it.radio ? '\u2022' : '\u2713');
+        menuLabel(li, it.text);
+        li.onmouseenter = () => {
+          if (it.sub && !it.disabled) build(it.sub, ul.offsetLeft + ul.offsetWidth - 3, ul.offsetTop + li.offsetTop - 3, level + 1);
+          else while (open.length > level + 1) open.pop().remove();
+        };
+        li.onclick = () => { if (!it.disabled && !it.sub) close(it.id); };
+      }
+      const r = stage.getBoundingClientRect(), u = ul.getBoundingClientRect();
+      if (u.right > r.right) ul.style.left = `${Math.max(0, x - u.width)}px`;
+      if (u.bottom > r.bottom) ul.style.top = `${Math.max(0, y - u.height)}px`;
+    }
+    build(d.items, d.x * scale, d.y * scale, 0);
+    document.addEventListener('mousedown', outside, true);
+    open[0].tabIndex = -1;
+    open[0].focus();
+    open[0].addEventListener('keydown', (e) => { if (e.key === 'Escape') close(0); e.stopPropagation(); });
+  }
+
+  // Ctrl+V is held back until the browser's paste event has put the text where the clipboard functions read it.
+  let pasteBuf = null, pendingPaste = null;
+  document.addEventListener('paste', (e) => {
+    const text = e.clipboardData?.getData('text') ?? '';
+    if (pasteBuf) {
+      const n = Math.min(text.length, 65536), chars = new Uint16Array(pasteBuf.buffer, 8, n);
+      for (let i = 0; i < n; i++) chars[i] = text.charCodeAt(i);
+      Atomics.store(pasteBuf, 1, n);
+      Atomics.add(pasteBuf, 0, 1);
+    }
+    if (pendingPaste) { pendingPaste(); pendingPaste = null; }
+  });
+
   // Same event codes as pump_input in hle_user32.c.
   const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7, dumpFrame: 8 };
   let ring = null;
@@ -170,6 +305,7 @@
     const at = 2 + (head % cap) * 4;
     ring[at] = type; ring[at + 1] = a; ring[at + 2] = x; ring[at + 3] = y;
     Atomics.store(ring, 0, head + 1);
+    Atomics.notify(ring, 0);
   }
   function pos(e) {
     const r = canvas.getBoundingClientRect();
@@ -181,12 +317,28 @@
   canvas.addEventListener('wheel', (e) => { send(IN.wheel, e.deltaY < 0 ? 120 : -120, ...pos(e)); e.preventDefault(); }, { passive: false });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   const charKeys = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27 };
+  // The character a key produces, as TranslateMessage would make it: Ctrl+letter is a control code, AltGr (Ctrl+Alt)
+  // keeps the layout's character.
+  function keyChar(e) {
+    if (e.key.length !== 1) return charKeys[e.key];
+    const code = e.key.charCodeAt(0);
+    if (e.ctrlKey && !e.altKey) return /^[a-z@[\\\]^_]$/i.test(e.key) ? code & 0x1f : undefined;
+    return code;
+  }
   canvas.addEventListener('keydown', (e) => {
     // F9 is not a game key: it asks the renderer to log every draw of the next frame.
     if (e.key === 'F9') { send(IN.dumpFrame, 0); e.preventDefault(); return; }
-    send(IN.keydown, e.keyCode);
-    const ch = e.key.length === 1 ? e.key.charCodeAt(0) : charKeys[e.key];
-    if (ch !== undefined && !e.ctrlKey && !e.altKey) send(IN.char, ch);
+    const press = () => {
+      send(IN.keydown, e.keyCode);
+      const ch = keyChar(e);
+      if (ch !== undefined) send(IN.char, ch);
+    };
+    if (e.ctrlKey && !e.altKey && e.keyCode === 86) {
+      pendingPaste = press;
+      setTimeout(() => { if (pendingPaste === press) { pendingPaste = null; press(); } }, 100);
+      return;
+    }
+    press();
     e.preventDefault();
   });
   canvas.addEventListener('keyup', (e) => { send(IN.keyup, e.keyCode); e.preventDefault(); });

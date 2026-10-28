@@ -18,7 +18,8 @@ const arg = (name, fallback) => {
 const flag = (name) => process.argv.includes(name);
 
 const out = arg('--out', 'C:/tools/re/work/drive');
-const url = arg('--url', 'http://127.0.0.1:8077/') + (flag('--trace') ? '?trace=1' : '');
+// Message boxes answer themselves with their default button so nothing waits on a human.
+const url = arg('--url', 'http://127.0.0.1:8077/') + '?autodismiss=1' + (flag('--trace') ? '&trace=1' : '');
 mkdirSync(out, { recursive: true });
 
 // Screen positions on the 1680x1050 client.
