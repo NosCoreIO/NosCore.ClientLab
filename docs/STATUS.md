@@ -19,7 +19,7 @@ The client (`NosCore.exe`, Delphi 7, md5 `51bbff3ec09d67c8425f88d74c6d5df5`) is 
 
 ### In the browser, as of 2026-10-28
 
-**The browser client plays against a local NosCore stack**: login, server and channel lists, character selection, NosVille with HUD, minimap, NPCs and lighting; clicking the ground walks, the keyboard types and sends chat, and sound effects play. WebGL2 rendering: about 57 frames/s on the login screens, 15-20 in town with a GPU.
+**The browser client plays against a local NosCore stack**: login, server and channel lists, character selection, NosVille with HUD, minimap, NPCs and lighting; clicking the ground walks, the keyboard types and sends chat, the game windows open, and sound effects play. Capped at 60 frames/s; NosVille runs at about 28-35 frames/s even in headless Chrome.
 
 **Recompilation coverage:** 19,436 functions; 90.4% of the code section's bytes are lifted, and the remaining 9.6% classifies as pointer/jump tables, strings, RTTI and four code fragments (374 bytes). `lift.py` prints the coverage and writes the gaps to `gen/gaps.txt`.
 
@@ -39,12 +39,13 @@ python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user admin 
 - **Anti-tamper stack check:** before acting on a click the client walks its EBP chain and treats any return address below 0x70000000 outside its own image as tampering (`FUN_004ccf8c`), silently dropping the input. Host-to-guest call return addresses (`SENTINEL_BASE`) therefore live at 0x7fdf0000, where system DLL code would be.
 - **Audio:** `hle_audio.c` plays Miles samples (WAV/MP3 file images; IMA ADPCM converted to PCM) through WebAudio on the page; finished sounds are reported through a SharedArrayBuffer for `AIL_sample_status`. Audio starts after the first click or key press (browser autoplay rule).
 - **Threads:** the only thread is a `TCkThread` raising an event every 10 minutes through Synchronize; the message pump raises it on the same schedule. `CreateThread` logs the Delphi class of any other thread.
-- **Automated runs:** `node recomp/web/drive.mjs [--trace] [--headed]` logs in, enters the world, clicks the ground, types a chat line, and saves screenshots and logs to `C:\tools\re\work\drive\`; it always closes the browser. Headless Chrome renders WebGL in software, so its fps is lower than a real browser's.
+- **Performance lessons:** direct calls between recompiled functions are plain C calls (a per-call label search had cost about 70% of the game code's time); indirect ones use a flat table. Recompiled functions take `CPU* RT_RESTRICT` so guest stores do not force register reloads, and a call kills flag liveness instead of keeping all flags alive. Draws with identical state are batched and only changed GL state is re-sent. `Present` sleeps to hold 60 frames/s; unthrottled, the worker starved the page.
+- **Automated runs:** `node recomp/web/drive.mjs [--trace] [--headed] [--charselect-input]` logs in, enters the world, clicks the ground, types a chat line, opens the game windows by hotkey, and saves screenshots and logs to `C:\tools\re\work\drive\`; it always closes the browser. Headless Chrome renders WebGL in software, so its fps is lower than a real browser's.
 - **Debugging:** `?trace=1` logs the API calls and the guest functions (from the RT_TRACE ring) that follow each mouse-down. The page keeps 1000 log lines; `window.allLog` has everything.
 - **Memory:** the build reserves 1 GB and may grow to 2 GB; several reloads in one Playwright browser reached 4 GB. Reload one tab and close the browser after testing.
 
 **Open (2026-10-28):**
-1. Speed: 15-20 fps in town on a GPU. Next: move the vertex transform and lighting to the vertex shader, and profile the game loop.
+1. Speed: a town frame is about 12-17 ms of game code plus 15-19 ms of rendering (7-8 ms CPU vertex transform/lighting, 4-6 ms GL submission). Next: vertex transform and lighting in a vertex shader. The 5 s frame profile in the log shows each part; `PORT_PROFILE_API=1` lists the costliest APIs.
 2. CEF (NosMall, the in-game browser) is not loaded.
 3. Broader gameplay coverage: other maps, combat, skills, shops, every UI window. Each may hit a missing API; `drive.mjs` is the place to add scripted checks.
 4. Android: Chrome on Android should run it once memory is reserved lazily and `serve.py` is reachable over HTTPS.
