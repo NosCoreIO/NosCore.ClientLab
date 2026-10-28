@@ -1037,6 +1037,44 @@ def extend_functions(L, fns):
     return out
 
 
+JUNK_OPS = {"in", "out", "insb", "insd", "outsb", "outsd", "hlt", "arpl", "das", "aaa", "aas", "daa", "bound", "les",
+            "lds", "into", "sldt", "lcall", "ljmp", "retf", "iretd", "int1", "salc", "aam", "aad"}
+
+
+def absorb_gaps(L, fns):
+    """Unowned runs between functions that decode as clean code (no junk opcodes, ending in ret or jmp) are code
+    only reached in ways static analysis misses. Each joins the function before it, with a label at its start."""
+    fns = sorted(fns)
+    spans = sorted((lo, hi, k) for k, (_, _, rs) in enumerate(fns) for lo, hi in rs)
+    labels = defaultdict(set)
+    added = []
+    for (lo1, hi1, k1), (lo2, _, _) in zip(spans, spans[1:]):
+        start, end = hi1, lo2
+        while start < end and L.code[start - L.code_lo] in (0x00, 0x90, 0xCC, 0x8B, 0xC0):
+            start += 1
+        if end - start < 4:
+            continue
+        if sum(1 for a in range(start, end - 3) if a in L.reloc_slots) * 4 >= (end - start) // 2:
+            continue
+        body = L.code[start - L.code_lo: end - L.code_lo]
+        if sum(32 <= b < 127 for b in body) > 0.7 * len(body) or bytes([0xFF] * 4) in body[:16]:
+            continue
+        ins = L.disasm_range(start, end)
+        if not ins or sum(i.size for i in ins) < 0.95 * (end - start) or any(i.mnemonic in JUNK_OPS for i in ins):
+            continue
+        if not any(i.mnemonic in ("ret", "jmp") for i in ins):
+            continue
+        last = ins[-1].address + ins[-1].size
+        added.append((k1, start, last))
+    for k, lo, hi in added:
+        e, name, rs = fns[k]
+        fns[k] = (e, name, sorted(rs + [(lo, hi)]))
+        labels[e].add(lo)
+    print(f"{len(added)} unreached code fragments joined to the function before them "
+          f"({sum(hi - lo for _, lo, hi in added)} bytes)")
+    return fns, labels
+
+
 def discover(L, fns, seeds):
     """Recursive-descent disassembly from seed addresses not already covered by a function."""
     covered = sorted((lo, hi) for _, _, rs in fns for lo, hi in rs)
@@ -1104,7 +1142,7 @@ def main():
             return k >= 0 and spans[k][0] <= x < spans[k][1]
         return covered
 
-    extra_labels = defaultdict(set)
+    fns, extra_labels = absorb_gaps(L, fns)
     for _ in range(3):
         fns.sort()
         covered = make_covered(fns)
