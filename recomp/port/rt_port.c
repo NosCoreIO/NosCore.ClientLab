@@ -491,6 +491,7 @@ int main(int argc, char** argv) {
     hle_audio_register();
     hle_misc_register();
     hle_ole_register();
+    hle_reg_register();
     hle_d3d9_register();
 
     main_cpu = calloc(1, sizeof(CPU));

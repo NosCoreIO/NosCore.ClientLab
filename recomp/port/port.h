@@ -68,7 +68,6 @@ void port_threads_pump(CPU* c);
 int port_handle_take(uint32_t handle, int take);
 void port_sleep_ms(double ms);
 void port_idle_ms(double ms);
-uint32_t port_reg_known_key(uint32_t subkey);
 
 uint32_t port_global_alloc(uint32_t size);
 uint32_t port_global_size(uint32_t h);
@@ -107,6 +106,7 @@ uint32_t hle_dc_delete(uint32_t dc);
 int hle_dc_read(uint32_t dc, int w, int h, uint32_t* out);
 void hle_misc_register(void);
 void hle_ole_register(void);
+void hle_reg_register(void);
 void hle_gdi_register(void);
 void hle_dc_register(void);
 void hle_audio_register(void);
