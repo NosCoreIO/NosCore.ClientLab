@@ -32,6 +32,8 @@ void r_set_material(uint32_t material);
 void r_get_material(uint32_t material);
 int r_gl_present(void);
 void r_read_back(uint32_t surface);
+void r_preload(uint32_t tex);
+void r_texture_lod(uint32_t tex, uint32_t lod);
 uint32_t r_texel(uint32_t surface, uint32_t x, uint32_t y);
 void r_prof_frame(void);
 void r_dump_next_frame(void);

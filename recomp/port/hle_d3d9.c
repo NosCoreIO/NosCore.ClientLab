@@ -1,5 +1,6 @@
-/* Null Direct3D 9: a headless device that accepts every call. Resources get real memory so Lock/Unlock work;
-   draws are dropped. COM objects live in guest memory; their vtables hold trampoline addresses. */
+/* Direct3D 9 over render.c: resources live in guest memory, draws go to the WebGL renderer (or the software rasteriser
+   under Node), and caps and format checks describe what that renderer supports. COM objects live in guest memory;
+   their vtables hold trampoline addresses. */
 #include "port.h"
 #include "render.h"
 #include "image_file.h"
@@ -12,13 +13,26 @@
 
 enum { O_D3D = 1, O_DEVICE, O_TEXTURE, O_SURFACE, O_VB, O_IB, O_OTHER, O_MATSTACK, O_SWAPCHAIN };
 /* object layout: +0 vtbl +4 refs +8 kind +12 width +16 height +20 format +24 levels +28 data +32 pitch +36 size
-   +40 surfaces (texture: array of level surfaces) +44 container +48 usage +52 pool */
+   +40 surfaces (texture: array of level surfaces) +44 container +48 usage +52 pool +56 upload state +60 GetDC dc
+   +64 locked +68 priority +72 LOD +76 autogen filter */
+#define OBJ_SIZE 96
 
 typedef struct {
     const char* name;
     uint8_t argc;
     HleFn fn;
 } Method;
+
+#define D3DERR_INVALIDCALL 0x8876086cu
+#define D3DERR_NOTAVAILABLE 0x8876086au
+#define D3DERR_NOTFOUND 0x88760866u
+#define D3DERR_MOREDATA 0x887600a3u
+#define E_NOINTERFACE 0x80004002u
+#define E_POINTER 0x80004003u
+#define FMT_DXT1 0x31545844u
+#define FMT_DXT3 0x33545844u
+#define FMT_DXT5 0x35545844u
+#define POOL_MANAGED 1u
 
 static void m_ok(CPU* c) { RET(0); }
 static void m_addref(CPU* c) { RET(++M32(THIS + 4)); }
@@ -28,12 +42,58 @@ static uint32_t make_vtable(const char* iface, const Method* m, int n);
 static uint32_t vt_d3d, vt_device, vt_texture, vt_surface, vt_vb, vt_ib, vt_other, vt_matstack, vt_swapchain;
 
 static uint32_t make_obj(uint32_t vtbl, int kind) {
-    uint32_t o = guest_alloc(64, 16);
+    uint32_t o = guest_alloc(OBJ_SIZE, 16);
+    memset(GPTR(o), 0, OBJ_SIZE);
     M32(o) = vtbl;
     M32(o + 4) = 1;
     M32(o + 8) = (uint32_t)kind;
     return o;
 }
+
+/* ---- QueryInterface: each object answers for the interfaces its kind implements ---- */
+
+typedef struct { uint32_t d1; uint16_t d2, d3; uint8_t d4[8]; } Guid;
+static const Guid IID_IUnknown = {0x00000000, 0x0000, 0x0000, {0xc0, 0, 0, 0, 0, 0, 0, 0x46}};
+static const Guid IID_IDirect3D9 = {0x81bdcbca, 0x64d4, 0x426d, {0xae, 0x8d, 0xad, 0x01, 0x47, 0xf4, 0x27, 0x5c}};
+static const Guid IID_IDirect3DDevice9 = {0xd0223b96, 0xbf7a, 0x43fd, {0x92, 0xbd, 0xa4, 0x3b, 0x0d, 0x82, 0xb9, 0xeb}};
+static const Guid IID_IDirect3DResource9 = {0x05eec05d, 0x8f7d, 0x4362, {0xb9, 0x99, 0xd1, 0xba, 0xf3, 0x57, 0xc7, 0x04}};
+static const Guid IID_IDirect3DBaseTexture9 = {0x580ca87e, 0x1d3c, 0x4d54, {0x99, 0x1d, 0xb7, 0xd3, 0xe3, 0xc2, 0x98, 0xce}};
+static const Guid IID_IDirect3DTexture9 = {0x85c31227, 0x3de5, 0x4f00, {0x9b, 0x3a, 0xf1, 0x1a, 0xc3, 0x8c, 0x18, 0xb5}};
+static const Guid IID_IDirect3DSurface9 = {0x0cfbaf3a, 0x9ff6, 0x429a, {0x99, 0xb3, 0xa2, 0x79, 0x6a, 0xf8, 0xb8, 0x9b}};
+static const Guid IID_IDirect3DVertexBuffer9 = {0xb64bb1b5, 0xfd70, 0x4df6, {0xbf, 0x91, 0x19, 0xd0, 0xa1, 0x24, 0x54, 0xe3}};
+static const Guid IID_IDirect3DIndexBuffer9 = {0x7c9dd65e, 0xd3f7, 0x4529, {0xac, 0xee, 0x78, 0x58, 0x30, 0xac, 0xde, 0x35}};
+static const Guid IID_IDirect3DSwapChain9 = {0x794950f2, 0xadfc, 0x458a, {0x90, 0x5e, 0x10, 0xa1, 0x0b, 0x8b, 0x50, 0x3b}};
+static const Guid IID_ID3DXMatrixStack = {0xc7885ba7, 0xf990, 0x4fe7, {0x92, 0x2d, 0x85, 0x15, 0xe4, 0x77, 0xdd, 0x85}};
+
+static int implements(uint32_t kind, const void* iid) {
+    const Guid* by_kind[9][4] = {
+        [O_D3D] = {&IID_IDirect3D9}, [O_DEVICE] = {&IID_IDirect3DDevice9},
+        [O_TEXTURE] = {&IID_IDirect3DResource9, &IID_IDirect3DBaseTexture9, &IID_IDirect3DTexture9},
+        [O_SURFACE] = {&IID_IDirect3DResource9, &IID_IDirect3DSurface9},
+        [O_VB] = {&IID_IDirect3DResource9, &IID_IDirect3DVertexBuffer9}, [O_IB] = {&IID_IDirect3DResource9, &IID_IDirect3DIndexBuffer9},
+        [O_MATSTACK] = {&IID_ID3DXMatrixStack},
+    };
+    if (!memcmp(iid, &IID_IUnknown, 16)) return 1;
+    if (kind == O_SWAPCHAIN) return !memcmp(iid, &IID_IDirect3DSwapChain9, 16);
+    if (kind >= 9) return 0;
+    for (int k = 0; k < 4 && by_kind[kind][k]; k++)
+        if (!memcmp(iid, by_kind[kind][k], 16)) return 1;
+    return 0;
+}
+static void m_QueryInterface(CPU* c) {
+    uint32_t out = ARG(2);
+    if (!out) { RET(E_POINTER); return; }
+    if (ARG(1) && implements(M32(THIS + 8), GPTR(ARG(1)))) {
+        M32(THIS + 4)++;
+        M32(out) = THIS;
+        RET(0);
+        return;
+    }
+    M32(out) = 0;
+    RET(E_NOINTERFACE);
+}
+
+static int block_format(uint32_t f) { return f == FMT_DXT1 || f == FMT_DXT3 || f == FMT_DXT5; }
 
 static uint32_t fmt_bits(uint32_t f) {
     switch (f) {
@@ -48,8 +108,8 @@ static uint32_t fmt_bits(uint32_t f) {
 
 static uint32_t make_surface(uint32_t w, uint32_t h, uint32_t fmt, uint32_t container) {
     uint32_t s = make_obj(vt_surface, O_SURFACE), pitch = (w * fmt_bits(fmt) + 7) / 8;
-    if (fmt == 0x31545844 || fmt == 0x33545844 || fmt == 0x35545844) pitch = ((w + 3) / 4) * (fmt == 0x31545844 ? 8 : 16);
-    uint32_t rows = (fmt == 0x31545844 || fmt == 0x33545844 || fmt == 0x35545844) ? (h + 3) / 4 : h;
+    if (block_format(fmt)) pitch = ((w + 3) / 4) * (fmt == FMT_DXT1 ? 8 : 16);
+    uint32_t rows = block_format(fmt) ? (h + 3) / 4 : h;
     M32(s + 12) = w; M32(s + 16) = h; M32(s + 20) = fmt; M32(s + 32) = pitch; M32(s + 36) = pitch * rows;
     M32(s + 28) = guest_alloc(pitch * rows ? pitch * rows : 16, 16);
     M32(s + 44) = container;
@@ -78,22 +138,94 @@ static uint32_t make_buffer(uint32_t vt, int kind, uint32_t size, uint32_t fmt) 
 
 /* ---- IDirect3D9 ---- */
 
+/* D3DCAPS9 describing what the WebGL renderer does: fixed function only, two texture stages, eight lights, no
+   stencil, culling, scissor, user clip planes, shaders, cube or volume textures. */
 static void fill_caps(uint32_t p) {
     memset(GPTR(p), 0, 304);
-    M32(p) = 1; M32(p + 4) = 0;
-    M32(p + 28) = 0x0001E000u;                 /* DevCaps */
-    M32(p + 88) = 0xFFFFFFFFu; M32(p + 92) = 0xFFFFFFFFu; /* raster/zcmp caps (generous) */
-    M32(p + 132) = 0xFFFFFFFFu; M32(p + 136) = 0xFFFFFFFFu; M32(p + 140) = 0xFFFFFFFFu;
-    M32(p + 160) = 4096; M32(p + 164) = 4096;  /* MaxTextureWidth/Height */
-    M32(p + 168) = 8192; M32(p + 172) = 8192;
-    M32(p + 176) = 16;                          /* MaxAnisotropy */
-    M32(p + 220) = 8; M32(p + 224) = 8;         /* MaxTextureBlendStages, MaxSimultaneousTextures */
-    M32(p + 232) = 8;                           /* MaxActiveLights */
-    M32(p + 248) = 0xFFFFF; M32(p + 252) = 0xFFFFF; /* MaxPrimitiveCount, MaxVertexIndex */
-    M32(p + 256) = 16;                          /* MaxStreams */
-    M32(p + 264) = 0xFFFE0200u;                 /* VertexShaderVersion vs_2_0 */
-    M32(p + 268) = 256;
-    M32(p + 272) = 0xFFFF0200u;                 /* PixelShaderVersion ps_2_0 */
+    M32(p) = 1;                                 /* DeviceType HAL */
+    M32(p + 12) = 0x40000000u;                  /* Caps2: CANAUTOGENMIPMAP */
+    M32(p + 20) = 0x80000001u;                  /* PresentationIntervals: ONE, IMMEDIATE */
+    M32(p + 28) = 0x0009A650u;                  /* DevCaps: system-memory vertices, video-memory textures, DrawPrimitives2(Ex), hardware T&L and rasterisation */
+    M32(p + 32) = 0x00000812u;                  /* PrimitiveMiscCaps: MASKZ, CULLNONE, BLENDOP */
+    M32(p + 36) = 0x00000090u;                  /* RasterCaps: ZTEST, FOGVERTEX */
+    M32(p + 40) = 0xFF;                         /* ZCmpCaps */
+    M32(p + 44) = M32(p + 48) = 0x1FFF;         /* Src/DestBlendCaps */
+    M32(p + 52) = 0xFF;                         /* AlphaCmpCaps */
+    M32(p + 56) = 0x00084008u;                  /* ShadeCaps: COLORGOURAUDRGB, ALPHAGOURAUDBLEND, FOGGOURAUD */
+    M32(p + 60) = 0x00004005u;                  /* TextureCaps: PERSPECTIVE, ALPHA, MIPMAP */
+    M32(p + 64) = 0x03030300u;                  /* TextureFilterCaps: MIN/MAG point+linear, MIP point+linear */
+    M32(p + 76) = 0x17;                         /* TextureAddressCaps: WRAP, MIRROR, CLAMP, INDEPENDENTUV */
+    M32(p + 84) = 0x1F;                         /* LineCaps */
+    M32(p + 88) = M32(p + 92) = 4096;           /* MaxTextureWidth/Height */
+    M32(p + 100) = 8192;                        /* MaxTextureRepeat */
+    M32(p + 104) = 4096;                        /* MaxTextureAspectRatio */
+    M32(p + 108) = 1;                           /* MaxAnisotropy */
+    MF32(p + 112) = 1e10f;                      /* MaxVertexW */
+    M32(p + 140) = 8;                           /* FVFCaps: eight texture coordinate sets */
+    M32(p + 144) = 0x7FF;                       /* TextureOpCaps: DISABLE .. ADDSMOOTH */
+    M32(p + 148) = M32(p + 152) = 2;            /* MaxTextureBlendStages, MaxSimultaneousTextures */
+    M32(p + 156) = 0x19;                        /* VertexProcessingCaps: TEXGEN, directional and positional lights */
+    M32(p + 160) = 8;                           /* MaxActiveLights */
+    M32(p + 168) = 1;                           /* MaxVertexBlendMatrices: no blending */
+    MF32(p + 176) = 1.0f;                       /* MaxPointSize */
+    M32(p + 180) = 0xFFFFF;                     /* MaxPrimitiveCount */
+    M32(p + 184) = 0xFFFFFF;                    /* MaxVertexIndex */
+    M32(p + 188) = 1;                           /* MaxStreams */
+    M32(p + 192) = 256;                         /* MaxStreamStride */
+    M32(p + 232) = 1;                           /* NumberOfAdaptersInGroup */
+    M32(p + 240) = 1;                           /* NumSimultaneousRTs */
+}
+
+/* ---- format support, matching what texel() decodes and what the canvas can display ---- */
+
+static int display_format(uint32_t f) { return f == 22 || f == 23 || f == 24; }
+static int backbuffer_format(uint32_t f) { return f >= 21 && f <= 25; }
+static int texture_format(uint32_t f) {
+    return (f >= 21 && f <= 26) || f == 28 || f == 50 || f == 51 || block_format(f);
+}
+static int depth_format(uint32_t f) { return f == 75 || f == 77 || f == 80; }
+static uint32_t opaque_format(uint32_t f) { return f == 21 ? 22 : f == 25 ? 24 : f; }
+static int adapter_ok(CPU* c) { return ARG(1) == 0; }
+
+static void d_RegisterSoftwareDevice(CPU* c) { RET(D3DERR_INVALIDCALL); }   /* no native rasteriser can load */
+static void d_CheckDeviceType(CPU* c) {
+    uint32_t type = ARG(2), adapter_fmt = ARG(3), bb = ARG(4), windowed = ARG(5);
+    if (!adapter_ok(c)) { RET(D3DERR_INVALIDCALL); return; }
+    int ok = type == 1 && display_format(adapter_fmt) &&
+             ((windowed && bb == 0) || (backbuffer_format(bb) && opaque_format(bb) == adapter_fmt));
+    RET(ok ? 0 : D3DERR_NOTAVAILABLE);
+}
+static void d_CheckDeviceFormat(CPU* c) {
+    uint32_t type = ARG(2), adapter_fmt = ARG(3), usage = ARG(4), rtype = ARG(5), f = ARG(6);
+    if (!adapter_ok(c)) { RET(D3DERR_INVALIDCALL); return; }
+    int ok = type == 1 && display_format(adapter_fmt);
+    /* SRGBREAD, SRGBWRITE, VERTEXTEXTURE, LEGACYBUMPMAP, DMAP: no such sampling here. */
+    if (usage & 0x0015C000u) ok = 0;
+    if (usage & 1) ok = 0;   /* only the backbuffer is a render target */
+    if (usage & 0x00080000u) ok = 0;   /* QUERY_POSTPIXELSHADER_BLENDING needs a render target */
+    if (usage & 2) ok = ok && rtype == 1 && depth_format(f);
+    else if (rtype == 1 || rtype == 3) ok = ok && (texture_format(f) || (rtype == 1 && f == 20));
+    else if (rtype == 6) ok = ok && f == 100;
+    else if (rtype == 7) ok = ok && (f == 101 || f == 102);
+    else ok = 0;   /* volume and cube resources */
+    RET(ok ? 0 : D3DERR_NOTAVAILABLE);
+}
+static void d_CheckDeviceMultiSampleType(CPU* c) {
+    uint32_t type = ARG(2), f = ARG(3), ms = ARG(5), quality = ARG(6);
+    if (!adapter_ok(c)) { RET(D3DERR_INVALIDCALL); return; }
+    int ok = type == 1 && ms == 0 && (backbuffer_format(f) || depth_format(f) || texture_format(f));
+    if (quality) M32(quality) = ok ? 1 : 0;
+    RET(ok ? 0 : D3DERR_NOTAVAILABLE);
+}
+static void d_CheckDepthStencilMatch(CPU* c) {
+    uint32_t type = ARG(2), adapter_fmt = ARG(3), rt = ARG(4), ds = ARG(5);
+    if (!adapter_ok(c)) { RET(D3DERR_INVALIDCALL); return; }
+    RET(type == 1 && display_format(adapter_fmt) && backbuffer_format(rt) && depth_format(ds) ? 0 : D3DERR_NOTAVAILABLE);
+}
+static void d_CheckDeviceFormatConversion(CPU* c) {
+    uint32_t type = ARG(2), src = ARG(3), dst = ARG(4);
+    if (!adapter_ok(c)) { RET(D3DERR_INVALIDCALL); return; }
+    RET(type == 1 && backbuffer_format(src) && backbuffer_format(dst) ? 0 : D3DERR_NOTAVAILABLE);
 }
 
 static void d_GetAdapterCount(CPU* c) { RET(1); }
@@ -129,12 +261,13 @@ static void d_CreateDevice(CPU* c) {
 }
 
 static const Method d3d_methods[] = {
-    {"QueryInterface", 3, 0}, {"AddRef", 1, m_addref}, {"Release", 1, m_release},
-    {"RegisterSoftwareDevice", 2, 0}, {"GetAdapterCount", 1, d_GetAdapterCount},
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release},
+    {"RegisterSoftwareDevice", 2, d_RegisterSoftwareDevice}, {"GetAdapterCount", 1, d_GetAdapterCount},
     {"GetAdapterIdentifier", 4, d_GetAdapterIdentifier}, {"GetAdapterModeCount", 3, d_GetAdapterModeCount},
     {"EnumAdapterModes", 5, d_EnumAdapterModes}, {"GetAdapterDisplayMode", 3, d_GetAdapterDisplayMode},
-    {"CheckDeviceType", 6, 0}, {"CheckDeviceFormat", 7, 0}, {"CheckDeviceMultiSampleType", 7, 0},
-    {"CheckDepthStencilMatch", 6, 0}, {"CheckDeviceFormatConversion", 4, 0}, {"GetDeviceCaps", 4, d_GetDeviceCaps},
+    {"CheckDeviceType", 6, d_CheckDeviceType}, {"CheckDeviceFormat", 7, d_CheckDeviceFormat},
+    {"CheckDeviceMultiSampleType", 7, d_CheckDeviceMultiSampleType}, {"CheckDepthStencilMatch", 6, d_CheckDepthStencilMatch},
+    {"CheckDeviceFormatConversion", 4, d_CheckDeviceFormatConversion}, {"GetDeviceCaps", 4, d_GetDeviceCaps},
     {"GetAdapterMonitor", 2, d_GetAdapterMonitor}, {"CreateDevice", 7, d_CreateDevice},
 };
 
@@ -175,11 +308,39 @@ static void v_Present(CPU* c) {
 }
 static void v_GetBackBuffer(CPU* c) { M32(backbuffer + 4)++; M32(ARG(4)) = backbuffer; RET(0); }
 static void v_GetRasterStatus(CPU* c) { memset(GPTR(ARG(2)), 0, 8); RET(0); }
-static void v_CreateTexture(CPU* c) { M32(ARG(7)) = make_texture(ARG(1), ARG(2), ARG(3), ARG(5)); RET(0); }
-static void v_CreateVolumeTexture(CPU* c) { M32(ARG(8)) = make_texture(ARG(1), ARG(2), ARG(4), ARG(6)); RET(0); }
-static void v_CreateCubeTexture(CPU* c) { M32(ARG(6)) = make_texture(ARG(1), ARG(1), ARG(2), ARG(4)); RET(0); }
-static void v_CreateVertexBuffer(CPU* c) { M32(ARG(5)) = make_buffer(vt_vb, O_VB, ARG(1), ARG(3)); RET(0); }
-static void v_CreateIndexBuffer(CPU* c) { M32(ARG(5)) = make_buffer(vt_ib, O_IB, ARG(1), ARG(3)); RET(0); }
+static void v_CreateTexture(CPU* c) {
+    uint32_t usage = ARG(4), f = ARG(5), out = ARG(7);
+    if (!out || !ARG(1) || !ARG(2) || (usage & 3) || !texture_format(f)) {
+        port_log("IDirect3DDevice9::CreateTexture %ux%u usage %x format %u refused", ARG(1), ARG(2), usage, f);
+        RET(D3DERR_INVALIDCALL);
+        return;
+    }
+    uint32_t t = make_texture(ARG(1), ARG(2), ARG(3), f);
+    M32(t + 48) = usage;
+    M32(t + 52) = ARG(6);
+    M32(t + 76) = 2;   /* D3DTEXF_LINEAR */
+    M32(out) = t;
+    RET(0);
+}
+/* The caps advertise neither cube nor volume textures. */
+static void v_CreateVolumeTexture(CPU* c) { if (ARG(8)) M32(ARG(8)) = 0; RET(D3DERR_INVALIDCALL); }
+static void v_CreateCubeTexture(CPU* c) { if (ARG(6)) M32(ARG(6)) = 0; RET(D3DERR_INVALIDCALL); }
+static void v_CreateVertexBuffer(CPU* c) {
+    if (!ARG(5) || !ARG(1)) { RET(D3DERR_INVALIDCALL); return; }
+    uint32_t b = make_buffer(vt_vb, O_VB, ARG(1), ARG(3));
+    M32(b + 48) = ARG(2);
+    M32(b + 52) = ARG(4);
+    M32(ARG(5)) = b;
+    RET(0);
+}
+static void v_CreateIndexBuffer(CPU* c) {
+    if (!ARG(5) || !ARG(1) || (ARG(3) != 101 && ARG(3) != 102)) { RET(D3DERR_INVALIDCALL); return; }
+    uint32_t b = make_buffer(vt_ib, O_IB, ARG(1), ARG(3));
+    M32(b + 48) = ARG(2);
+    M32(b + 52) = ARG(4);
+    M32(ARG(5)) = b;
+    RET(0);
+}
 static void v_CreateRenderTarget(CPU* c) { M32(ARG(7)) = make_surface(ARG(1), ARG(2), ARG(3), 0); RET(0); }
 static void v_CreateDepthStencilSurface(CPU* c) { M32(ARG(7)) = make_surface(ARG(1), ARG(2), ARG(3), 0); RET(0); }
 static void v_CreateOffscreenPlainSurface(CPU* c) { M32(ARG(5)) = make_surface(ARG(1), ARG(2), ARG(3), 0); RET(0); }
@@ -195,6 +356,17 @@ static void v_zero_out1(CPU* c) { if (ARG(1)) M32(ARG(1)) = 0; RET(0); }
 static void v_zero_out2(CPU* c) { if (ARG(2)) M32(ARG(2)) = 0; RET(0); }
 static void v_new_other_out2(CPU* c) { M32(ARG(2)) = make_obj(vt_other, O_OTHER); RET(0); }
 static void v_new_other_out1(CPU* c) { M32(ARG(1)) = make_obj(vt_other, O_OTHER); RET(0); }
+static int in_scene;
+static void v_BeginScene(CPU* c) {
+    if (in_scene) { RET(D3DERR_INVALIDCALL); return; }
+    in_scene = 1;
+    RET(0);
+}
+static void v_EndScene(CPU* c) {
+    if (!in_scene) { RET(D3DERR_INVALIDCALL); return; }
+    in_scene = 0;
+    RET(0);
+}
 static void v_ValidateDevice(CPU* c) { if (ARG(1)) M32(ARG(1)) = 1; RET(0); }
 
 /* ---- pipeline state and draws go to the software rasteriser ---- */
@@ -230,7 +402,7 @@ static void v_GetMaterialR(CPU* c) { r_get_material(ARG(1)); RET(0); }
 static void v_SetPixelShader(CPU* c) { RET(0); }
 
 static const Method device_methods[] = {
-    {"QueryInterface", 3, 0}, {"AddRef", 1, m_addref}, {"Release", 1, m_release},
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release},
     {"TestCooperativeLevel", 1, v_TestCooperativeLevel}, {"GetAvailableTextureMem", 1, v_GetAvailableTextureMem},
     {"EvictManagedResources", 1, 0}, {"GetDirect3D", 2, v_GetDirect3D}, {"GetDeviceCaps", 2, v_GetDeviceCaps},
     {"GetDisplayMode", 3, v_GetDisplayMode}, {"GetCreationParameters", 2, v_GetCreationParameters},
@@ -245,7 +417,7 @@ static const Method device_methods[] = {
     {"UpdateSurface", 5, 0}, {"UpdateTexture", 3, 0}, {"GetRenderTargetData", 3, 0}, {"GetFrontBufferData", 3, 0},
     {"StretchRect", 6, 0}, {"ColorFill", 4, 0}, {"CreateOffscreenPlainSurface", 7, v_CreateOffscreenPlainSurface},
     {"SetRenderTarget", 3, v_SetRenderTarget}, {"GetRenderTarget", 3, v_GetRenderTarget}, {"SetDepthStencilSurface", 2, 0},
-    {"GetDepthStencilSurface", 2, v_GetDepthStencilSurface}, {"BeginScene", 1, 0}, {"EndScene", 1, 0},
+    {"GetDepthStencilSurface", 2, v_GetDepthStencilSurface}, {"BeginScene", 1, v_BeginScene}, {"EndScene", 1, v_EndScene},
     {"Clear", 7, v_Clear}, {"SetTransform", 3, v_SetTransform}, {"GetTransform", 3, v_GetTransformR}, {"MultiplyTransform", 3, 0},
     {"SetViewport", 2, v_SetViewport}, {"GetViewport", 2, v_GetViewport}, {"SetMaterial", 2, v_SetMaterial}, {"GetMaterial", 2, v_GetMaterialR},
     {"SetLight", 3, v_SetLight}, {"GetLight", 3, v_GetLightR}, {"LightEnable", 3, v_LightEnable}, {"GetLightEnable", 3, v_GetLightEnableR},
@@ -284,26 +456,44 @@ static void fill_surface_desc(uint32_t s, uint32_t p) {
 }
 static void t_GetLevelDesc(CPU* c) { uint32_t s = level(THIS, ARG(1)); if (!s) { RET(0x8876086cu); return; } fill_surface_desc(s, ARG(2)); RET(0); }
 static void t_GetSurfaceLevel(CPU* c) { uint32_t s = level(THIS, ARG(1)); if (!s) { RET(0x8876086cu); return; } M32(s + 4)++; M32(ARG(2)) = s; RET(0); }
+/* Points the locked rectangle at rect's top-left (whole blocks for DXT) and marks the surface locked. A read-only lock
+   leaves the uploaded texture alone. */
+static uint32_t lock_surface(uint32_t s, uint32_t locked, uint32_t rect, uint32_t flags) {
+    if (!locked) return D3DERR_INVALIDCALL;
+    if (M32(s + 64)) return D3DERR_INVALIDCALL;
+    uint32_t off = 0, f = M32(s + 20);
+    if (rect) {
+        int32_t l = (int32_t)M32(rect), t = (int32_t)M32(rect + 4), r = (int32_t)M32(rect + 8), b = (int32_t)M32(rect + 12);
+        if (l < 0 || t < 0 || l >= r || t >= b || (uint32_t)r > M32(s + 12) || (uint32_t)b > M32(s + 16)) return D3DERR_INVALIDCALL;
+        if (block_format(f)) off = (uint32_t)t / 4 * M32(s + 32) + (uint32_t)l / 4 * (f == FMT_DXT1 ? 8 : 16);
+        else off = (uint32_t)t * M32(s + 32) + (uint32_t)l * fmt_bits(f) / 8;
+    }
+    r_read_back(s);
+    M32(locked) = M32(s + 32);
+    M32(locked + 4) = M32(s + 28) + off;
+    M32(s + 64) = 1;
+    if (!(flags & 0x10)) {   /* D3DLOCK_READONLY */
+        M32(s + 56) = 1;
+        if (M32(s + 44)) M32(M32(s + 44) + 56) = 1;
+    }
+    return 0;
+}
+static uint32_t unlock_surface(uint32_t s) {
+    if (!s || !M32(s + 64)) return D3DERR_INVALIDCALL;
+    M32(s + 64) = 0;
+    return 0;
+}
 static void t_LockRect(CPU* c) {
     uint32_t s = level(THIS, ARG(1));
-    if (!s) { RET(0x8876086cu); return; }
-    M32(ARG(2)) = M32(s + 32);
-    M32(ARG(2) + 4) = M32(s + 28);
-    M32(THIS + 56) = 1;
-    RET(0);
+    RET(s ? lock_surface(s, ARG(2), ARG(3), ARG(4)) : D3DERR_INVALIDCALL);
 }
+static void t_UnlockRect(CPU* c) { RET(unlock_surface(level(THIS, ARG(1)))); }
 static void s_GetDesc(CPU* c) { fill_surface_desc(THIS, ARG(1)); RET(0); }
-static void s_LockRect(CPU* c) {
-    M32(ARG(1)) = M32(THIS + 32);
-    M32(ARG(1) + 4) = M32(THIS + 28);
-    M32(THIS + 56) = 1;
-    if (M32(THIS + 44)) M32(M32(THIS + 44) + 56) = 1;
-    RET(0);
-}
+static void s_LockRect(CPU* c) { RET(lock_surface(THIS, ARG(1), ARG(2), ARG(3))); }
+static void s_UnlockRect(CPU* c) { RET(unlock_surface(THIS)); }
 static void s_GetContainer(CPU* c) { M32(ARG(2)) = M32(THIS + 44); RET(M32(THIS + 44) ? 0 : 0x80004002u); }
 /* GetDC hands out a memory DC on a 32bpp copy of the surface (+60 holds it while out); ReleaseDC writes the copy
    back. Only the RGB formats D3D allows GDI on qualify. */
-#define D3DERR_INVALIDCALL 0x8876086cu
 static int gdi_format(uint32_t f) { return f >= 20 && f <= 25; }
 static uint32_t surface_pixel(uint32_t s, uint32_t x, uint32_t y) {
     uint32_t row = M32(s + 28) + y * M32(s + 32);
@@ -348,32 +538,134 @@ static void s_ReleaseDC(CPU* c) {
     if (M32(s + 44)) M32(M32(s + 44) + 56) = 1;
     RET(0);
 }
-static void b_Lock(CPU* c) { M32(ARG(3)) = M32(THIS + 28) + ARG(1); RET(0); }
+static void b_Lock(CPU* c) {
+    uint32_t off = ARG(1), size = ARG(2), out = ARG(3);
+    if (!out || off > M32(THIS + 36) || (size && off + size > M32(THIS + 36))) { RET(D3DERR_INVALIDCALL); return; }
+    M32(out) = M32(THIS + 28) + off;
+    M32(THIS + 64)++;   /* buffer locks nest */
+    RET(0);
+}
+static void b_Unlock(CPU* c) {
+    if (!M32(THIS + 64)) { RET(D3DERR_INVALIDCALL); return; }
+    M32(THIS + 64)--;
+    RET(0);
+}
 static void b_GetDesc(CPU* c) { memset(GPTR(ARG(1)), 0, 24); M32(ARG(1)) = M32(THIS + 20); M32(ARG(1) + 20) = M32(THIS + 36); RET(0); }
 
+/* Private data is kept host-side per (object, GUID). D3DSPD_IUNKNOWN data is an interface pointer the resource holds a
+   reference on. */
+typedef struct PrivateData {
+    uint32_t obj, flags, size;
+    uint8_t guid[16];
+    uint8_t* data;
+    struct PrivateData* next;
+} PrivateData;
+static PrivateData* private_data;
+
+static PrivateData** private_find(uint32_t obj, uint32_t guid) {
+    PrivateData** at = &private_data;
+    while (*at && ((*at)->obj != obj || memcmp((*at)->guid, GPTR(guid), 16))) at = &(*at)->next;
+    return at;
+}
+static void unknown_call(CPU* c, uint32_t unk, int slot) { guest_call(c, M32(M32(unk) + 4 * (uint32_t)slot), 1, unk); }
+static void private_free(CPU* c, PrivateData** at) {
+    PrivateData* d = *at;
+    if (d->flags & 1) unknown_call(c, M32((uint32_t)(uintptr_t)d->data), 2);
+    *at = d->next;
+    free(d->data);
+    free(d);
+}
+static void r_SetPrivateData(CPU* c) {
+    uint32_t guid = ARG(1), data = ARG(2), size = ARG(3), flags = ARG(4);
+    if (!guid || (size && !data) || ((flags & 1) && size != 4)) { RET(D3DERR_INVALIDCALL); return; }
+    PrivateData** at = private_find(THIS, guid);
+    if (*at) private_free(c, at);
+    PrivateData* d = calloc(1, sizeof *d);
+    d->obj = THIS;
+    d->flags = flags;
+    d->size = size;
+    memcpy(d->guid, GPTR(guid), 16);
+    d->data = malloc(size ? size : 1);
+    if (flags & 1) {
+        memcpy(d->data, &data, 4);
+        unknown_call(c, data, 1);
+    } else if (size) memcpy(d->data, GPTR(data), size);
+    d->next = private_data;
+    private_data = d;
+    RET(0);
+}
+static void r_GetPrivateData(CPU* c) {
+    uint32_t data = ARG(2), size = ARG(3);
+    if (!ARG(1) || !size) { RET(D3DERR_INVALIDCALL); return; }
+    PrivateData* d = *private_find(THIS, ARG(1));
+    if (!d) { RET(D3DERR_NOTFOUND); return; }
+    uint32_t have = M32(size);
+    M32(size) = d->size;
+    if (!data) { RET(0); return; }
+    if (have < d->size) { RET(D3DERR_MOREDATA); return; }
+    memcpy(GPTR(data), d->data, d->size);
+    if (d->flags & 1) unknown_call(c, M32(data), 1);
+    RET(0);
+}
+static void r_FreePrivateData(CPU* c) {
+    if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; }
+    PrivateData** at = private_find(THIS, ARG(1));
+    if (!*at) { RET(D3DERR_NOTFOUND); return; }
+    private_free(c, at);
+    RET(0);
+}
+/* Priority and LOD only apply to managed resources; for the rest they read back as 0. */
+static void r_SetPriority(CPU* c) {
+    uint32_t old = M32(THIS + 68);
+    if (M32(THIS + 52) == POOL_MANAGED) M32(THIS + 68) = ARG(1);
+    RET(old);
+}
+static void r_GetPriority(CPU* c) { RET(M32(THIS + 68)); }
+static void r_PreLoad(CPU* c) { if (M32(THIS + 8) == O_TEXTURE) r_preload(THIS); }
+static void t_SetLOD(CPU* c) {
+    uint32_t old = M32(THIS + 72), lod = ARG(1);
+    if (M32(THIS + 52) == POOL_MANAGED) {
+        M32(THIS + 72) = lod < M32(THIS + 24) ? lod : M32(THIS + 24) - 1;
+        r_texture_lod(THIS, M32(THIS + 72));
+    }
+    RET(old);
+}
+static void t_GetLOD(CPU* c) { RET(M32(THIS + 72)); }
+/* Mip levels are generated from level 0 whenever the texture is uploaded, so only the requested filter is kept. */
+static void t_SetAutoGenFilterType(CPU* c) {
+    uint32_t f = ARG(1);
+    if (!(M32(THIS + 48) & 0x400) || f == 0 || f > 3) { RET(D3DERR_INVALIDCALL); return; }
+    M32(THIS + 76) = f;
+    RET(0);
+}
+static void t_GetAutoGenFilterType(CPU* c) { RET(M32(THIS + 76)); }
+static void t_GenerateMipSubLevels(CPU* c) { if (M32(THIS + 48) & 0x400) M32(THIS + 56) = 1; }
+static void t_AddDirtyRect(CPU* c) { M32(THIS + 56) = 1; RET(0); }
+
 #define RESOURCE_METHODS \
-    {"QueryInterface", 3, 0}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"GetDevice", 2, r_GetDevice}, \
-    {"SetPrivateData", 5, 0}, {"GetPrivateData", 4, 0}, {"FreePrivateData", 2, 0}, {"SetPriority", 2, 0}, \
-    {"GetPriority", 1, 0}, {"PreLoad", 1, 0}, {"GetType", 1, r_GetType}
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"GetDevice", 2, r_GetDevice}, \
+    {"SetPrivateData", 5, r_SetPrivateData}, {"GetPrivateData", 4, r_GetPrivateData}, {"FreePrivateData", 2, r_FreePrivateData}, \
+    {"SetPriority", 2, r_SetPriority}, {"GetPriority", 1, r_GetPriority}, {"PreLoad", 1, r_PreLoad}, {"GetType", 1, r_GetType}
 
 static const Method texture_methods[] = {
-    RESOURCE_METHODS, {"SetLOD", 2, 0}, {"GetLOD", 1, 0}, {"GetLevelCount", 1, t_GetLevelCount},
-    {"SetAutoGenFilterType", 2, 0}, {"GetAutoGenFilterType", 1, 0}, {"GenerateMipSubLevels", 1, 0},
-    {"GetLevelDesc", 3, t_GetLevelDesc}, {"GetSurfaceLevel", 3, t_GetSurfaceLevel}, {"LockRect", 5, t_LockRect},
-    {"UnlockRect", 2, 0}, {"AddDirtyRect", 2, 0},
+    RESOURCE_METHODS, {"SetLOD", 2, t_SetLOD}, {"GetLOD", 1, t_GetLOD}, {"GetLevelCount", 1, t_GetLevelCount},
+    {"SetAutoGenFilterType", 2, t_SetAutoGenFilterType}, {"GetAutoGenFilterType", 1, t_GetAutoGenFilterType},
+    {"GenerateMipSubLevels", 1, t_GenerateMipSubLevels}, {"GetLevelDesc", 3, t_GetLevelDesc},
+    {"GetSurfaceLevel", 3, t_GetSurfaceLevel}, {"LockRect", 5, t_LockRect}, {"UnlockRect", 2, t_UnlockRect},
+    {"AddDirtyRect", 2, t_AddDirtyRect},
 };
 static const Method surface_methods[] = {
     RESOURCE_METHODS, {"GetContainer", 3, s_GetContainer}, {"GetDesc", 2, s_GetDesc}, {"LockRect", 4, s_LockRect},
-    {"UnlockRect", 1, 0}, {"GetDC", 2, s_GetDC}, {"ReleaseDC", 2, s_ReleaseDC},
+    {"UnlockRect", 1, s_UnlockRect}, {"GetDC", 2, s_GetDC}, {"ReleaseDC", 2, s_ReleaseDC},
 };
-static const Method vb_methods[] = {RESOURCE_METHODS, {"Lock", 5, b_Lock}, {"Unlock", 1, 0}, {"GetDesc", 2, b_GetDesc}};
-static const Method ib_methods[] = {RESOURCE_METHODS, {"Lock", 5, b_Lock}, {"Unlock", 1, 0}, {"GetDesc", 2, b_GetDesc}};
+static const Method vb_methods[] = {RESOURCE_METHODS, {"Lock", 5, b_Lock}, {"Unlock", 1, b_Unlock}, {"GetDesc", 2, b_GetDesc}};
+static const Method ib_methods[] = {RESOURCE_METHODS, {"Lock", 5, b_Lock}, {"Unlock", 1, b_Unlock}, {"GetDesc", 2, b_GetDesc}};
 static const Method other_methods[] = {
-    {"QueryInterface", 3, 0}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Method3", 1, 0},
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Method3", 1, 0},
     {"Method4", 1, 0}, {"Method5", 1, 0}, {"Method6", 1, 0}, {"Method7", 1, 0}, {"Method8", 1, 0},
 };
 static const Method swapchain_methods[] = {
-    {"QueryInterface", 3, 0}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Present", 6, 0},
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Present", 6, 0},
     {"GetFrontBufferData", 2, 0}, {"GetBackBuffer", 4, 0}, {"GetRasterStatus", 2, 0}, {"GetDisplayMode", 2, 0},
     {"GetDevice", 2, r_GetDevice}, {"GetPresentParameters", 2, 0},
 };
@@ -568,7 +860,7 @@ static void ms_RotateAxisLocal(CPU* c) { float m[16]; uint32_t v = ARG(1); rotat
 static void ms_RotateYawPitchRoll(CPU* c) { float m[16]; rotation_ypr(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 0); }
 static void ms_RotateYawPitchRollLocal(CPU* c) { float m[16]; rotation_ypr(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 1); }
 static const Method matstack_methods[] = {
-    {"QueryInterface", 3, 0}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Pop", 1, ms_Pop},
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Pop", 1, ms_Pop},
     {"Push", 1, ms_Push}, {"LoadIdentity", 1, ms_LoadIdentity}, {"LoadMatrix", 2, ms_LoadMatrix},
     {"MultMatrix", 2, ms_MultMatrix}, {"MultMatrixLocal", 2, ms_MultMatrixLocal}, {"RotateAxis", 3, ms_RotateAxis},
     {"RotateAxisLocal", 3, ms_RotateAxisLocal}, {"RotateYawPitchRoll", 4, ms_RotateYawPitchRoll}, {"RotateYawPitchRollLocal", 4, ms_RotateYawPitchRollLocal},
