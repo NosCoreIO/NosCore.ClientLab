@@ -59,6 +59,7 @@ int port_file_fd(uint32_t handle);
 extern uint32_t port_frames;
 extern int port_trace_budget;
 void port_fn_trace_start(CPU* c);
+void port_threads_pump(CPU* c);
 uint32_t port_reg_known_key(uint32_t subkey);
 
 void set_last_error(uint32_t e);

@@ -308,8 +308,38 @@ static void k_InterlockedCompareExchange(CPU* c) {
 }
 static void k_InterlockedExchangeAdd(CPU* c) { uint32_t o = M32(ARG(0)); M32(ARG(0)) = o + ARG(1); RET(o); }
 static void k_Sleep(CPU* c) {}
+/* The client's only thread is a TCkThread: every 10 minutes it raises an event (method pointer at +0x40/+0x44,
+   arguments at +0x54/+0x58), through Synchronize, i.e. on the main thread. Threads cannot run here, so the message
+   pump raises that event on the same schedule. */
+static uint64_t now_ms(void);
+#define CK_INTERVAL_MS 600000.0
+static uint32_t ck_thread;
+static double ck_next;
+
+void port_threads_pump(CPU* c) {
+    if (!ck_thread || now_ms() < ck_next) return;
+    ck_next = now_ms() + CK_INTERVAL_MS;
+    if (!M16(ck_thread + 0x42)) return;
+    uint32_t saved[3] = {c->eax, c->edx, c->ecx};
+    c->eax = M32(ck_thread + 0x44);
+    c->edx = M32(ck_thread + 0x54);
+    c->ecx = M32(ck_thread + 0x58);
+    guest_call(c, M32(ck_thread + 0x40), 0);
+    if (!c->pend) { c->eax = saved[0]; c->edx = saved[1]; c->ecx = saved[2]; }
+}
+
 static void k_CreateThread(CPU* c) {
-    port_log("CreateThread(start=%08x, param=%08x) not run yet", ARG(2), ARG(3));
+    /* Delphi threads start in ThreadWrapper with a {Func, Parameter} record; Parameter is the TThread object, whose
+       class name is the ShortString at VMT - 44. */
+    uint32_t rec = ARG(3), obj = rec ? M32(rec + 4) : 0, vmt = obj ? M32(obj) : 0, name = vmt ? M32(vmt - 44) : 0;
+    char cls[64] = "?";
+    if (name >= 0x400000u && name < 0x10000000u) snprintf(cls, sizeof cls, "%.*s", M8(name), GSTR(name + 1));
+    if (!strcmp(cls, "TCkThread")) {
+        ck_thread = obj;
+        ck_next = now_ms() + CK_INTERVAL_MS;
+        port_log("CreateThread: %s emulated as a main-thread timer", cls);
+    } else
+        port_log("CreateThread(start=%08x, param=%08x) func=%08x class=%s not run", ARG(2), rec, rec ? M32(rec) : 0, cls);
     if (ARG(5)) M32(ARG(5)) = 2;
     RET(handle_new(H_THREAD));
 }

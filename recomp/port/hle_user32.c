@@ -301,6 +301,7 @@ static uint32_t idle_peeks;
 static void u_PeekMessageA(CPU* c) {
     pump_input(c);
     pump_timers();
+    port_threads_pump(c);
     int got = pop_msg(ARG(0), ARG(4) & 1);
     if (!got && ++idle_peeks % 10000 == 0) port_log("PeekMessage idle x%u", idle_peeks);
     RET(got);
