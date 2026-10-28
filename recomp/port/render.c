@@ -334,7 +334,7 @@ static void put(uint32_t x, uint32_t y, float z, uint32_t src) {
 
 /* ---- vertices ---- */
 
-typedef struct { float x, y, z, w, uv[2 * STAGES]; uint32_t diffuse; } Vtx;
+typedef struct { float x, y, z, w, uv[2 * STAGES]; uint32_t diffuse; float fog; } Vtx;
 
 static void xform(const Mat* m, const float in[4], float out[4]) {
     for (int j = 0; j < 4; j++) out[j] = in[0] * m->m[j] + in[1] * m->m[4 + j] + in[2] * m->m[8 + j] + in[3] * m->m[12 + j];
@@ -404,6 +404,8 @@ static void update_wvp(void) {
 static struct {
     uint32_t pos, normal_at, diffuse_at, tex_at[4], tex_n[4];
     int lit, has_diffuse, pretransformed, stage_set[STAGES], stage_gen[STAGES], needs_camera_pos, needs_camera_normal;
+    int fog_mode;   /* 0 none, 1 exp, 2 exp2, 3 linear */
+    float fog_start, fog_end, fog_density;
     uint32_t ttff[STAGES];
     float vw, vh, vx, vy;
 } LY;
@@ -440,6 +442,14 @@ static void layout_begin(void) {
         if (LY.stage_gen[st] == 1) LY.needs_camera_normal = 1;
     }
     LY.lit = R.rs[137] && (fvf & 0x10) && pos != 4;
+    /* D3D fog: table (pixel) mode if set, else vertex mode; both computed here from camera-space depth. */
+    LY.fog_mode = R.rs[28] && pos != 4 ? (int)(R.rs[35] ? R.rs[35] : R.rs[140]) : 0;
+    if (LY.fog_mode) {
+        LY.needs_camera_pos = 1;
+        memcpy(&LY.fog_start, &R.rs[36], 4);
+        memcpy(&LY.fog_end, &R.rs[37], 4);
+        memcpy(&LY.fog_density, &R.rs[38], 4);
+    }
     LY.vw = (float)(R.vp_set ? R.vp_w : SW(R.target));
     LY.vh = (float)(R.vp_set ? R.vp_h : SH(R.target));
     LY.vx = (float)(R.vp_set ? R.vp_x : 0);
@@ -457,6 +467,14 @@ static void fetch(uint32_t p, Vtx* o) {
     }
     float cam_pos[4] = {0, 0, 0, 1}, cam_normal[4] = {0, 0, 0, 0};
     if (!LY.pretransformed && LY.needs_camera_pos) xform(&wv, in, cam_pos);
+    o->fog = 1;
+    if (LY.fog_mode) {
+        float d = fabsf(cam_pos[2]);
+        if (LY.fog_mode == 3) o->fog = LY.fog_end != LY.fog_start ? (LY.fog_end - d) / (LY.fog_end - LY.fog_start) : 1;
+        else if (LY.fog_mode == 1) o->fog = expf(-LY.fog_density * d);
+        else if (LY.fog_mode == 2) o->fog = expf(-(LY.fog_density * d) * (LY.fog_density * d));
+        o->fog = o->fog < 0 ? 0 : o->fog > 1 ? 1 : o->fog;
+    }
     if (!LY.pretransformed && LY.needs_camera_normal && (R.fvf & 0x10)) {
         float nrm[4] = {MF32(p + LY.normal_at), MF32(p + LY.normal_at + 4), MF32(p + LY.normal_at + 8), 0};
         xform(&wv, nrm, cam_normal);

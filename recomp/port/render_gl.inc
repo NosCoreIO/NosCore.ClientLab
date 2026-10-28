@@ -12,18 +12,19 @@ EM_JS(int, js_gl_init, (int w, int h), {
     if (!gl) return 0;
     postMessage({ type: 'log', text: 'WebGL renderer: ' + report(gl) });
     const vs = '#version 300 es\n' +
-        'in vec4 aPos; in vec4 aCol; in vec4 aUV;\n' +
-        'out vec4 vCol; out vec4 vUV;\n' +
-        'void main() { gl_Position = aPos; vCol = aCol.bgra; vUV = aUV; }\n';
+        'in vec4 aPos; in vec4 aCol; in vec4 aUV; in float aFog;\n' +
+        'out vec4 vCol; out vec4 vUV; out float vFog;\n' +
+        'void main() { gl_Position = aPos; vCol = aCol.bgra; vUV = aUV; vFog = aFog; }\n';
     const fs = '#version 300 es\n' +
         'precision highp float; precision highp int;\n' +
-        'in vec4 vCol; in vec4 vUV;\n' +
+        'in vec4 vCol; in vec4 vUV; in float vFog;\n' +
         'uniform sampler2D uTex0, uTex1;\n' +
         'uniform ivec4 uS0, uS1;\n' +
         'uniform ivec4 uA0, uA1;\n' +
         'uniform vec4 uTFactor;\n' +
         'uniform ivec2 uATest;\n' +
         'uniform float uARef;\n' +
+        'uniform vec4 uFog;\n' +
         'out vec4 outColor;\n' +
         'vec4 arg(int a, vec4 tex, vec4 diff, vec4 cur) {\n' +
         '  int s = a & 15; vec4 v = s == 0 ? diff : s == 1 ? cur : s == 2 ? tex : s == 3 ? uTFactor : vec4(1.0);\n' +
@@ -65,6 +66,7 @@ EM_JS(int, js_gl_init, (int w, int h), {
         '                f == 5 ? a > uARef : f == 6 ? a != uARef : f == 7 ? a >= uARef : true;\n' +
         '    if (!pass) discard;\n' +
         '  }\n' +
+        '  if (uFog.a > 0.5) cur.rgb = mix(uFog.rgb, cur.rgb, clamp(vFog, 0.0, 1.0));\n' +
         '  outColor = cur;\n' +
         '}\n';
     const sh = (type, src) => {
@@ -80,18 +82,20 @@ EM_JS(int, js_gl_init, (int w, int h), {
     gl.bindAttribLocation(prog, 0, 'aPos');
     gl.bindAttribLocation(prog, 1, 'aCol');
     gl.bindAttribLocation(prog, 2, 'aUV');
+    gl.bindAttribLocation(prog, 3, 'aFog');
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
     gl.useProgram(prog);
     const u = {};
-    for (const n of ['uTex0', 'uTex1', 'uS0', 'uS1', 'uA0', 'uA1', 'uTFactor', 'uATest', 'uARef']) u[n] = gl.getUniformLocation(prog, n);
+    for (const n of ['uTex0', 'uTex1', 'uS0', 'uS1', 'uA0', 'uA1', 'uTFactor', 'uATest', 'uARef', 'uFog']) u[n] = gl.getUniformLocation(prog, n);
     gl.uniform1i(u.uTex0, 0);
     gl.uniform1i(u.uTex1, 1);
     const vbo = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 36, 0);
-    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 36, 16);
-    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 36, 20);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 40, 0);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 40, 16);
+    gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 40, 20);
+    gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 40, 36);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.enable(gl.SCISSOR_TEST);
     self.__gl = { canvas, gl, u, textures: new Map(), w, h, last: 0 };
@@ -161,7 +165,11 @@ EM_JS(void, js_gl_draw, (int prim, const uint8_t* verts, int n, const int32_t* s
         } else gl.disable(gl.DEPTH_TEST);
     }
     if (changed(25, 29)) gl.scissor(S(25), G.h - S(26) - S(28), S(27), S(28));
-    gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(verts, verts + n * 36), gl.STREAM_DRAW);
+    if (changed(38, 40)) {
+        const fc = S(38) >>> 0;
+        gl.uniform4f(u.uFog, ((fc >>> 16) & 255) / 255, ((fc >>> 8) & 255) / 255, (fc & 255) / 255, S(39) ? 1 : 0);
+    }
+    gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(verts, verts + n * 40), gl.STREAM_DRAW);
     gl.drawArrays(prim, 0, n);
 });
 
@@ -201,7 +209,7 @@ static void gl_start(uint32_t backbuffer) {
     gl_backbuffer = backbuffer;
     gl_on = js_gl_init((int)SW(backbuffer), (int)SH(backbuffer));
     if (gl_on) {
-        gl_verts = malloc(65536 * 36);
+        gl_verts = malloc(65536 * 40);
         port_log("render: WebGL2");
     }
 }
@@ -253,6 +261,7 @@ static void put_vertex(uint8_t* dst, const Vtx* v, float tw, float th) {
     f[3] = w;
     memcpy(dst + 16, &v->diffuse, 4);
     memcpy(dst + 20, v->uv, 16);
+    memcpy(dst + 36, &v->fog, 4);
 }
 
 /* Each distinct texture-stage setup is logged once (first 48), to spot fixed-function features not emulated. */
@@ -301,6 +310,8 @@ static void gl_state(int32_t* st) {
     st[22] = (int32_t)R.rs[7]; st[23] = (int32_t)R.rs[14]; st[24] = (int32_t)R.rs[23];
     st[25] = (int32_t)(R.vp_set ? R.vp_x : 0); st[26] = (int32_t)(R.vp_set ? R.vp_y : 0);
     st[27] = (int32_t)(R.vp_set ? R.vp_w : SW(R.target)); st[28] = (int32_t)(R.vp_set ? R.vp_h : SH(R.target));
+    st[38] = (int32_t)R.rs[34];
+    st[39] = (int32_t)(R.rs[28] != 0);
 }
 
 static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
@@ -310,7 +321,7 @@ static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
     gl_state(st);
     if (prim < 4 || prim > 6) {
         gl_flush();
-        for (uint32_t k = 0; k < n && k < BATCH_VERTS; k++) put_vertex(gl_verts + 36 * k, &v[k], tw, th);
+        for (uint32_t k = 0; k < n && k < BATCH_VERTS; k++) put_vertex(gl_verts + 40 * k, &v[k], tw, th);
         js_gl_draw((int)prim, gl_verts, (int)(n < BATCH_VERTS ? n : BATCH_VERTS), st);
         return;
     }
@@ -323,9 +334,9 @@ static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
         if (prim == 4) { a = 3 * t; b = a + 1; c = a + 2; }
         else if (prim == 5) { a = t; b = t + 1; c = t + 2; }
         else { a = 0; b = t + 1; c = t + 2; }
-        put_vertex(gl_verts + 36 * batch_n++, &v[a], tw, th);
-        put_vertex(gl_verts + 36 * batch_n++, &v[b], tw, th);
-        put_vertex(gl_verts + 36 * batch_n++, &v[c], tw, th);
+        put_vertex(gl_verts + 40 * batch_n++, &v[a], tw, th);
+        put_vertex(gl_verts + 40 * batch_n++, &v[b], tw, th);
+        put_vertex(gl_verts + 40 * batch_n++, &v[c], tw, th);
     }
 }
 
