@@ -1,4 +1,4 @@
-/* The long tail of imports: version info, file mappings, registry writes, user32/gdi32 odds and ends, Winsock over
+/* The long tail of imports: version info, file mappings, user32/gdi32 odds and ends, Winsock over
    the dev server's relay, and the Steam and Gameforge entry points. */
 #include "port.h"
 #include <ctype.h>
@@ -143,16 +143,6 @@ static void k_MapViewOfFile(CPU* c) {
     RET(p);
 }
 static void k_UnmapViewOfFile(CPU* c) { RET(1); }
-
-/* ---- registry ---- */
-
-static void a_RegCreateKeyExA(CPU* c) {
-    uint32_t k = port_reg_known_key(ARG(1));
-    if (ARG(7)) M32(ARG(7)) = k ? k : 0x00400100u;
-    if (ARG(8)) M32(ARG(8)) = k ? 2 : 1;
-    RET(0);
-}
-static void a_RegSetValueExA(CPU* c) { RET(0); }
 
 /* ---- user32/gdi32 odds and ends ---- */
 
@@ -523,8 +513,6 @@ static const Hle misc[] = {
     K(CreateFileMappingA, 6, k_CreateFileMappingA),
     K(MapViewOfFile, 5, k_MapViewOfFile),
     K(UnmapViewOfFile, 1, k_UnmapViewOfFile),
-    {"advapi32.dll", "RegCreateKeyExA", 9, a_RegCreateKeyExA},
-    {"advapi32.dll", "RegSetValueExA", 6, a_RegSetValueExA},
     {"user32.dll", "InflateRect", 3, u_InflateRect},
     {"user32.dll", "OffsetRect", 3, u_OffsetRect},
     {"user32.dll", "SetRect", 5, u_SetRect},

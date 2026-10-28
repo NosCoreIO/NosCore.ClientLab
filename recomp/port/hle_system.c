@@ -350,10 +350,6 @@ static void sh_PathCanonicalizeA(CPU* c) {
     RET(1);
 }
 
-/* ---- registry ---- */
-
-static void a_RegFlushKey(CPU* c) { RET(0); }
-
 /* ---- IME: the browser delivers composed text as WM_CHAR, so no IME composition is ever open here ---- */
 
 static void imm_GetOpenStatus(CPU* c) { RET(0); }
@@ -395,7 +391,6 @@ static const Hle sys[] = {
     K(RemoveDirectoryA, 1), K(ExitThread, 1), K(SetProcessShutdownParameters, 2),
     {"shlwapi.dll", "PathIsRelativeA", 1, sh_PathIsRelativeA}, {"shlwapi.dll", "PathIsUNCA", 1, sh_PathIsUNCA},
     {"shlwapi.dll", "PathCanonicalizeA", 2, sh_PathCanonicalizeA},
-    {"advapi32.dll", "RegFlushKey", 1, a_RegFlushKey},
     {"imm32.dll", "ImmGetOpenStatus", 1, imm_GetOpenStatus},
     {"imm32.dll", "ImmGetCompositionStringA", 4, imm_GetCompositionString},
     {"imm32.dll", "ImmGetCompositionStringW", 4, imm_GetCompositionString},
