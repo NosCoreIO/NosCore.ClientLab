@@ -63,8 +63,44 @@
       audioDone = m.audioDone;
     } else if (m.type === 'sound') {
       sound(m);
+    } else if (m.type === 'net-open') {
+      netOpen(m.id, m.ring);
+    } else if (m.type === 'net-send') {
+      const c = nets.get(m.id);
+      if (c) c.sends = c.sends.then(() => fetch(`/net/send?id=${m.id}`, { method: 'POST', body: m.bytes })).catch(() => { });
+    } else if (m.type === 'net-close') {
+      const c = nets.get(m.id);
+      if (c) { c.open = false; nets.delete(m.id); c.sends.then(() => fetch(`/net/close?id=${m.id}`, { method: 'POST' })); }
     }
   };
+
+  // Relayed sockets (hle_misc.c): the page long-polls the dev server and fills the worker's ring, so the worker
+  // never blocks on the network.
+  const nets = new Map();
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function netOpen(id, ring) {
+    const hdr = new Int32Array(ring, 0, 4), data = new Uint8Array(ring, 16), size = data.length;
+    const conn = { open: true, sends: Promise.resolve() };
+    nets.set(id, conn);
+    (async () => {
+      while (conn.open) {
+        let r;
+        try { r = await fetch(`/net/recv?id=${id}&wait=1`); } catch { await sleep(100); continue; }
+        if (r.status === 410 || r.status === 404) break;
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        for (let off = 0; off < bytes.length;) {
+          const written = Atomics.load(hdr, 0), free = size - (written - Atomics.load(hdr, 1));
+          if (free <= 0) { await sleep(5); continue; }
+          const n = Math.min(free, bytes.length - off), at = written % size, first = Math.min(n, size - at);
+          data.set(bytes.subarray(off, off + first), at);
+          if (n > first) data.set(bytes.subarray(off + first, off + n), 0);
+          Atomics.store(hdr, 0, written + n);
+          off += n;
+        }
+      }
+      Atomics.store(hdr, 2, 1);
+    })();
+  }
 
   // Miles samples (hle_audio.c). Browsers only start audio after a user gesture, so the context resumes on the first
   // click or key press; decoded buffers are cached by content.

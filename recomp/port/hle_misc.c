@@ -285,34 +285,39 @@ static void ws_htons(CPU* c) { RET(((ARG(0) & 0xff) << 8) | ((ARG(0) >> 8) & 0xf
    worker never yields, so it cannot use a WebSocket. Under Node there is no network and connections are refused. */
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+/* Connecting stays a synchronous request. Afterwards the page long-polls the relay for this connection and writes
+   what arrives into a shared ring ([0] bytes written, [1] bytes read, [2] closed, data from byte 16), so receiving
+   never blocks the worker; sends and close are messages the page forwards in order. */
 EM_JS(int, js_net_connect, (const char* host, int port), {
     var x = new XMLHttpRequest();
     x.open('POST', '/net/connect?host=' + UTF8ToString(host) + '&port=' + port, false);
     try { x.send(); } catch (e) { return -1; }
-    return x.status === 200 ? parseInt(x.responseText, 10) : -1;
+    if (x.status !== 200) return -1;
+    var id = parseInt(x.responseText, 10);
+    var ring = new SharedArrayBuffer(16 + (1 << 20));
+    (self.netRings || (self.netRings = {}))[id] = ring;
+    postMessage({ type: 'net-open', id: id, ring: ring });
+    return id;
 });
 EM_JS(int, js_net_send, (int id, const uint8_t* p, int n), {
-    var x = new XMLHttpRequest();
-    x.open('POST', '/net/send?id=' + id, false);
-    x.send(HEAPU8.slice(p, p + n));
-    return x.status === 200 ? n : -1;
+    postMessage({ type: 'net-send', id: id, bytes: HEAPU8.slice(p, p + n) });
+    return n;
 });
 EM_JS(int, js_net_recv, (int id, uint8_t* p, int cap), {
-    var x = new XMLHttpRequest();
-    x.open('GET', '/net/recv?id=' + id, false);
-    x.responseType = 'arraybuffer';
-    x.send();
-    if (x.status === 410) return -2;
-    if (x.status !== 200) return -1;
-    var d = new Uint8Array(x.response);
-    var n = Math.min(d.length, cap);
-    HEAPU8.set(d.subarray(0, n), p);
+    var ring = self.netRings && self.netRings[id];
+    if (!ring) return -1;
+    var hdr = new Int32Array(ring, 0, 4), data = new Uint8Array(ring, 16), size = data.length;
+    var written = Atomics.load(hdr, 0), read = Atomics.load(hdr, 1), avail = written - read;
+    if (avail <= 0) return Atomics.load(hdr, 2) ? -2 : 0;
+    var n = Math.min(avail, cap), at = read % size, first = Math.min(n, size - at);
+    HEAPU8.set(data.subarray(at, at + first), p);
+    if (n > first) HEAPU8.set(data.subarray(0, n - first), p + first);
+    Atomics.store(hdr, 1, read + n);
     return n;
 });
 EM_JS(void, js_net_close, (int id), {
-    var x = new XMLHttpRequest();
-    x.open('POST', '/net/close?id=' + id, false);
-    x.send();
+    if (self.netRings) delete self.netRings[id];
+    postMessage({ type: 'net-close', id: id });
 });
 #endif
 
@@ -322,7 +327,6 @@ typedef struct {
     int used, remote, connected, closed;
     uint8_t* rx;
     uint32_t rx_len;
-    double last_poll;
 } Sock;
 static Sock socks[MAX_SOCK];
 #define RX_CAP (1u << 20)
@@ -332,9 +336,6 @@ static Sock* sock_get(uint32_t s) { return s >= SOCK_BASE && s < SOCK_BASE + MAX
 static void sock_poll(Sock* k) {
 #ifdef __EMSCRIPTEN__
     if (!k->connected || k->closed || k->rx_len >= RX_CAP / 2) return;
-    double now = emscripten_get_now();
-    if (now - k->last_poll < 8) return;
-    k->last_poll = now;
     double t0 = emscripten_get_now();
     int n = js_net_recv(k->remote, k->rx + k->rx_len, (int)(RX_CAP - k->rx_len));
     port_prof_net += emscripten_get_now() - t0;

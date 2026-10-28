@@ -48,7 +48,9 @@ class Relay:
         s = socket.create_connection((host, port), timeout=5)
         s.settimeout(None)
         cid = next(self.ids)
-        conn = {"sock": s, "buf": bytearray(), "closed": False, "lock": threading.Lock(), "seen": time.monotonic()}
+        lock = threading.Lock()
+        conn = {"sock": s, "buf": bytearray(), "closed": False, "lock": lock, "ready": threading.Condition(lock),
+                "seen": time.monotonic()}
         with self.lock:
             self.conns[cid] = conn
         threading.Thread(target=self._reader, args=(conn,), daemon=True).start()
@@ -60,11 +62,14 @@ class Relay:
                 data = conn["sock"].recv(65536)
                 if not data:
                     break
-                with conn["lock"]:
+                with conn["ready"]:
                     conn["buf"] += data
+                    conn["ready"].notify_all()
         except OSError:
             pass
-        conn["closed"] = True
+        with conn["ready"]:
+            conn["closed"] = True
+            conn["ready"].notify_all()
 
     def send(self, cid, data):
         conn = self.conns.get(cid)
@@ -74,12 +79,15 @@ class Relay:
         conn["sock"].sendall(data)
         return True
 
-    def recv(self, cid):
+    def recv(self, cid, wait=False):
+        """With wait, blocks up to a second for data, so the page can long-poll instead of spinning."""
         conn = self.conns.get(cid)
         if not conn:
             return None
         conn["seen"] = time.monotonic()
-        with conn["lock"]:
+        with conn["ready"]:
+            if wait and not conn["buf"] and not conn["closed"]:
+                conn["ready"].wait(timeout=1.0)
             data, conn["buf"] = bytes(conn["buf"]), bytearray()
         if not data and conn["closed"]:
             return None
@@ -169,7 +177,7 @@ def make_handler(game, build, relay, auth):
                     body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                     return self.reply(200 if relay.send(cid, body) else 410)
                 if op == "recv":
-                    data = relay.recv(cid)
+                    data = relay.recv(cid, wait="wait" in q)
                     return self.reply(410) if data is None else self.reply(200, data)
                 if op == "close":
                     relay.close(cid)
