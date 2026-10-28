@@ -25,7 +25,7 @@ The client (`NosCore.exe`, Delphi 7, md5 `51bbff3ec09d67c8425f88d74c6d5df5`) is 
 
 ```powershell
 python recomp\wasm\compile_all.py --web          # worker build into C:\tools\re\work\wasm\web
-python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user admin --password test   # http://127.0.0.1:8077/
+python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user <account> --password <password>   # http://127.0.0.1:8077/
 ```
 
 - **Worker:** the client runs in a Web Worker and its loop never yields, so everything it talks to is synchronous: input arrives through a SharedArrayBuffer ring, network through sync XHR, frames leave as ImageBitmaps.
