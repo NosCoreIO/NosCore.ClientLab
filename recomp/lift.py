@@ -879,6 +879,10 @@ def reloc_code_seeds(L, fns):
         return k >= 0 and spans[k][0] <= x < spans[k][1]
 
     def entry_shape(t):
+        # Delphi aligns every routine to 4 bytes, so an aligned relocated pointer is an entry whatever its first
+        # instruction (empty virtual methods are a bare 'ret'); the sanity walk below still has to reach a ret/jmp.
+        if t % 4 == 0:
+            return True
         dec = L.disasm_range(t, t + 8)
         if len(dec) < 2:
             return False
@@ -961,6 +965,70 @@ def call_targets(L, fns):
     return extra, sorted(seeds)
 
 
+def descend(L, starts, may_enter):
+    """Recursive-descent disassembly: follows direct branches, jump tables and try/except/finally handler pushes.
+    Returns {address: end of instruction}. may_enter(pos) decides whether to keep walking into pos."""
+    seen, work = {}, list(starts)
+    while work:
+        pos = work.pop()
+        while pos not in seen and L.code_lo <= pos < L.code_hi and may_enter(pos):
+            ins = L.disasm_range(pos, pos + 1)
+            if not ins:
+                break
+            i = ins[0]
+            seen[pos] = i.address + i.size
+            m = i.mnemonic
+            if (m.startswith("j") or m.startswith("loop")) and i.operands and i.operands[0].type == X.X86_OP_IMM:
+                work.append(i.operands[0].imm & 0xFFFFFFFF)
+            work.extend(L.jump_table(i))
+            # try/except and try/finally: 'push offset handler' followed by 'push dword ptr fs:[reg]'
+            if m == "push" and i.operands and i.operands[0].type == X.X86_OP_IMM:
+                t = i.operands[0].imm & 0xFFFFFFFF
+                nxt = L.disasm_range(i.address + i.size, i.address + i.size + 1)
+                if L.code_lo <= t < L.code_hi and nxt and nxt[0].mnemonic == "push" and "fs:" in nxt[0].op_str:
+                    work.append(t)
+            if m == "jmp" or m == "ret" or m == "int3":
+                break
+            pos = i.address + i.size
+    return seen
+
+
+def to_ranges(seen):
+    ranges = []
+    for lo in sorted(seen):
+        hi = seen[lo]
+        if ranges and ranges[-1][1] >= lo:
+            ranges[-1] = (ranges[-1][0], max(hi, ranges[-1][1]))
+        else:
+            ranges.append((lo, hi))
+    return ranges
+
+
+def extend_functions(L, fns):
+    """Ghidra stops a function where it cannot follow control flow (an unresolved switch, a handler only reached by
+    the exception dispatcher), so each function is re-walked from its own code and grows into whatever code no
+    other function owns."""
+    spans = sorted((lo, hi) for _, _, rs in fns for lo, hi in rs)
+    los = [lo for lo, _ in spans]
+
+    def owned(x):
+        k = bisect.bisect_right(los, x) - 1
+        return k >= 0 and spans[k][0] <= x < spans[k][1]
+
+    entries = {e for e, _, _ in fns}
+    out, grown = [], 0
+    for e, name, rs in fns:
+        mine = lambda x, rs=rs: any(lo <= x < hi for lo, hi in rs)
+        seen = descend(L, [lo for lo, _ in rs], lambda x: mine(x) or (not owned(x) and x not in entries))
+        extra = {a: b for a, b in seen.items() if not mine(a)}
+        if extra:
+            grown += 1
+            rs = to_ranges({**{lo: hi for lo, hi in rs}, **extra})
+        out.append((e, name, rs))
+    print(f"{grown} functions extended past their Ghidra ranges")
+    return out
+
+
 def discover(L, fns, seeds):
     """Recursive-descent disassembly from seed addresses not already covered by a function."""
     covered = sorted((lo, hi) for _, _, rs in fns for lo, hi in rs)
@@ -975,28 +1043,7 @@ def discover(L, fns, seeds):
     for s in seeds:
         if s in entries or not (L.code_lo <= s < L.code_hi):
             continue
-        seen, work = {}, [s]
-        while work:
-            pos = work.pop()
-            while pos not in seen and L.code_lo <= pos < L.code_hi and (pos == s or not inside(pos)):
-                ins = L.disasm_range(pos, pos + 1)
-                if not ins:
-                    break
-                i = ins[0]
-                seen[pos] = i.address + i.size
-                m = i.mnemonic
-                if (m.startswith("j") or m.startswith("loop")) and i.operands and i.operands[0].type == X.X86_OP_IMM:
-                    work.append(i.operands[0].imm & 0xFFFFFFFF)
-                if m == "jmp" or m == "ret" or m == "int3":
-                    break
-                pos = i.address + i.size
-        ranges = []
-        for lo in sorted(seen):
-            hi = seen[lo]
-            if ranges and ranges[-1][1] == lo:
-                ranges[-1] = (ranges[-1][0], hi)
-            else:
-                ranges.append((lo, hi))
+        ranges = to_ranges(descend(L, [s], lambda pos, s=s: pos == s or not inside(pos)))
         if ranges:
             out.append((s, f"seed_{s:08x}", ranges))
             entries.add(s)
@@ -1034,6 +1081,7 @@ def main():
         e = int(entry, 16)
         if rs and L.code_lo <= e < L.code_hi:
             fns.append((e, name, rs))
+    fns = extend_functions(L, fns)
     fns.extend(discover(L, fns, reloc_code_seeds(L, fns)))
     if a.seeds and os.path.exists(a.seeds):
         fns.extend(discover(L, fns, [int(x.split()[0], 16) for x in open(a.seeds) if x.strip() and not x.startswith("#")]))
@@ -1082,10 +1130,13 @@ def main():
     chunks, unimpl = defaultdict(list), defaultdict(int)
 
     absorbed = 0
+    lifted = bytearray(L.code_hi - L.code_lo)
     for e, name, rs in fns:
         g = FnGen(L, e, name, rs, covered)
         g.extra_labels = extra_labels.get(e, set())
         absorbed += sum(1 for i in g.ins if not covered(i.address))
+        for i in g.ins:
+            lifted[i.address - L.code_lo: i.address - L.code_lo + i.size] = b"\1" * i.size
         src = g.gen()
         for line in g.out:
             if "rt_unimpl" in line:
@@ -1118,6 +1169,31 @@ def main():
         write_if_changed(os.path.join(a.outdir, "table.c"), f.getvalue())
     print(f"{len(fns)} functions, {len(table)} labels, {file_no} files")
     print("unimplemented:", dict(sorted(unimpl.items(), key=lambda kv: -kv[1])))
+    report_coverage(L, lifted, os.path.join(a.outdir, "gaps.txt"))
+
+
+def report_coverage(L, lifted, path):
+    """Code-section bytes covered by lifted instructions; the uncovered runs that are not alignment padding go to
+    gaps.txt (data embedded in code, such as VMTs and string literals, is expected there)."""
+    total, gaps, pos = len(lifted), [], 0
+    while pos < total:
+        if lifted[pos]:
+            pos += 1
+            continue
+        start = pos
+        while pos < total and not lifted[pos]:
+            pos += 1
+        body = L.code[start:pos]
+        if len(body) < 4 or all(b in (0x00, 0x90, 0xCC, 0x8B, 0xC0) for b in body):
+            continue
+        gaps.append((L.code_lo + start, pos - start))
+    lifted_bytes = sum(lifted)
+    gap_bytes = sum(n for _, n in gaps)
+    with open(path, "w") as f:
+        for a, n in gaps:
+            f.write(f"{a:08x} {n}\n")
+    print(f"coverage: {lifted_bytes}/{total} code bytes lifted ({100 * lifted_bytes / total:.1f}%), "
+          f"{len(gaps)} non-padding gaps totalling {gap_bytes} bytes (see {path})")
 
 
 if __name__ == "__main__":

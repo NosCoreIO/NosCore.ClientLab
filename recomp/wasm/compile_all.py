@@ -15,8 +15,8 @@ OUT = r"C:\tools\re\work\wasm"
 RT = os.path.join(HERE, "..", "runtime")
 PORT = os.path.join(HERE, "..", "port")
 EMCC = r"C:\tools\emsdk\upstream\emscripten\emcc.exe"
-FLAGS = ["-O1", "-w", "-c", "-sSUPPORT_LONGJMP=0"]
-LINK = ["-O1", "-sGLOBAL_BASE=536870912", "-sINITIAL_MEMORY=1024MB", "-sALLOW_MEMORY_GROWTH=1",
+FLAGS = ["-O2", "-w", "-c", "-sSUPPORT_LONGJMP=0"]
+LINK = ["-O2", "-sGLOBAL_BASE=536870912", "-sINITIAL_MEMORY=1024MB", "-sALLOW_MEMORY_GROWTH=1",
         "-sMAXIMUM_MEMORY=2048MB", "-sSTACK_SIZE=64MB", "-sNODERAWFS=1", "-sEXIT_RUNTIME=1",
         "-sSUPPORT_LONGJMP=0"]
 
@@ -26,8 +26,7 @@ def compile_one(src):
     deps = [src, os.path.join(RT, "rt.h")] + ([] if src.startswith(GEN) else [os.path.join(PORT, "port.h")] + glob.glob(os.path.join(PORT, "*.inc")))
     if os.path.exists(obj) and os.path.getmtime(obj) > max(os.path.getmtime(d) for d in deps):
         return src, 0, ""
-    # The host layer (renderer, HLE, runtime helpers) is small and hot: build it at -O2.
-    flags = FLAGS if src.startswith(GEN) else ["-O2"] + [f for f in FLAGS if f not in ("-w", "-O1")] + ["-Wunused-function"]
+    flags = FLAGS if src.startswith(GEN) else [f for f in FLAGS if f != "-w"] + ["-Wunused-function"]
     r = subprocess.run([EMCC, *flags, "-I", RT, "-I", PORT, src, "-o", obj], capture_output=True, text=True)
     if r.returncode == 0 and "warning" in r.stderr and not src.startswith(GEN):
         print(r.stderr[-1500:])

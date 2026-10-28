@@ -183,8 +183,6 @@ static void v_GetViewport(CPU* c) {
 }
 static void v_zero_out1(CPU* c) { if (ARG(1)) M32(ARG(1)) = 0; RET(0); }
 static void v_zero_out2(CPU* c) { if (ARG(2)) M32(ARG(2)) = 0; RET(0); }
-static void v_zero_struct(CPU* c) { if (ARG(1)) memset(GPTR(ARG(1)), 0, 68); RET(0); }
-static void v_zero_struct2(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, 104); RET(0); }
 static void v_new_other_out2(CPU* c) { M32(ARG(2)) = make_obj(vt_other, O_OTHER); RET(0); }
 static void v_new_other_out1(CPU* c) { M32(ARG(1)) = make_obj(vt_other, O_OTHER); RET(0); }
 static void v_ValidateDevice(CPU* c) { if (ARG(1)) M32(ARG(1)) = 1; RET(0); }
@@ -213,6 +211,12 @@ static void v_DrawPrimitiveUP(CPU* c) { r_draw_up(ARG(1), ARG(2), ARG(3), ARG(4)
 static void v_DrawIndexedPrimitive(CPU* c) { r_draw_indexed(ARG(1), (int32_t)ARG(2), ARG(5), ARG(6)); RET(0); }
 static void v_DrawIndexedPrimitiveUP(CPU* c) { r_draw_indexed_up(ARG(1), ARG(4), ARG(5), ARG(6), ARG(7), ARG(8)); RET(0); }
 static void v_SetVertexShader(CPU* c) { RET(0); }
+static void v_SetLight(CPU* c) { r_set_light(ARG(1), ARG(2)); RET(0); }
+static void v_GetLightR(CPU* c) { r_get_light(ARG(1), ARG(2)); RET(0); }
+static void v_LightEnable(CPU* c) { r_light_enable(ARG(1), ARG(2)); RET(0); }
+static void v_GetLightEnableR(CPU* c) { M32(ARG(2)) = r_light_enabled(ARG(1)); RET(0); }
+static void v_SetMaterial(CPU* c) { r_set_material(ARG(1)); RET(0); }
+static void v_GetMaterialR(CPU* c) { r_get_material(ARG(1)); RET(0); }
 static void v_SetPixelShader(CPU* c) { RET(0); }
 
 static const Method device_methods[] = {
@@ -233,8 +237,8 @@ static const Method device_methods[] = {
     {"SetRenderTarget", 3, v_SetRenderTarget}, {"GetRenderTarget", 3, v_GetRenderTarget}, {"SetDepthStencilSurface", 2, 0},
     {"GetDepthStencilSurface", 2, v_GetDepthStencilSurface}, {"BeginScene", 1, 0}, {"EndScene", 1, 0},
     {"Clear", 7, v_Clear}, {"SetTransform", 3, v_SetTransform}, {"GetTransform", 3, v_GetTransformR}, {"MultiplyTransform", 3, 0},
-    {"SetViewport", 2, v_SetViewport}, {"GetViewport", 2, v_GetViewport}, {"SetMaterial", 2, 0}, {"GetMaterial", 2, v_zero_struct},
-    {"SetLight", 3, 0}, {"GetLight", 3, v_zero_struct2}, {"LightEnable", 3, 0}, {"GetLightEnable", 3, v_zero_out2},
+    {"SetViewport", 2, v_SetViewport}, {"GetViewport", 2, v_GetViewport}, {"SetMaterial", 2, v_SetMaterial}, {"GetMaterial", 2, v_GetMaterialR},
+    {"SetLight", 3, v_SetLight}, {"GetLight", 3, v_GetLightR}, {"LightEnable", 3, v_LightEnable}, {"GetLightEnable", 3, v_GetLightEnableR},
     {"SetClipPlane", 3, 0}, {"GetClipPlane", 3, 0}, {"SetRenderState", 3, v_SetRenderState}, {"GetRenderState", 3, v_GetRenderStateR},
     {"CreateStateBlock", 3, v_new_other_out2}, {"BeginStateBlock", 1, 0}, {"EndStateBlock", 2, v_new_other_out1},
     {"SetClipStatus", 2, 0}, {"GetClipStatus", 2, 0}, {"GetTexture", 3, v_GetTextureR}, {"SetTexture", 3, v_SetTexture},

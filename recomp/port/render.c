@@ -25,6 +25,9 @@ static struct {
     uint32_t vp_x, vp_y, vp_w, vp_h;
     uint32_t target;
     int vp_set;
+    float light[8][26];   /* D3DLIGHT9 as floats (type, diffuse, specular, ambient, position, direction, range, ...) */
+    int light_on[8];
+    float material[17];   /* D3DMATERIAL9: diffuse, ambient, specular, emissive, power */
 } R;
 
 static void identity(Mat* m) { memset(m, 0, sizeof *m); m->m[0] = m->m[5] = m->m[10] = m->m[15] = 1; }
@@ -39,6 +42,10 @@ void r_init(uint32_t backbuffer) {
     R.rs[20] = 1;         /* DESTBLEND ZERO */
     R.rs[25] = 8;         /* ALPHAFUNC ALWAYS */
     R.rs[60] = 0xffffffffu;
+    R.rs[137] = 1;        /* LIGHTING */
+    R.rs[141] = 1;        /* COLORVERTEX */
+    R.rs[145] = 1;        /* DIFFUSEMATERIALSOURCE COLOR1 */
+    R.rs[146] = 2;        /* SPECULARMATERIALSOURCE COLOR2 */
     for (int s = 0; s < 8; s++) {
         R.tss[s][1] = s ? 1 : 4; R.tss[s][2] = 2; R.tss[s][3] = 1;
         R.tss[s][4] = s ? 1 : 2; R.tss[s][5] = 2; R.tss[s][6] = 1;
@@ -60,6 +67,20 @@ void r_get_transform(uint32_t type, uint32_t addr) {
     else { Mat i; identity(&i); memcpy(GPTR(addr), i.m, 64); }
 }
 void r_set_render_state(uint32_t s, uint32_t v) { if (s < 256) R.rs[s] = v; }
+void r_set_light(uint32_t i, uint32_t p) {
+    if (i >= 8) return;
+    R.light[i][0] = (float)M32(p);
+    for (int k = 1; k < 26; k++) R.light[i][k] = MF32(p + 4 * (uint32_t)k);
+}
+void r_get_light(uint32_t i, uint32_t p) {
+    if (i >= 8) return;
+    M32(p) = (uint32_t)R.light[i][0];
+    for (int k = 1; k < 26; k++) MF32(p + 4 * (uint32_t)k) = R.light[i][k];
+}
+void r_light_enable(uint32_t i, uint32_t on) { if (i < 8) R.light_on[i] = on != 0; }
+uint32_t r_light_enabled(uint32_t i) { return i < 8 ? (uint32_t)R.light_on[i] : 0; }
+void r_set_material(uint32_t p) { for (int k = 0; k < 17; k++) R.material[k] = MF32(p + 4 * (uint32_t)k); }
+void r_get_material(uint32_t p) { for (int k = 0; k < 17; k++) MF32(p + 4 * (uint32_t)k) = R.material[k]; }
 uint32_t r_get_render_state(uint32_t s) { return s < 256 ? R.rs[s] : 0; }
 void r_set_tss(uint32_t st, uint32_t t, uint32_t v) { if (st < 8 && t < 33) R.tss[st][t] = v; }
 uint32_t r_get_tss(uint32_t st, uint32_t t) { return st < 8 && t < 33 ? R.tss[st][t] : 0; }
@@ -295,15 +316,64 @@ static void xform(const Mat* m, const float in[4], float out[4]) {
     for (int j = 0; j < 4; j++) out[j] = in[0] * m->m[j] + in[1] * m->m[4 + j] + in[2] * m->m[8 + j] + in[3] * m->m[12 + j];
 }
 
+/* Fixed-function vertex lighting (world space; directional, point and spot lights treated as point). */
+static uint32_t light_vertex(const float pos[3], const float nrm_in[3], int has_color, uint32_t vcolor) {
+    float n[3];
+    for (int j = 0; j < 3; j++) n[j] = nrm_in[0] * R.world.m[j] + nrm_in[1] * R.world.m[4 + j] + nrm_in[2] * R.world.m[8 + j];
+    float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    if (len > 0) for (int j = 0; j < 3; j++) n[j] /= len;
+    float vc[4] = {((vcolor >> 16) & 255) / 255.0f, ((vcolor >> 8) & 255) / 255.0f, (vcolor & 255) / 255.0f, (vcolor >> 24) / 255.0f};
+    int colorvertex = R.rs[141] && has_color;
+    const float* dsrc = colorvertex && R.rs[145] == 1 ? vc : R.material + 0;
+    const float* asrc = colorvertex && R.rs[147] == 1 ? vc : R.material + 4;
+    const float* esrc = colorvertex && R.rs[148] == 1 ? vc : R.material + 12;
+    uint32_t amb = R.rs[139];
+    float ga[3] = {((amb >> 16) & 255) / 255.0f, ((amb >> 8) & 255) / 255.0f, (amb & 255) / 255.0f};
+    float out[3];
+    for (int ch = 0; ch < 3; ch++) out[ch] = esrc[ch] + ga[ch] * asrc[ch];
+    for (int i = 0; i < 8; i++) {
+        if (!R.light_on[i]) continue;
+        const float* L = R.light[i];
+        float dir[3], atten = 1;
+        if ((int)L[0] == 3) {
+            for (int j = 0; j < 3; j++) dir[j] = -L[16 + j];
+        } else {
+            float d2 = 0;
+            for (int j = 0; j < 3; j++) { dir[j] = L[13 + j] - pos[j]; d2 += dir[j] * dir[j]; }
+            float d = sqrtf(d2);
+            if (L[19] > 0 && d > L[19]) continue;
+            float a = L[21] + L[22] * d + L[23] * d2;
+            atten = a > 0 ? 1 / a : 1;
+        }
+        float dl = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        float ndotl = dl > 0 ? (n[0] * dir[0] + n[1] * dir[1] + n[2] * dir[2]) / dl : 0;
+        if (ndotl < 0) ndotl = 0;
+        for (int ch = 0; ch < 3; ch++) out[ch] += atten * (L[9 + ch] * asrc[ch] + ndotl * L[1 + ch] * dsrc[ch]);
+    }
+    uint32_t r = 0;
+    for (int ch = 0; ch < 3; ch++) {
+        float v = out[ch] < 0 ? 0 : out[ch] > 1 ? 1 : out[ch];
+        r |= (uint32_t)(v * 255 + 0.5f) << (16 - 8 * ch);
+    }
+    float a = dsrc[3] < 0 ? 0 : dsrc[3] > 1 ? 1 : dsrc[3];
+    return r | (uint32_t)(a * 255 + 0.5f) << 24;
+}
+
 static void fetch(uint32_t p, Vtx* o) {
     uint32_t fvf = R.fvf, off = 0, pos = fvf & 0xe;
     float in[4] = {MF32(p), MF32(p + 4), MF32(p + 8), 1}, t[4], c[4];
     off = pos == 4 ? 16 : 12;
     if (pos >= 6 && pos <= 0xe) off += 4 * ((pos - 4) / 2);
+    uint32_t normal_at = off;
     if (fvf & 0x10) off += 12;
     if (fvf & 0x20) off += 4;
     o->diffuse = 0xffffffffu;
     if (fvf & 0x40) { o->diffuse = M32(p + off); off += 4; }
+    if (R.rs[137] && (fvf & 0x10) && pos != 4) {
+        float wp[4], nrm[3] = {MF32(p + normal_at), MF32(p + normal_at + 4), MF32(p + normal_at + 8)};
+        xform(&R.world, in, wp);
+        o->diffuse = light_vertex(wp, nrm, (fvf & 0x40) != 0, o->diffuse);
+    }
     if (fvf & 0x80) off += 4;
     float sets[4][4];
     uint32_t nsets = (fvf >> 8) & 15;
