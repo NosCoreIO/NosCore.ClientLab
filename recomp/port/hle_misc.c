@@ -1,4 +1,4 @@
-/* The long tail of startup imports: OLE strings, version info, menus, file mappings, threads, plus no-op Miles,
+/* The long tail of startup imports: version info, menus, file mappings, threads, plus no-op Miles,
    Steam and Winsock stand-ins until audio and the WebSocket bridge exist. */
 #include "port.h"
 #include <ctype.h>
@@ -9,29 +9,6 @@
 #define RET(v) (c->eax = (uint32_t)(v))
 
 static void r_zero(CPU* c) { RET(0); }
-
-/* ---- OLE automation strings (BSTR: length prefix in bytes, then UTF-16, then NUL) ---- */
-
-static uint32_t bstr_alloc(uint32_t src, uint32_t chars) {
-    uint32_t p = guest_alloc(4 + 2 * chars + 2, 16);
-    M32(p) = 2 * chars;
-    if (src) memcpy(GPTR(p + 4), GPTR(src), 2 * chars);
-    M16(p + 4 + 2 * chars) = 0;
-    return p + 4;
-}
-static void o_SysAllocStringLen(CPU* c) { RET(bstr_alloc(ARG(0), ARG(1))); }
-static void o_SysFreeString(CPU* c) { if (ARG(0)) guest_free(ARG(0) - 4); }
-static void o_SysReAllocStringLen(CPU* c) {
-    uint32_t old = M32(ARG(0)), n = bstr_alloc(ARG(1), ARG(2));
-    if (old) guest_free(old - 4);
-    M32(ARG(0)) = n;
-    RET(1);
-}
-static void o_SysStringLen(CPU* c) { RET(ARG(0) ? M32(ARG(0) - 4) / 2 : 0); }
-static void o_VariantInit(CPU* c) { memset(GPTR(ARG(0)), 0, 16); }
-static void o_VariantClear(CPU* c) { memset(GPTR(ARG(0)), 0, 16); RET(0); }
-static void o_VariantCopy(CPU* c) { memcpy(GPTR(ARG(0)), GPTR(ARG(1)), 16); RET(0); }
-static void o_CoInitialize(CPU* c) { RET(0); }
 
 /* ---- strings and formatting ---- */
 
@@ -470,15 +447,6 @@ static void n_RtlGetVersion(CPU* c) {
 #define S(n) {"steam_wrapper.dll", #n, CDECL_ARGS, r_zero}
 
 static const Hle misc[] = {
-    {"oleaut32.dll", "SysAllocStringLen", 2, o_SysAllocStringLen},
-    {"oleaut32.dll", "SysFreeString", 1, o_SysFreeString},
-    {"oleaut32.dll", "SysReAllocStringLen", 3, o_SysReAllocStringLen},
-    {"oleaut32.dll", "SysStringLen", 1, o_SysStringLen},
-    {"oleaut32.dll", "VariantInit", 1, o_VariantInit},
-    {"oleaut32.dll", "VariantClear", 1, o_VariantClear},
-    {"oleaut32.dll", "VariantCopy", 2, o_VariantCopy},
-    {"ole32.dll", "CoInitialize", 1, o_CoInitialize},
-    {"ole32.dll", "CoUninitialize", 0, r_zero},
     {"ntdll.dll", "RtlGetVersion", 1, n_RtlGetVersion},
     K(CompareStringA, 6, k_CompareStringA),
     K(FormatMessageA, 7, k_FormatMessageA),

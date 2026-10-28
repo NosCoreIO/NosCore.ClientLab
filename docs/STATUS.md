@@ -57,7 +57,7 @@ The same generated C, built with Emscripten and linked with `recomp/port/` (a ho
 
 - Build and run: `recomp/wasm/run_node.ps1` (incremental compile with `emcc`, link `nostale.js` + `nostale.wasm` of about 37 MB, run under Node). Logs go to `C:\tools\re\work\wasm\stderr.txt`; `PORT_TRACE=1` logs every API call.
 - Layout: the image is mapped at `0x400000` in linear memory, Emscripten's own memory sits above `GLOBAL_BASE` (`0x20000000`), and the guest stack and TEB sit at fixed guest addresses. Imports become trampolines at `0x0ff00000+` dispatching to `hle_*.c`.
-- Unimplemented APIs with a known stdcall argument count are soft stubs: logged once, return 0. Counts come from the SDK import libraries plus `EWDL.EWS`, which is actually D3DX9. `argc_table.c` is generated.
+- Every import of the current client has an implementation. `GetProcAddress` returns NULL for a name without one, as Windows does for a missing export. An import a newer client adds before it is implemented becomes a soft stub (logged once, returns 0) when its stdcall argument count is known. Counts come from the SDK import libraries plus `EWDL.EWS`, which is actually D3DX9. `argc_table.c` is generated.
 - No `setjmp` in portable mode: Delphi's non-local except jumps propagate outward by returning (`guest_call` / `rt_call_host_raw`). Emscripten's setjmp transform takes forever on the huge generated functions.
 - VCL's runtime-written window thunks (`call` / `pop ecx` / `jmp StdWndProc`) are emulated.
 - Under Node the software rasteriser renders and audio is silent; networking is relayed only in the browser build, so under Node `connect` is refused.

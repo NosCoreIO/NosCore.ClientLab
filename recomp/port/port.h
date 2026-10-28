@@ -42,6 +42,7 @@ extern const int stdcall_argc_count;
 
 void hle_register(const Hle* table, int count);
 uint32_t hle_trampoline(const char* dll, const char* name);
+int hle_implemented(const char* dll, const char* name);
 uint32_t hle_module_handle(const char* dll);
 const char* hle_module_name(uint32_t handle);
 
@@ -98,7 +99,11 @@ uint32_t hle_atom_find(const char* name);
 void hle_menu_register(void);
 void hle_dc_fill(uint32_t dc, int l, int t, int r, int b, uint32_t brush);
 void hle_dc_scroll_window(uint32_t hwnd, int dx, int dy, int l, int t, int r, int b);
+uint32_t hle_dc_memory(uint32_t bmp);
+uint32_t hle_dc_delete(uint32_t dc);
+int hle_dc_read(uint32_t dc, int w, int h, uint32_t* out);
 void hle_misc_register(void);
+void hle_ole_register(void);
 void hle_gdi_register(void);
 void hle_dc_register(void);
 void hle_audio_register(void);

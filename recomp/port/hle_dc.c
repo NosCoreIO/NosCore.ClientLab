@@ -1,7 +1,7 @@
 /* GDI device contexts and everything drawn through them: fonts and text (glyphs come from the browser's font engine
    via OffscreenCanvas), brushes, pens, palettes, blits with raster operations, user32's painting helpers (system
    colours, edges, frame controls, DrawText), icons and cursors (the active cursor becomes the page's CSS cursor),
-   window DCs backed by bitmaps, and enhanced/Windows metafiles. */
+   window DCs backed by bitmaps, comctl32 image lists, and enhanced/Windows metafiles. */
 #include "port.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -382,6 +382,32 @@ static int clipped(Dc* d, GdiBitmap* b, int x, int y) {
     for (int k = 0; k < d->s.nexcl; k++)
         if (x >= d->s.excl[k][0] && y >= d->s.excl[k][1] && x < d->s.excl[k][2] && y < d->s.excl[k][3]) return 1;
     return 0;
+}
+
+uint32_t hle_dc_memory(uint32_t bmp) {
+    uint32_t h = dc_create(DC_MEMORY);
+    dc_get(h)->s.bmp = bmp;
+    return h;
+}
+/* Returns the bitmap that was selected into it. */
+uint32_t hle_dc_delete(uint32_t dc) {
+    Dc* d = dc_get(dc);
+    if (!d) return 0;
+    d->used = 0;
+    return d->s.bmp;
+}
+/* w x h pixels from the DC's origin as 0xAARRGGBB (alpha 255); pixels outside its surface read as black. */
+int hle_dc_read(uint32_t dc, int w, int h, uint32_t* out) {
+    Dc* d = dc_get(dc);
+    GdiBitmap b;
+    if (!dc_target(d, &b)) return 0;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int X = lx(d, x), Y = ly(d, y);
+            uint32_t p = X >= 0 && Y >= 0 && X < b.w && Y < b.h ? px_get(&b, X, Y) : 0;
+            out[(long)y * w + x] = 0xff000000u | (p & 0xff) << 16 | (p & 0xff00) | (p >> 16 & 0xff);
+        }
+    return 1;
 }
 
 /* ---- raster operations ---- */
@@ -1697,6 +1723,432 @@ static void u_LoadBitmapA(CPU* c) {
     RET(bmp);
 }
 
+/* ---- image lists (comctl32) ---- */
+
+/* Each image is cx x cy pixels stored as 0xAABBGGRR plus a transparency mask (1 = transparent). Alpha below 255
+   only comes from 32bpp sources added to an ILC_COLOR32 list. */
+#define IL_BASE 0x07400000u
+#define MAX_IL 256
+#define ILC_MASK 1u
+#define ILC_COLOR32 0x20u
+#define CLR_NONE 0xffffffffu
+#define CLR_DEFAULT 0xff000000u
+typedef struct {
+    int used, cx, cy, count, cap, grow;
+    uint32_t flags, bk;
+    uint32_t* px;
+    uint8_t* mask;
+} ImageList;
+static ImageList image_lists[MAX_IL];
+GETTER(il_get, ImageList, IL_BASE, MAX_IL, image_lists)
+ALLOC(il_new_slot, ImageList, IL_BASE, MAX_IL, image_lists)
+
+static uint32_t il_create(int cx, int cy, uint32_t flags, int initial, int grow) {
+    ImageList* il;
+    uint32_t h = il_new_slot(&il);
+    il->cx = cx; il->cy = cy; il->flags = flags; il->grow = grow > 0 ? grow : 4; il->bk = CLR_NONE;
+    il->cap = initial > 0 ? initial : 1;
+    il->px = calloc((size_t)il->cap * (size_t)(cx * cy), 4);
+    il->mask = calloc((size_t)il->cap * (size_t)(cx * cy), 1);
+    return h;
+}
+static void il_free(ImageList* il) { free(il->px); free(il->mask); il->used = 0; }
+static uint32_t* il_px(ImageList* il, int i) { return il->px + (size_t)i * (size_t)(il->cx * il->cy); }
+static uint8_t* il_mask(ImageList* il, int i) { return il->mask + (size_t)i * (size_t)(il->cx * il->cy); }
+static int il_append(ImageList* il) {
+    if (il->count == il->cap) {
+        il->cap += il->grow;
+        size_t n = (size_t)il->cap * (size_t)(il->cx * il->cy);
+        il->px = realloc(il->px, n * 4);
+        il->mask = realloc(il->mask, n);
+    }
+    memset(il_px(il, il->count), 0, (size_t)(il->cx * il->cy) * 4);
+    memset(il_mask(il, il->count), 0, (size_t)(il->cx * il->cy));
+    return il->count++;
+}
+
+/* Copies the cx x cy tile at (sx, sy) of a bitmap into image i; mask pixels that are set become transparent. */
+static void il_set_image(ImageList* il, int i, GdiBitmap* img, GdiBitmap* mask, int sx, int sy) {
+    uint32_t* px = il_px(il, i);
+    uint8_t* m = il_mask(il, i);
+    int alpha = img->bpp == 32 && (il->flags & 0xfe) == ILC_COLOR32, any_alpha = 0;
+    for (int y = 0; y < il->cy; y++)
+        for (int x = 0; x < il->cx; x++) {
+            int X = sx + x, Y = sy + y, k = y * il->cx + x;
+            if (X >= img->w || Y >= img->h) { px[k] = 0xff000000u; m[k] = (il->flags & ILC_MASK) != 0; continue; }
+            uint32_t a = alpha ? row_ptr(img, Y)[4 * X + 3] : 0xff;
+            any_alpha |= a != 0;
+            px[k] = px_get(img, X, Y) | a << 24;
+            m[k] = (il->flags & ILC_MASK) && mask && X < mask->w && Y < mask->h && (px_get(mask, X, Y) & 0xffffff);
+        }
+    if (alpha && !any_alpha)
+        for (int k = 0; k < il->cx * il->cy; k++) px[k] |= 0xff000000u;
+}
+static void il_set_icon(ImageList* il, int i, Icon* ic) {
+    GdiBitmap cb, mb;
+    gdi_bitmap(ic->color, &cb);
+    gdi_bitmap(ic->mask, &mb);
+    uint32_t* px = il_px(il, i);
+    uint8_t* m = il_mask(il, i);
+    for (int y = 0; y < il->cy; y++)
+        for (int x = 0; x < il->cx; x++) {
+            int sx = x * ic->w / il->cx, sy = y * ic->h / il->cy, k = y * il->cx + x;
+            uint8_t* p = row_ptr(&cb, sy) + 4 * sx;
+            uint32_t a = ic->has_alpha && (il->flags & 0xfe) == ILC_COLOR32 ? p[3] : 0xff;
+            int t = ic->has_alpha ? p[3] == 0 : px_get(&mb, sx, sy) != 0;
+            px[k] = (p[2] | p[1] << 8 | (uint32_t)p[0] << 16) | a << 24;
+            m[k] = (il->flags & ILC_MASK) && t;
+        }
+}
+
+static uint32_t blend(uint32_t src, uint32_t dst, uint32_t a) {
+    uint32_t out = 0;
+    for (int k = 0; k < 24; k += 8) out |= (((src >> k & 0xff) * a + (dst >> k & 0xff) * (255 - a)) / 255) << k;
+    return out;
+}
+
+/* ILD_TRANSPARENT 1, ILD_BLEND25 2, ILD_BLEND50 4, ILD_MASK 0x10, ILD_IMAGE 0x20. */
+static int il_draw(ImageList* il, int i, uint32_t hdc, int x0, int y0, int w, int h, uint32_t bk, uint32_t fg, uint32_t style) {
+    Dc* d = dc_get(hdc);
+    GdiBitmap b;
+    if (!il || i < 0 || i >= il->count || !dc_target(d, &b)) return 0;
+    if (w <= 0 || w > il->cx) w = il->cx;
+    if (h <= 0 || h > il->cy) h = il->cy;
+    if (bk == CLR_DEFAULT) bk = il->bk;
+    if (style & 1) bk = CLR_NONE;
+    if (fg == CLR_DEFAULT) fg = sys_color(13);
+    uint32_t mix = style & 4 ? 128 : style & 2 ? 64 : 0;
+    uint32_t* px = il_px(il, i);
+    uint8_t* m = il_mask(il, i);
+    x0 = lx(d, x0); y0 = ly(d, y0);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            int X = x0 + x, Y = y0 + y, k = y * il->cx + x;
+            if (clipped(d, &b, X, Y)) continue;
+            if ((style & 0x30) == 0x10) { px_set(&b, X, Y, m[k] ? 0xffffff : 0); continue; }
+            uint32_t col = px[k] & 0xffffff, a = px[k] >> 24;
+            if (!(style & 0x20) && m[k]) {
+                if (bk != CLR_NONE) px_set(&b, X, Y, bk & 0xffffff);
+                continue;
+            }
+            if (mix && fg != CLR_NONE) col = blend(fg & 0xffffff, col, mix);
+            uint32_t under = bk != CLR_NONE && !(il->flags & ILC_MASK) ? bk & 0xffffff : px_get(&b, X, Y);
+            px_set(&b, X, Y, a == 0xff ? col : blend(col, under, a));
+        }
+    return 1;
+}
+
+static void c_ImageList_Create(CPU* c) {
+    int cx = (int)ARG(0), cy = (int)ARG(1);
+    RET(cx > 0 && cy > 0 ? il_create(cx, cy, ARG(2), (int)ARG(3), (int)ARG(4)) : 0);
+}
+static void c_ImageList_Destroy(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    if (il) il_free(il);
+    RET(il != 0);
+}
+static void c_ImageList_Add(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    GdiBitmap img, mask;
+    if (!il || !gdi_bitmap(ARG(1), &img)) { RET(-1); return; }
+    int has_mask = ARG(2) && gdi_bitmap(ARG(2), &mask), n = img.w / il->cx, first = il->count;
+    if (n < 1) n = 1;
+    for (int k = 0; k < n; k++) il_set_image(il, il_append(il), &img, has_mask ? &mask : 0, k * il->cx, 0);
+    RET(first);
+}
+static void c_ImageList_ReplaceIcon(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    Icon* ic = icon_get(ARG(2));
+    int i = (int)ARG(1);
+    if (!il || !ic || i < -1 || i >= il->count) { RET(-1); return; }
+    if (i == -1) i = il_append(il);
+    il_set_icon(il, i, ic);
+    RET(i);
+}
+static void c_ImageList_Remove(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    int i = (int)ARG(1);
+    if (!il || i < -1 || i >= il->count) { RET(0); return; }
+    if (i == -1) { il->count = 0; RET(1); return; }
+    size_t n = (size_t)(il->cx * il->cy);
+    memmove(il_px(il, i), il_px(il, i + 1), (size_t)(il->count - i - 1) * n * 4);
+    memmove(il_mask(il, i), il_mask(il, i + 1), (size_t)(il->count - i - 1) * n);
+    il->count--;
+    RET(1);
+}
+static void c_ImageList_Draw(CPU* c) {
+    RET(il_draw(il_get(ARG(0)), (int)ARG(1), ARG(2), (int)ARG(3), (int)ARG(4), 0, 0, CLR_DEFAULT, CLR_DEFAULT, ARG(5)));
+}
+static void c_ImageList_DrawEx(CPU* c) {
+    RET(il_draw(il_get(ARG(0)), (int)ARG(1), ARG(2), (int)ARG(3), (int)ARG(4), (int)ARG(5), (int)ARG(6), ARG(7), ARG(8), ARG(9)));
+}
+static void c_ImageList_GetBkColor(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    RET(il ? il->bk : CLR_NONE);
+}
+static void c_ImageList_SetBkColor(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    if (!il) { RET(CLR_NONE); return; }
+    uint32_t old = il->bk;
+    il->bk = ARG(1);
+    RET(old);
+}
+static void c_ImageList_GetIconSize(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    if (!il || !ARG(1) || !ARG(2)) { RET(0); return; }
+    M32(ARG(1)) = (uint32_t)il->cx;
+    M32(ARG(2)) = (uint32_t)il->cy;
+    RET(1);
+}
+static void c_ImageList_SetIconSize(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    int cx = (int)ARG(1), cy = (int)ARG(2);
+    if (!il || cx <= 0 || cy <= 0) { RET(0); return; }
+    il->cx = cx; il->cy = cy; il->count = 0;
+    il->px = realloc(il->px, (size_t)il->cap * (size_t)(cx * cy) * 4);
+    il->mask = realloc(il->mask, (size_t)il->cap * (size_t)(cx * cy));
+    RET(1);
+}
+static void c_ImageList_GetImageCount(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    RET(il ? il->count : 0);
+}
+
+/* Image i of a and image j of b overlaid, b offset by (dx, dy) from a; a pixel is transparent only where both are. */
+static uint32_t il_merge(ImageList* a, int i, ImageList* b, int j, int dx, int dy) {
+    int ax = dx < 0 ? -dx : 0, ay = dy < 0 ? -dy : 0, bx = dx > 0 ? dx : 0, by = dy > 0 ? dy : 0;
+    int cx = ax + a->cx > bx + b->cx ? ax + a->cx : bx + b->cx, cy = ay + a->cy > by + b->cy ? ay + a->cy : by + b->cy;
+    uint32_t h = il_create(cx, cy, ILC_MASK | (a->flags & 0xfe), 1, 1);
+    ImageList* r = il_get(h);
+    int k = il_append(r);
+    uint32_t* px = il_px(r, k);
+    uint8_t* m = il_mask(r, k);
+    memset(m, 1, (size_t)(cx * cy));
+    ImageList* src[2] = {a, b};
+    int idx[2] = {i, j}, ox[2] = {ax, bx}, oy[2] = {ay, by};
+    for (int s = 0; s < 2; s++)
+        for (int y = 0; y < src[s]->cy; y++)
+            for (int x = 0; x < src[s]->cx; x++) {
+                int from = y * src[s]->cx + x, to = (oy[s] + y) * cx + ox[s] + x;
+                if (il_mask(src[s], idx[s])[from]) continue;
+                px[to] = il_px(src[s], idx[s])[from];
+                m[to] = 0;
+            }
+    return h;
+}
+
+/* The drag image is drawn straight onto the lock window's surface; the pixels under it are kept and put back
+   whenever it moves or hides. */
+static struct {
+    uint32_t il, plain, hwnd;
+    int hx, hy, x, y, visible;
+    uint32_t* under;
+    int ux, uy, uw, uh;
+} drag;
+
+static void drag_restore(void) {
+    GdiBitmap b;
+    if (!drag.under) return;
+    if (gdi_bitmap(window_surface(drag.hwnd), &b))
+        for (int y = 0; y < drag.uh; y++)
+            for (int x = 0; x < drag.uw; x++) {
+                int X = drag.ux + x, Y = drag.uy + y;
+                if (X >= 0 && Y >= 0 && X < b.w && Y < b.h) px_set(&b, X, Y, drag.under[y * drag.uw + x]);
+            }
+    free(drag.under);
+    drag.under = 0;
+}
+static void drag_paint(void) {
+    ImageList* il = il_get(drag.il);
+    GdiBitmap b;
+    if (!il || !il->count || !gdi_bitmap(window_surface(drag.hwnd), &b)) return;
+    drag.ux = drag.x - drag.hx; drag.uy = drag.y - drag.hy; drag.uw = il->cx; drag.uh = il->cy;
+    drag.under = malloc((size_t)(drag.uw * drag.uh) * 4);
+    for (int y = 0; y < drag.uh; y++)
+        for (int x = 0; x < drag.uw; x++) {
+            int X = drag.ux + x, Y = drag.uy + y;
+            drag.under[y * drag.uw + x] = X >= 0 && Y >= 0 && X < b.w && Y < b.h ? px_get(&b, X, Y) : 0;
+        }
+    uint32_t dc = dc_create(DC_WINDOW);
+    dc_get(dc)->hwnd = drag.hwnd;
+    il_draw(il, 0, dc, drag.ux, drag.uy, 0, 0, CLR_NONE, CLR_NONE, 0);
+    dc_get(dc)->used = 0;
+}
+static void drag_end(void) {
+    drag_restore();
+    if (il_get(drag.il)) il_free(il_get(drag.il));
+    if (il_get(drag.plain)) il_free(il_get(drag.plain));
+    memset(&drag, 0, sizeof drag);
+}
+static uint32_t il_copy_one(ImageList* il, int i) {
+    uint32_t h = il_create(il->cx, il->cy, il->flags | ILC_MASK, 1, 1);
+    ImageList* r = il_get(h);
+    int k = il_append(r);
+    memcpy(il_px(r, k), il_px(il, i), (size_t)(il->cx * il->cy) * 4);
+    if (il->flags & ILC_MASK) memcpy(il_mask(r, k), il_mask(il, i), (size_t)(il->cx * il->cy));
+    return h;
+}
+static void c_ImageList_BeginDrag(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    int i = (int)ARG(1);
+    if (!il || i < 0 || i >= il->count) { RET(0); return; }
+    drag_end();
+    drag.plain = il_copy_one(il, i);
+    drag.il = il_copy_one(il, i);
+    drag.hx = (int)ARG(2);
+    drag.hy = (int)ARG(3);
+    RET(1);
+}
+static void c_ImageList_EndDrag(CPU* c) { drag_end(); RET(1); }
+static void c_ImageList_DragEnter(CPU* c) {
+    if (!drag.il) { RET(0); return; }
+    drag_restore();
+    drag.hwnd = ARG(0);
+    drag.x = (int)ARG(1);
+    drag.y = (int)ARG(2);
+    drag.visible = 1;
+    drag_paint();
+    RET(1);
+}
+static void c_ImageList_DragLeave(CPU* c) {
+    drag_restore();
+    drag.visible = 0;
+    RET(1);
+}
+static void c_ImageList_DragMove(CPU* c) {
+    if (!drag.il) { RET(0); return; }
+    drag.x = (int)ARG(0);
+    drag.y = (int)ARG(1);
+    if (drag.visible) { drag_restore(); drag_paint(); }
+    RET(1);
+}
+static void c_ImageList_DragShowNolock(CPU* c) {
+    if (!drag.il) { RET(0); return; }
+    if (ARG(0) && !drag.visible) drag_paint();
+    if (!ARG(0) && drag.visible) drag_restore();
+    drag.visible = ARG(0) != 0;
+    RET(1);
+}
+static void c_ImageList_SetDragCursorImage(CPU* c) {
+    ImageList *cur = il_get(ARG(0)), *plain = il_get(drag.plain);
+    int i = (int)ARG(1);
+    if (!cur || !plain || i < 0 || i >= cur->count) { RET(0); return; }
+    int visible = drag.visible;
+    if (visible) drag_restore();
+    int dx = drag.hx - (int)ARG(2), dy = drag.hy - (int)ARG(3);
+    uint32_t merged = il_merge(plain, 0, cur, i, dx, dy);
+    if (dx <= 0) drag.hx = (int)ARG(2);
+    if (dy <= 0) drag.hy = (int)ARG(3);
+    if (il_get(drag.il)) il_free(il_get(drag.il));
+    drag.il = merged;
+    if (visible) drag_paint();
+    RET(1);
+}
+static void c_ImageList_GetDragImage(CPU* c) {
+    if (!drag.il) { RET(0); return; }
+    if (ARG(0)) { M32(ARG(0)) = (uint32_t)drag.x; M32(ARG(0) + 4) = (uint32_t)drag.y; }
+    if (ARG(1)) { M32(ARG(1)) = (uint32_t)drag.hx; M32(ARG(1) + 4) = (uint32_t)drag.hy; }
+    RET(drag.il);
+}
+
+/* ImageList_Read/Write stream an ILHEAD followed by the images as a BMP file four images wide and, for masked
+   lists, the mask as a second 1bpp BMP of the same layout. The stream is a guest IStream. */
+static int stream_io(CPU* c, uint32_t stream, int write, void* buf, uint32_t n) {
+    uint32_t g = guest_alloc(n + 4, 16);
+    if (write) memcpy(GPTR(g), buf, n);
+    uint32_t hr = guest_call(c, M32(M32(stream) + (write ? 16u : 12u)), 4, stream, g, n, g + n);
+    uint32_t done = M32(g + n);
+    if (!write) memcpy(buf, GPTR(g), n);
+    guest_free(g);
+    return !hr && done == n;
+}
+static uint32_t read_bmp(CPU* c, uint32_t stream) {
+    uint8_t fh[14], ih[40];
+    if (!stream_io(c, stream, 0, fh, 14) || fh[0] != 'B' || fh[1] != 'M' || !stream_io(c, stream, 0, ih, 40)) return 0;
+    uint32_t hdr = ih[0] | ih[1] << 8 | ih[2] << 16 | (uint32_t)ih[3] << 24;
+    int32_t w = (int32_t)(ih[4] | ih[5] << 8 | ih[6] << 16 | (uint32_t)ih[7] << 24);
+    int32_t h = (int32_t)(ih[8] | ih[9] << 8 | ih[10] << 16 | (uint32_t)ih[11] << 24);
+    uint32_t bpp = ih[14] | ih[15] << 8, used = ih[32] | ih[33] << 8 | ih[34] << 16 | (uint32_t)ih[35] << 24;
+    uint32_t off = fh[10] | fh[11] << 8 | fh[12] << 16 | (uint32_t)fh[13] << 24;
+    if (hdr < 40 || w <= 0 || !h || off < 14 + hdr) return 0;
+    uint8_t* rest = malloc(off - 14 - 40);
+    if (off > 54 && !stream_io(c, stream, 0, rest, off - 54)) { free(rest); return 0; }
+    uint32_t bmp = gdi_new_bitmap(w, h, bpp);
+    GdiBitmap b;
+    gdi_bitmap(bmp, &b);
+    uint32_t ncol = bpp <= 8 ? (used ? used : 1u << bpp) : 0;
+    for (uint32_t k = 0; k < ncol && k < b.ncolors && hdr - 40 + 4 * k + 4 <= off - 54; k++)
+        memcpy(&b.colors[k], rest + hdr - 40 + 4 * k, 4), b.colors[k] &= 0xffffff;
+    free(rest);
+    uint8_t* bits = malloc(b.stride * (uint32_t)b.h);
+    int ok = stream_io(c, stream, 0, bits, b.stride * (uint32_t)b.h);
+    memcpy(GPTR(b.bits), bits, b.stride * (uint32_t)b.h);
+    free(bits);
+    if (!ok) { gdi_delete_bitmap(bmp); return 0; }
+    return bmp;
+}
+static void c_ImageList_Read(CPU* c) {
+    uint8_t head[28];
+    if (!stream_io(c, ARG(0), 0, head, 28) || head[0] != 'I' || head[1] != 'L') { RET(0); return; }
+    int count = head[4] | head[5] << 8, grow = head[8] | head[9] << 8, cx = head[10] | head[11] << 8, cy = head[12] | head[13] << 8;
+    uint32_t bk = head[14] | head[15] << 8 | head[16] << 16 | (uint32_t)head[17] << 24, flags = head[18] | head[19] << 8;
+    if (cx <= 0 || cy <= 0) { RET(0); return; }
+    uint32_t img = read_bmp(c, ARG(0)), mask = img && (flags & ILC_MASK) ? read_bmp(c, ARG(0)) : 0;
+    if (!img || ((flags & ILC_MASK) && !mask)) { gdi_delete_bitmap(img); RET(0); return; }
+    uint32_t h = il_create(cx, cy, flags, count, grow);
+    ImageList* il = il_get(h);
+    il->bk = bk;
+    GdiBitmap ib, mb;
+    gdi_bitmap(img, &ib);
+    if (mask) gdi_bitmap(mask, &mb);
+    for (int k = 0; k < count; k++) il_set_image(il, il_append(il), &ib, mask ? &mb : 0, k % 4 * cx, k / 4 * cy);
+    gdi_delete_bitmap(img);
+    if (mask) gdi_delete_bitmap(mask);
+    RET(h);
+}
+static void put32(uint8_t* p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
+static int write_bmp(CPU* c, uint32_t stream, ImageList* il, int mono) {
+    int rows = (il->count + 3) / 4, w = 4 * il->cx, h = rows * il->cy;
+    if (h < 1) h = 1;
+    uint32_t bpp = mono ? 1 : 32, stride = ((uint32_t)w * bpp + 31) / 32 * 4, ncol = mono ? 2 : 0;
+    uint32_t off = 54 + 4 * ncol, size = off + stride * (uint32_t)h;
+    uint8_t* f = calloc(size, 1);
+    f[0] = 'B'; f[1] = 'M';
+    put32(f + 2, size); put32(f + 10, off); put32(f + 14, 40); put32(f + 18, (uint32_t)w); put32(f + 22, (uint32_t)h);
+    f[26] = 1; f[28] = (uint8_t)bpp; put32(f + 34, stride * (uint32_t)h);
+    if (mono) put32(f + 58, 0xffffff);
+    for (int i = 0; i < il->count; i++)
+        for (int y = 0; y < il->cy; y++)
+            for (int x = 0; x < il->cx; x++) {
+                int X = i % 4 * il->cx + x, Y = i / 4 * il->cy + y, k = y * il->cx + x;
+                uint8_t* row = f + off + stride * (uint32_t)(h - 1 - Y);
+                if (mono) { if (il_mask(il, i)[k]) row[X / 8] |= (uint8_t)(0x80 >> (X & 7)); continue; }
+                uint32_t p = il_px(il, i)[k];
+                row[4 * X] = (uint8_t)(p >> 16); row[4 * X + 1] = (uint8_t)(p >> 8); row[4 * X + 2] = (uint8_t)p; row[4 * X + 3] = (uint8_t)(p >> 24);
+            }
+    int ok = stream_io(c, stream, 1, f, size);
+    free(f);
+    return ok;
+}
+static void c_ImageList_Write(CPU* c) {
+    ImageList* il = il_get(ARG(0));
+    if (!il) { RET(0); return; }
+    uint8_t head[28] = {'I', 'L', 0x01, 0x01};
+    head[4] = (uint8_t)il->count; head[5] = (uint8_t)(il->count >> 8);
+    int max = (il->count + 3) / 4 * 4;
+    head[6] = (uint8_t)max; head[7] = (uint8_t)(max >> 8);
+    head[8] = (uint8_t)il->grow; head[9] = (uint8_t)(il->grow >> 8);
+    head[10] = (uint8_t)il->cx; head[11] = (uint8_t)(il->cx >> 8);
+    head[12] = (uint8_t)il->cy; head[13] = (uint8_t)(il->cy >> 8);
+    put32(head + 14, il->bk);
+    uint32_t flags = (il->flags & ILC_MASK) | ILC_COLOR32;
+    head[18] = (uint8_t)flags; head[19] = (uint8_t)(flags >> 8);
+    memset(head + 20, 0xff, 8);
+    int ok = stream_io(c, ARG(1), 1, head, 28) && write_bmp(c, ARG(1), il, 0);
+    if (ok && (il->flags & ILC_MASK)) ok = write_bmp(c, ARG(1), il, 1);
+    RET(ok);
+}
+
 /* ---- metafiles ---- */
 
 /* A metafile DC records onto a bitmap the size of its frame (.01 mm at 96 dpi), so playing it back reproduces what
@@ -1953,6 +2405,7 @@ static void g_SetWinMetaFileBits(CPU* c) {
 
 #define G(n, a) {"gdi32.dll", #n, a, g_##n}
 #define U(n, a) {"user32.dll", #n, a, u_##n}
+#define C(n, a) {"comctl32.dll", "ImageList_" #n, a, c_ImageList_##n}
 static const Hle dc_table[] = {
     G(CreateFontIndirectA, 1), G(CreateSolidBrush, 1), G(CreateBrushIndirect, 1), G(CreatePenIndirect, 1),
     G(CreatePalette, 1), G(CreateHalftonePalette, 1), G(CreateCompatibleDC, 1), G(DeleteDC, 1), G(SelectObject, 2),
@@ -1976,6 +2429,10 @@ static const Hle dc_table[] = {
     U(LoadIconA, 2), U(LoadCursorA, 2), U(LoadCursorFromFileA, 1), U(SetCursor, 1), U(GetCursor, 0), U(ShowCursor, 1),
     U(DestroyIcon, 1), U(DestroyCursor, 1), U(CopyIcon, 1), U(GetIconInfo, 2), U(CreateIcon, 7), U(DrawIconEx, 9),
     U(DrawIcon, 4), U(LoadBitmapA, 2),
+    C(Create, 5), C(Destroy, 1), C(Add, 3), C(ReplaceIcon, 3), C(Remove, 2), C(Draw, 6), C(DrawEx, 10),
+    C(GetBkColor, 1), C(SetBkColor, 2), C(GetIconSize, 3), C(SetIconSize, 3), C(GetImageCount, 1), C(BeginDrag, 4),
+    C(EndDrag, 0), C(DragEnter, 3), C(DragLeave, 1), C(DragMove, 2), C(DragShowNolock, 1), C(SetDragCursorImage, 4),
+    C(GetDragImage, 2), C(Read, 1), C(Write, 2),
 };
 
 void hle_dc_register(void) { hle_register(dc_table, sizeof dc_table / sizeof dc_table[0]); }
