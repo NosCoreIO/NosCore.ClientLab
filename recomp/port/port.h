@@ -78,12 +78,16 @@ extern uint32_t port_guest_cmdline_addr;
 void hle_kernel32_register(void);
 void hle_user32_register(void);
 void hle_window_client_size(uint32_t hwnd, uint32_t* w, uint32_t* h);
+void hle_window_origin(uint32_t hwnd, int* x, int* y);
 void hle_misc_register(void);
 void hle_gdi_register(void);
-void hle_text_register(void);
+void hle_dc_register(void);
 void hle_audio_register(void);
+void hle_system_register(void);
 
-typedef struct { int32_t w, h; int top_down; uint32_t bpp, stride, bits; } GdiBitmap;
+typedef struct { int32_t w, h; int top_down; uint32_t bpp, stride, bits; uint32_t* colors; uint32_t ncolors; } GdiBitmap;
+uint32_t gdi_new_bitmap(int32_t w, int32_t h, uint32_t bpp);
+int gdi_bitmap_object(uint32_t h, uint32_t size, uint32_t out);
 int gdi_bitmap(uint32_t h, GdiBitmap* out);
 int gdi_delete_bitmap(uint32_t h);
 void hle_d3d9_register(void);

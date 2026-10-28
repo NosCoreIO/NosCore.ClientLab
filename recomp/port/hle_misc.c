@@ -232,8 +232,6 @@ static void u_GetMonitorInfoA(CPU* c) {
     if (size >= 72) strcpy(GSTR(p + 40), "\\\\.\\DISPLAY1");
     RET(1);
 }
-static void u_LoadCursorFromFileA(CPU* c) { RET(0x00060100u); }
-static void u_DestroyIcon(CPU* c) { RET(1); }
 static void u_GetWindowDC(CPU* c) { RET(0x00300000u + (ARG(0) & 0xffff)); }
 static void g_GetCurrentPositionEx(CPU* c) { if (ARG(1)) { M32(ARG(1)) = 0; M32(ARG(1) + 4) = 0; } RET(1); }
 static void g_GetBitmapBits(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, ARG(1)); RET(ARG(1)); }
@@ -503,7 +501,6 @@ static const Hle misc[] = {
     {"user32.dll", "CopyRect", 2, u_CopyRect},
     {"user32.dll", "PtInRect", 3, u_PtInRect},
     {"user32.dll", "RedrawWindow", 4, r_one},
-    {"user32.dll", "FillRect", 3, r_one},
     {"user32.dll", "EnumDisplaySettingsA", 3, u_EnumDisplaySettingsA},
     {"user32.dll", "ChangeDisplaySettingsA", 2, u_ChangeDisplaySettingsA},
     {"user32.dll", "EnumDisplayMonitors", 4, u_EnumDisplayMonitors},
@@ -511,8 +508,6 @@ static const Hle misc[] = {
     {"user32.dll", "MonitorFromPoint", 3, u_MonitorFrom},
     {"user32.dll", "MonitorFromRect", 2, u_MonitorFrom},
     {"user32.dll", "GetMonitorInfoA", 2, u_GetMonitorInfoA},
-    {"user32.dll", "LoadCursorFromFileA", 1, u_LoadCursorFromFileA},
-    {"user32.dll", "DestroyIcon", 1, u_DestroyIcon},
     {"user32.dll", "GetWindowDC", 1, u_GetWindowDC},
     {"gdi32.dll", "GetCurrentPositionEx", 2, g_GetCurrentPositionEx},
     {"gdi32.dll", "GetBitmapBits", 3, g_GetBitmapBits},
@@ -532,7 +527,7 @@ static const Hle misc[] = {
     {"noscore_gf.dll", "Steam_GetPersonaName", CDECL_ARGS, s_GetPersonaName},
     {"noscore_gf.dll", "Steam_GetSteamLanguage", CDECL_ARGS, s_GetSteamLanguage},
     {"noscore_gf.dll", "Steam_GetConnectedBetaBranch", CDECL_ARGS, s_GetConnectedBetaBranch},
-    S(Steam_OnFrameTick), S(Steam_Shutdown), S(Steam_CancelAuthSessionTicket), S(Steam_OpenOverlayToWebPage),
+    S(Steam_Shutdown),
     {"noscore_gf.dll", "Steam_SetOverlayActivateCallback", CDECL_ARGS, r_zero},
     {"wsock32.dll", "WSAStartup", 2, ws_WSAStartup},
     {"wsock32.dll", "WSACleanup", 0, r_zero},

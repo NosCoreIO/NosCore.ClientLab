@@ -61,6 +61,8 @@
     } else if (m.type === 'input') {
       ring = m.ring;
       audioDone = m.audioDone;
+    } else if (m.type === 'open-url') {
+      window.open(m.url, '_blank', 'noopener');
     } else if (m.type === 'sound') {
       sound(m);
     } else if (m.type === 'net-open') {

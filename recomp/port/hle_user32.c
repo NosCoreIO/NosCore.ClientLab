@@ -228,7 +228,7 @@ static uint8_t key_down[256], key_pressed[256];
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 EM_JS(int, js_input_poll, (int* out), {
-    const ring = self.inputRing;
+    const ring = globalThis.inputRing;
     if (!ring) return 0;
     const head = Atomics.load(ring, 0), tail = Atomics.load(ring, 1);
     if (head === tail) return 0;
@@ -238,7 +238,7 @@ EM_JS(int, js_input_poll, (int* out), {
     return 1;
 });
 EM_JS(int, js_input_peek_change, (void), {
-    const ring = self.inputRing;
+    const ring = globalThis.inputRing;
     if (!ring) return 0;
     const head = Atomics.load(ring, 0), tail = Atomics.load(ring, 1);
     if (head === tail) return 0;
@@ -430,10 +430,6 @@ static void u_GetAsyncKeyState(CPU* c) {
 }
 static void u_GetCursorPos(CPU* c) { M32(ARG(0)) = (uint32_t)cursor_x; M32(ARG(0) + 4) = (uint32_t)cursor_y; RET(1); }
 static void u_SetCursorPos(CPU* c) { RET(1); }
-static void u_ShowCursor(CPU* c) { RET(1); }
-static void u_SetCursor(CPU* c) { RET(0); }
-static void u_LoadIconA(CPU* c) { RET(0x00050000u + (ARG(1) & 0xffff)); }
-static void u_LoadCursorA(CPU* c) { RET(0x00060000u + (ARG(1) & 0xffff)); }
 static void u_GetDesktopWindow(CPU* c) { RET(0x00000010u); }
 static void u_GetActiveWindow(CPU* c) { RET(input_hwnd); }
 static void u_GetForegroundWindow(CPU* c) { RET(input_hwnd); }
@@ -489,8 +485,6 @@ static void u_UnhookWindowsHookEx(CPU* c) { RET(1); }
 static void u_CallNextHookEx(CPU* c) { RET(0); }
 static void u_GetDoubleClickTime(CPU* c) { RET(500); }
 static void u_GetCaretBlinkTime(CPU* c) { RET(530); }
-static void u_GetSysColor(CPU* c) { RET(0x00c0c0c0u); }
-static void u_GetSysColorBrush(CPU* c) { RET(0x00090000u + ARG(0)); }
 
 static void u_CharNextA(CPU* c) { RET(M8(ARG(0)) ? ARG(0) + 1 : ARG(0)); }
 static void u_CharPrevA(CPU* c) { RET(ARG(1) > ARG(0) ? ARG(1) - 1 : ARG(0)); }
@@ -540,10 +534,7 @@ static void u_wsprintfA(CPU* c) {
 /* ---- GDI: objects are handles only for now; nothing is drawn ---- */
 
 static uint32_t gdi_next = 0x00200000u;
-static void g_NewHandle(CPU* c) { RET(gdi_next += 4); }
 static void g_True(CPU* c) { RET(1); }
-static void g_Zero(CPU* c) { RET(0); }
-static void g_GetStockObject(CPU* c) { RET(0x00100000u + ARG(0)); }
 static void g_GetDeviceCaps(CPU* c) {
     switch (ARG(1)) {
     case 8: RET(1920); break;
@@ -557,15 +548,6 @@ static void g_GetDeviceCaps(CPU* c) {
     default: RET(0); break;
     }
 }
-static void g_GetObjectA(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, ARG(1)); RET(ARG(1)); }
-static void g_GetDIBits(CPU* c) { RET(0); }
-static void g_GetPaletteEntries(CPU* c) { if (ARG(3)) memset(GPTR(ARG(3)), 0, 4 * ARG(2)); RET(ARG(2)); }
-static void g_GetSystemPaletteEntries(CPU* c) { if (ARG(3)) memset(GPTR(ARG(3)), 0, 4 * ARG(2)); RET(ARG(2)); }
-static void g_GetNearestColor(CPU* c) { RET(ARG(1)); }
-static void u_GetDC(CPU* c) { RET(0x00300000u + (ARG(0) & 0xffff)); }
-static void u_ReleaseDC(CPU* c) { RET(1); }
-static void u_BeginPaint(CPU* c) { memset(GPTR(ARG(1)), 0, 64); M32(ARG(1)) = 0x00300001u; RET(0x00300001u); }
-static void u_EndPaint(CPU* c) { RET(1); }
 static void k_MulDiv(CPU* c) {
     int64_t r = (int64_t)(int32_t)ARG(0) * (int32_t)ARG(1);
     int32_t d = (int32_t)ARG(2);
@@ -585,7 +567,7 @@ static const Hle user32[] = {
     U(GetWindowTextA, 3), U(GetWindowRect, 2), U(GetClientRect, 2), U(SetWindowPos, 7), U(MoveWindow, 6),
     U(GetSystemMetrics, 1), U(SystemParametersInfoA, 4), U(RegisterWindowMessageA, 1), U(GetKeyboardLayout, 1),
     U(GetKeyboardLayoutList, 2), U(GetKeyboardState, 1), U(GetKeyState, 1), U(GetAsyncKeyState, 1),
-    U(GetCursorPos, 1), U(SetCursorPos, 2), U(ShowCursor, 1), U(SetCursor, 1), U(LoadIconA, 2), U(LoadCursorA, 2),
+    U(GetCursorPos, 1), U(SetCursorPos, 2),
     U(GetDesktopWindow, 0), U(GetActiveWindow, 0), U(GetForegroundWindow, 0), U(SetActiveWindow, 1),
     U(SetForegroundWindow, 1), U(GetFocus, 0), U(SetFocus, 1), U(GetCapture, 0), U(ReleaseCapture, 0),
     U(GetSystemMenu, 2), U(DeleteMenu, 3), U(EnableMenuItem, 3), U(MessageBoxA, 4), U(MessageBeep, 1),
@@ -593,31 +575,21 @@ static const Hle user32[] = {
     U(ScreenToClient, 2), U(ClientToScreen, 2), U(WindowFromPoint, 2), U(GetWindow, 2), U(GetTopWindow, 1),
     U(EnumWindows, 2), U(EnumThreadWindows, 3), U(GetWindowThreadProcessId, 2), U(SetPropA, 3), U(GetPropA, 2),
     U(RemovePropA, 2), U(FindWindowA, 2), U(SetWindowsHookExA, 4), U(UnhookWindowsHookEx, 1),
-    U(CallNextHookEx, 4), U(GetDoubleClickTime, 0), U(GetCaretBlinkTime, 0), U(GetSysColor, 1),
-    U(GetSysColorBrush, 1), U(CharNextA, 1), U(CharPrevA, 2), U(CharLowerA, 1), U(CharUpperA, 1),
+    U(CallNextHookEx, 4), U(GetDoubleClickTime, 0), U(GetCaretBlinkTime, 0),
+    U(CharNextA, 1), U(CharPrevA, 2), U(CharLowerA, 1), U(CharUpperA, 1),
     U(CharLowerBuffA, 2), U(CharUpperBuffA, 2), U(OemToCharA, 2), U(CharToOemA, 2), U(IsCharAlphaA, 1),
-    U(IsCharAlphaNumericA, 1), {"user32.dll", "wsprintfA", CDECL_ARGS, u_wsprintfA}, U(GetDC, 1), U(ReleaseDC, 2),
-    U(BeginPaint, 2), U(EndPaint, 2),
+    U(IsCharAlphaNumericA, 1), {"user32.dll", "wsprintfA", CDECL_ARGS, u_wsprintfA},
+    
     {"kernel32.dll", "GlobalAddAtomA", 1, k_GlobalAddAtomA}, {"kernel32.dll", "GlobalDeleteAtom", 1, k_GlobalDeleteAtom},
     {"kernel32.dll", "GlobalFindAtomA", 1, k_GlobalFindAtomA}, {"kernel32.dll", "MulDiv", 3, k_MulDiv},
-    G(GetStockObject, 1, g_GetStockObject), G(GetDeviceCaps, 2, g_GetDeviceCaps), G(GetObjectA, 3, g_GetObjectA),
-    G(CreatePalette, 1, g_NewHandle),
-    G(CreateSolidBrush, 1, g_NewHandle), G(CreatePen, 3, g_NewHandle),
-    G(CreateBrushIndirect, 1, g_NewHandle), 
-    G(CreateCompatibleBitmap, 3, g_NewHandle), G(CreateDIBSection, 6, g_NewHandle), G(CreateBitmap, 5, g_NewHandle),
-    G(SelectPalette, 3, g_Zero), G(RealizePalette, 1, g_Zero),
-    
-    G(GetDIBits, 7, g_GetDIBits), G(GetPaletteEntries, 4, g_GetPaletteEntries),
-    G(GetSystemPaletteEntries, 4, g_GetSystemPaletteEntries), G(GetNearestColor, 2, g_GetNearestColor),
-    
-    G(SetStretchBltMode, 2, g_True), G(SetMapMode, 2, g_True), G(SetROP2, 2, g_True),
-    G(BitBlt, 9, g_True), G(StretchBlt, 11, g_True), G(PatBlt, 6, g_True),
-    G(Rectangle, 5, g_True), G(FillRect, 3, g_True),
-    G(MoveToEx, 4, g_True), G(LineTo, 3, g_True), G(SetWindowOrgEx, 4, g_True), G(SetViewportOrgEx, 4, g_True),
-    G(IntersectClipRect, 5, g_True), G(ExcludeClipRect, 5, g_True), G(SaveDC, 1, g_True), G(RestoreDC, 2, g_True),
-    G(UnrealizeObject, 1, g_True), G(GetClipBox, 2, g_True), G(SetDIBColorTable, 4, g_Zero),
-    G(GetDIBColorTable, 4, g_Zero), G(GdiFlush, 0, g_True),
+    G(GetDeviceCaps, 2, g_GetDeviceCaps), G(GdiFlush, 0, g_True),
 };
+
+void hle_window_origin(uint32_t hwnd, int* x, int* y) {
+    Win* win = win_get(hwnd);
+    *x = win ? win->x : 0;
+    *y = win ? win->y : 0;
+}
 
 void hle_window_client_size(uint32_t hwnd, uint32_t* w, uint32_t* h) {
     Win* win = win_get(hwnd);

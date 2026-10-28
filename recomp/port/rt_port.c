@@ -396,6 +396,8 @@ static void load_image(const char* guest) {
         }
     }
     port_log("image loaded, %u imports, %u without an implementation yet", tramp_count, unresolved);
+    for (uint32_t k = 0; k < tramp_count; k++)
+        if (!tramps[k].fn) port_log("  unimplemented: %s!%s", tramps[k].dll, tramps[k].name);
 
     /* TLS: one static block; the guest's single fs:[0x2C] read goes to CPU.tls_slots. */
     uint32_t tls = rd32(opt + 96 + 9 * 8);
@@ -470,10 +472,11 @@ int main(int argc, char** argv) {
     port_trace = getenv("PORT_TRACE") != 0;
     api_timing = getenv("PORT_PROFILE_API") != 0;
     tramps = calloc(MAX_TRAMP, sizeof(Tramp));
-    hle_text_register();
+    hle_dc_register();
     hle_gdi_register();
     hle_kernel32_register();
     hle_user32_register();
+    hle_system_register();
     hle_audio_register();
     hle_misc_register();
     hle_d3d9_register();

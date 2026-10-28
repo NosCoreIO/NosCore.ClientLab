@@ -41,14 +41,15 @@ static uint32_t file_size_of(uint32_t ptr) {
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 EM_JS(void, js_audio_play, (int id, int generation, const uint8_t* data, int size, int loops, float volume, float pan), {
+    if (typeof postMessage !== 'function') return;   /* not in a worker (Node) */
     const bytes = HEAPU8.slice(data, data + size);
     postMessage({ type: 'sound', op: 'play', id, generation, bytes, loops, volume, pan }, [bytes.buffer]);
 });
 EM_JS(void, js_audio_op, (int id, int op, float volume, float pan), {
-    postMessage({ type: 'sound', op: op === 0 ? 'stop' : 'volume', id, volume, pan });
+    if (typeof postMessage === 'function') postMessage({ type: 'sound', op: op === 0 ? 'stop' : 'volume', id, volume, pan });
 });
 EM_JS(int, js_audio_finished, (int id), {
-    const done = self.audioDone;
+    const done = globalThis.audioDone;
     return done ? Atomics.load(done, id) : 0;
 });
 #else
