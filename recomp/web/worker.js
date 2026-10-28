@@ -5,7 +5,9 @@ const params = new URLSearchParams(self.location.search);
 // Input ring shared with the page: [0] = events written, [1] = events read, then 4 ints per event. The worker never
 // yields, so postMessage could not deliver input; the host drains this from PeekMessage.
 self.inputRing = new Int32Array(new SharedArrayBuffer((2 + 4 * 1024) * 4));
-postMessage({ type: 'input', ring: self.inputRing });
+// audioDone[sample] = generation of the last sound on that sample handle that finished playing (hle_audio.c).
+self.audioDone = new Int32Array(new SharedArrayBuffer(128 * 4));
+postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone });
 
 function mountGame(FS) {
   const xhr = new XMLHttpRequest();

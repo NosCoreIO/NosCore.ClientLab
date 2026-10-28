@@ -78,6 +78,7 @@ void hle_window_client_size(uint32_t hwnd, uint32_t* w, uint32_t* h);
 void hle_misc_register(void);
 void hle_gdi_register(void);
 void hle_text_register(void);
+void hle_audio_register(void);
 
 typedef struct { int32_t w, h; int top_down; uint32_t bpp, stride, bits; } GdiBitmap;
 int gdi_bitmap(uint32_t h, GdiBitmap* out);

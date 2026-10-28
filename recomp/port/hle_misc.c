@@ -243,32 +243,6 @@ static void i_ImmAssociateContext(CPU* c) { RET(0); }
 static void i_ImmNotifyIME(CPU* c) { RET(1); }
 static void w_timeGetDevCaps(CPU* c) { if (ARG(0)) { M32(ARG(0)) = 1; M32(ARG(0) + 4) = 1000000; } RET(0); }
 
-/* ---- Miles Sound System: silent stand-in; handles are non-zero so the client keeps going ---- */
-
-static uint32_t ail_next = 0x00500000u;
-static void ail_handle(CPU* c) { RET(ail_next += 16); }
-static void ail_file_read(CPU* c) {
-    char path[600];
-    port_host_path(GSTR(ARG(0)), path, sizeof path);
-    FILE* f = fopen(path, "rb");
-    if (!f) { RET(0); return; }
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    uint32_t buf = ARG(1) ? ARG(1) : guest_alloc((uint32_t)n, 16);
-    fread(GPTR(buf), 1, (size_t)n, f);
-    fclose(f);
-    RET(buf);
-}
-static void ail_file_size(CPU* c) {
-    char path[600];
-    struct stat st;
-    port_host_path(GSTR(ARG(0)), path, sizeof path);
-    RET(stat(path, &st) ? 0xFFFFFFFFu : (uint32_t)st.st_size);
-}
-static void ail_sample_status(CPU* c) { RET(2); }
-static void ail_sample_ms_position(CPU* c) { if (ARG(1)) M32(ARG(1)) = 0; if (ARG(2)) M32(ARG(2)) = 0; }
-
 /* ---- Gameforge wrapper (noscore_gf.dll): same answers as NosCore.DeveloperTools.GfStub ----
    The session ticket is the _NC_AUTH_CODE GUID as ASCII text; the client sends it verbatim in NoS0577. */
 
@@ -544,36 +518,6 @@ static const Hle misc[] = {
     {"winmm.dll", "timeGetDevCaps", 2, w_timeGetDevCaps},
     {"winmm.dll", "timeBeginPeriod", 1, r_zero},
     {"winmm.dll", "timeEndPeriod", 1, r_zero},
-    {"mss32.dll", "_AIL_startup@0", 0, r_one},
-    {"mss32.dll", "_AIL_shutdown@0", 0, r_zero},
-    {"mss32.dll", "_AIL_open_digital_driver@16", 4, ail_handle},
-    {"mss32.dll", "_AIL_close_digital_driver@4", 1, r_zero},
-    {"mss32.dll", "_AIL_set_3D_rolloff_factor@8", 2, r_zero},
-    {"mss32.dll", "_AIL_set_listener_3D_position@16", 4, r_zero},
-    {"mss32.dll", "_AIL_set_listener_3D_orientation@28", 7, r_zero},
-    {"mss32.dll", "_AIL_allocate_sample_handle@4", 1, ail_handle},
-    {"mss32.dll", "_AIL_release_sample_handle@4", 1, r_zero},
-    {"mss32.dll", "_AIL_file_read@8", 2, ail_file_read},
-    {"mss32.dll", "_AIL_file_size@4", 1, ail_file_size},
-    {"mss32.dll", "_AIL_mem_free_lock@4", 1, r_zero},
-    {"mss32.dll", "_AIL_init_sample@12", 3, r_zero},
-    {"mss32.dll", "_AIL_set_named_sample_file@20", 5, r_one},
-    {"mss32.dll", "_AIL_set_sample_file@12", 3, r_one},
-    {"mss32.dll", "_AIL_file_type@8", 2, r_one},
-    {"mss32.dll", "_AIL_WAV_info@8", 2, r_zero},
-    {"mss32.dll", "_AIL_decompress_ADPCM@12", 3, r_zero},
-    {"mss32.dll", "_AIL_sample_ms_position@12", 3, ail_sample_ms_position},
-    {"mss32.dll", "_AIL_set_sample_3D_position@16", 4, r_zero},
-    {"mss32.dll", "_AIL_set_sample_3D_orientation@28", 7, r_zero},
-    {"mss32.dll", "_AIL_set_sample_3D_distances@16", 4, r_zero},
-    {"mss32.dll", "_AIL_set_sample_volume_pan@12", 3, r_zero},
-    {"mss32.dll", "_AIL_set_sample_loop_count@8", 2, r_zero},
-    {"mss32.dll", "_AIL_start_sample@4", 1, r_zero},
-    {"mss32.dll", "_AIL_stop_sample@4", 1, r_zero},
-    {"mss32.dll", "_AIL_end_sample@4", 1, r_zero},
-    {"mss32.dll", "_AIL_sample_status@4", 1, ail_sample_status},
-    {"mss32.dll", "_AIL_set_sample_playback_rate@8", 2, r_zero},
-    {"mss32.dll", "_AIL_set_digital_master_volume_level@8", 2, r_zero},
     {"ewsf.ews", "ShowNostaleSplash", 0, r_zero},
     {"ewsf.ews", "FreeNostaleSplash", 0, r_zero},
     {"noscore_gf.dll", "Steam_Init", CDECL_ARGS, s_one},

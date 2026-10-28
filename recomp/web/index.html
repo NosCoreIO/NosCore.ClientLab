@@ -60,8 +60,67 @@
       if (!flushQueued) { flushQueued = true; requestAnimationFrame(flushLog); }
     } else if (m.type === 'input') {
       ring = m.ring;
+      audioDone = m.audioDone;
+    } else if (m.type === 'sound') {
+      sound(m);
     }
   };
+
+  // Miles samples (hle_audio.c). Browsers only start audio after a user gesture, so the context resumes on the first
+  // click or key press; decoded buffers are cached by content.
+  let audio = null, audioDone = null;
+  window.soundStats = { played: 0, undecodable: 0 };
+  const voices = new Map(), decoded = new Map();
+  function audioContext() {
+    if (!audio) audio = new AudioContext();
+    return audio;
+  }
+  for (const ev of ['mousedown', 'keydown']) canvas.addEventListener(ev, () => audioContext().resume(), { capture: true });
+  function soundKey(bytes) {
+    let h = bytes.length;
+    for (let i = 0; i < bytes.length; i += Math.max(1, bytes.length >> 6)) h = (h * 31 + bytes[i]) | 0;
+    return h;
+  }
+  function stopVoice(id) {
+    const v = voices.get(id);
+    if (!v) return;
+    voices.delete(id);
+    v.source.onended = null;
+    try { v.source.stop(); } catch { }
+  }
+  async function sound(m) {
+    const ctx = audioContext();
+    if (m.op === 'stop') { stopVoice(m.id); return; }
+    if (m.op === 'volume') {
+      const v = voices.get(m.id);
+      if (v) { v.gain.gain.value = m.volume; v.panner.pan.value = m.pan * 2 - 1; }
+      return;
+    }
+    stopVoice(m.id);
+    const key = soundKey(m.bytes);
+    let buffer = decoded.get(key);
+    if (!buffer) {
+      try { buffer = await ctx.decodeAudioData(m.bytes.buffer); } catch { buffer = null; }
+      if (!buffer) { window.soundStats.undecodable++; if (audioDone) Atomics.store(audioDone, m.id, m.generation); return; }
+      decoded.set(key, buffer);
+    }
+    const source = ctx.createBufferSource(), gain = ctx.createGain(), panner = ctx.createStereoPanner();
+    source.buffer = buffer;
+    source.loop = m.loops === 0;
+    gain.gain.value = m.volume;
+    panner.pan.value = m.pan * 2 - 1;
+    source.connect(gain).connect(panner).connect(ctx.destination);
+    let left = m.loops > 1 ? m.loops - 1 : 0;
+    source.onended = () => {
+      if (voices.get(m.id)?.source !== source) return;
+      voices.delete(m.id);
+      if (audioDone) Atomics.store(audioDone, m.id, m.generation);
+    };
+    if (left > 0) { source.loop = true; setTimeout(() => { source.loop = false; }, buffer.duration * 1000 * left); }
+    voices.set(m.id, { source, gain, panner });
+    window.soundStats.played++;
+    source.start();
+  }
 
   // Same event codes as pump_input in hle_user32.c.
   const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7 };

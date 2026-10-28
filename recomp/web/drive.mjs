@@ -112,6 +112,7 @@ try {
   await shot('6-after-chat.png');
   console.log((await logText()).slice(beforeChat).split('\n').filter((l) => /^(send |FATAL)/.test(l)).join('\n'));
   console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
+  console.log('sounds:', JSON.stringify(await page.evaluate(() => window.soundStats)));
 } catch (e) {
   console.log('error:', e.message);
 } finally {

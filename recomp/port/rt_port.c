@@ -436,6 +436,7 @@ int main(int argc, char** argv) {
     hle_gdi_register();
     hle_kernel32_register();
     hle_user32_register();
+    hle_audio_register();
     hle_misc_register();
     hle_d3d9_register();
 
