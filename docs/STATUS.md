@@ -19,7 +19,9 @@ The client (`NosCore.exe`, Delphi 7, md5 `51bbff3ec09d67c8425f88d74c6d5df5`) is 
 
 ### In the browser, as of 2026-10-28
 
-**The browser client logs in to a local NosCore stack and enters the world**: login, server and channel lists, character selection, then NosVille with HUD, minimap, NPCs and chat. WebGL2 rendering: about 57 frames/s on the login screens, 15-20 in town.
+**The browser client plays against a local NosCore stack**: login, server and channel lists, character selection, NosVille with HUD, minimap, NPCs and lighting; clicking the ground walks, the keyboard types and sends chat, and sound effects play. WebGL2 rendering: about 57 frames/s on the login screens, 15-20 in town with a GPU.
+
+**Recompilation coverage:** 19,436 functions; 90.4% of the code section's bytes are lifted, and the remaining 9.6% classifies as pointer/jump tables, strings, RTTI and four code fragments (374 bytes). `lift.py` prints the coverage and writes the gaps to `gen/gaps.txt`.
 
 ```powershell
 python recomp\wasm\compile_all.py --web          # worker build into C:\tools\re\work\wasm\web
@@ -34,14 +36,18 @@ python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user admin 
 - **Login packet:** the GF InstallationId is read from `HKLM\...\Gameforge4d\GameforgeClient\MainApp` through `TRegistry.OpenKey(..., True)`, i.e. RegCreateKeyExA; the registry HLE answers it (`NC_INSTALLATION_ID` overrides). Without it the client sends `NONE_CII` and the server rejects the GUID.
 - **Auth code:** `?auth=<code>`, or `serve.py --user/--password` mints one per page load from the NosCore WebApi.
 - **Input:** canvas events -> ring -> WM_* for the largest visible window (VCL forms are owned by the TApplication window, so "no parent" does not find it). One button/key state change per Present. SetTimer posts real WM_TIMER.
+- **Anti-tamper stack check:** before acting on a click the client walks its EBP chain and treats any return address below 0x70000000 outside its own image as tampering (`FUN_004ccf8c`), silently dropping the input. Host-to-guest call return addresses (`SENTINEL_BASE`) therefore live at 0x7fdf0000, where system DLL code would be.
+- **Audio:** `hle_audio.c` plays Miles samples (WAV/MP3 file images; IMA ADPCM converted to PCM) through WebAudio on the page; finished sounds are reported through a SharedArrayBuffer for `AIL_sample_status`. Audio starts after the first click or key press (browser autoplay rule).
+- **Threads:** the only thread is a `TCkThread` raising an event every 10 minutes through Synchronize; the message pump raises it on the same schedule. `CreateThread` logs the Delphi class of any other thread.
+- **Automated runs:** `node recomp/web/drive.mjs [--trace] [--headed]` logs in, enters the world, clicks the ground, types a chat line, and saves screenshots and logs to `C:	oolse\work\drive\`; it always closes the browser. Headless Chrome renders WebGL in software, so its fps is lower than a real browser's.
 - **Debugging:** `?trace=1` logs the API calls and the guest functions (from the RT_TRACE ring) that follow each mouse-down. The page keeps 1000 log lines; `window.allLog` has everything.
 - **Memory:** the build reserves 1 GB and may grow to 2 GB; several reloads in one Playwright browser reached 4 GB. Reload one tab and close the browser after testing.
 
-**Open, in priority order (2026-10-28):**
-1. In-game clicks and keys do not move the character: WM_LBUTTONDOWN reaches the form and VCL passes it on to DefWindowProc, but no `walk` packet (`Send.walk` at 0x727440) is sent. Next: run `?trace=1`, click the ground once, read the `fn` lines to see where the click path stops.
-2. Rocks and trees render white/lilac: probably fixed-function lighting (SetLight/SetMaterial are ignored).
-3. Speed: 15-20 fps in town; build the generated code at -O2 next.
-4. Audio (Miles is stubbed), helper threads (CreateThread is not run), CEF.
+**Open (2026-10-28):**
+1. Speed: 15-20 fps in town on a GPU. Next: move the vertex transform and lighting to the vertex shader, and profile the game loop.
+2. CEF (NosMall, the in-game browser) is not loaded.
+3. Broader gameplay coverage: other maps, combat, skills, shops, every UI window. Each may hit a missing API; `drive.mjs` is the place to add scripted checks.
+4. Android: Chrome on Android should run it once memory is reserved lazily and `serve.py` is reachable over HTTPS.
 
 ### WebAssembly (portable host), as of 2026-10-27
 
@@ -52,7 +58,7 @@ The same generated C, built with Emscripten and linked with `recomp/port/` (a ho
 - Unimplemented APIs with a known stdcall argument count are soft stubs: logged once, return 0. Counts come from the SDK import libraries plus `EWDL.EWS`, which is actually D3DX9. `argc_table.c` is generated.
 - No `setjmp` in portable mode: Delphi's non-local except jumps propagate outward by returning (`guest_call` / `rt_call_host_raw`). Emscripten's setjmp transform takes forever on the huge generated functions.
 - VCL's runtime-written window thunks (`call` / `pop ecx` / `jmp StdWndProc`) are emulated.
-- Still missing: real rendering (WebGL/WebGPU), input, threads (`CreateThread` is logged and not run), audio (Miles is silent). Networking is relayed only in the browser build; under Node, `connect` is refused.
+- Under Node the software rasteriser renders and audio is silent; networking is relayed only in the browser build, so under Node `connect` is refused.
 
 ## Pipeline
 
@@ -93,6 +99,10 @@ The same generated C, built with Emscripten and linked with `recomp/port/` (a ho
 - SEH handler pairs (`jmp @HandleFinally; jmp @finally`).
 - Interface thunks (`add [esp+4], -N; jmp`) and dispatch stubs that do `ret` to a computed method. A `ret` to a guest function entry is a tail call.
 - Jump-table cases, read through relocation slots, plus cross-function jumps and mid-function call targets.
+- Ghidra ends a function where it cannot follow control flow, typically right before an unresolved `case` dispatch, so the dispatch and every case body were missing. `extend_functions` re-walks every function (branches, jump tables, try-handler pushes) into code no other function owns; 2,458 functions grew.
+- `@TryFinallyExit` enters a try handler at handler + 5 (the second `jmp` of the pair), computed at run time, so both halves are labels wherever they end up. Every relocated code pointer that lands inside a function is a label there.
+- Delphi aligns routines to 4 bytes: an aligned relocated pointer into code is an entry point whatever its first instruction (empty virtual methods are a bare `ret`).
+- Unowned runs between functions that decode as clean code ending in `ret`/`jmp` join the preceding function (`absorb_gaps`).
 - FastMM's register-convention assembly routines, which have no prologue.
 
 **Semantics bugs found so far**
