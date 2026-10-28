@@ -10,6 +10,8 @@ typedef struct {
     int used;
     int32_t w, h; /* h < 0: top-down */
     uint32_t bpp, stride, bits, size, dib;
+    uint32_t colors[256]; /* RGBQUAD colour table for 1/4/8 bpp */
+    uint32_t ncolors;
 } Bmp;
 static Bmp bmps[MAX_BMP];
 
@@ -28,15 +30,33 @@ static uint32_t bmp_new(int32_t w, int32_t h, uint32_t bpp, int dib) {
             b->stride = ((uint32_t)(w < 0 ? -w : w) * b->bpp + 31) / 32 * 4;
             b->size = b->stride * (uint32_t)(h < 0 ? -h : h);
             b->bits = guest_alloc(b->size ? b->size : 16, 16);
+            memset(GPTR(b->bits), 0, b->size);
+            b->ncolors = b->bpp <= 8 ? 1u << b->bpp : 0;
+            if (b->bpp == 1) { b->colors[0] = 0x000000; b->colors[1] = 0xffffff; }
+            else for (uint32_t i = 0; i < b->ncolors; i++) {
+                uint32_t v = i * 255 / (b->ncolors - 1);
+                b->colors[i] = v << 16 | v << 8 | v;
+            }
             return BMP_HANDLE(k);
         }
     port_fatal("out of GDI bitmaps");
     return 0;
 }
 
+/* Copies a BITMAPINFO colour table (RGBQUADs after the 40-byte header) into the bitmap. */
+static void read_color_table(Bmp* b, uint32_t bmi) {
+    if (b->bpp > 8 || !bmi) return;
+    uint32_t used = M32(bmi + 32), n = used && used < b->ncolors ? used : b->ncolors;
+    for (uint32_t i = 0; i < n; i++) b->colors[i] = M32(bmi + 40 + 4 * i) & 0xffffff;
+}
+
+uint32_t gdi_new_bitmap(int32_t w, int32_t h, uint32_t bpp) { return bmp_new(w, h, bpp, 1); }
+
 int gdi_bitmap(uint32_t h, GdiBitmap* out) {
     Bmp* b = bmp_get(h);
     if (!b) return 0;
+    out->colors = b->colors;
+    out->ncolors = b->ncolors;
     out->w = b->w < 0 ? -b->w : b->w;
     out->h = b->h < 0 ? -b->h : b->h;
     out->top_down = b->h < 0;
@@ -56,6 +76,7 @@ static void g_CreateDIBSection(CPU* c) {
     int32_t w = (int32_t)M32(bmi + 4), h = (int32_t)M32(bmi + 8);
     uint32_t bpp = M16(bmi + 14);
     uint32_t hbm = bmp_new(w, h, bpp, 1);
+    read_color_table(bmp_get(hbm), bmi);
     if (ARG(3)) M32(ARG(3)) = bmp_get(hbm)->bits;
     RET(hbm);
 }
@@ -73,6 +94,7 @@ static void g_CreateDIBitmap(CPU* c) {
     uint32_t bih = ARG(1);
     uint32_t hbm = bih ? bmp_new((int32_t)M32(bih + 4), (int32_t)M32(bih + 8), M16(bih + 14) ? M16(bih + 14) : 32, 0) : bmp_new(1, 1, 32, 0);
     Bmp* b = bmp_get(hbm);
+    read_color_table(b, ARG(5));
     if ((ARG(2) & 4) && ARG(3)) memcpy(GPTR(b->bits), GPTR(ARG(3)), b->size);
     RET(hbm);
 }
@@ -92,25 +114,13 @@ static void fill_bitmap(Bmp* b, uint32_t out, uint32_t size) {
     }
 }
 
-static void g_GetObjectA(CPU* c) {
-    Bmp* b = bmp_get(ARG(0));
-    uint32_t size = ARG(1), out = ARG(2);
-    if (b) {
-        uint32_t want = size >= 84 && b->dib ? 84 : 24;
-        if (out) fill_bitmap(b, out, want <= size ? want : size);
-        RET(want);
-        return;
-    }
-    if (out) memset(GPTR(out), 0, size);
-    RET(size);
-}
-
-static void g_GetObjectType(CPU* c) { RET(bmp_get(ARG(0)) ? 7 : 2); }
-
-static void g_DeleteObject(CPU* c) {
-    Bmp* b = bmp_get(ARG(0));
-    if (b) { guest_free(b->bits); b->used = 0; }
-    RET(1);
+/* GetObject for a bitmap: BITMAP (24 bytes), or DIBSECTION (84) when asked for and the bitmap is a DIB section. */
+int gdi_bitmap_object(uint32_t h, uint32_t size, uint32_t out) {
+    Bmp* b = bmp_get(h);
+    if (!b) return -1;
+    uint32_t want = size >= 84 && b->dib ? 84 : 24;
+    if (out) fill_bitmap(b, out, want <= size ? want : size);
+    return (int)want;
 }
 
 /* GetDIBits / SetDIBits / SetDIBitsToDevice copy rows straight through; formats are assumed to match. */
@@ -122,9 +132,11 @@ static void g_GetDIBits(CPU* c) {
         M32(bmi + 4) = (uint32_t)b->w; M32(bmi + 8) = (uint32_t)b->h; M16(bmi + 12) = 1;
         if (!M16(bmi + 14)) M16(bmi + 14) = (uint16_t)b->bpp;
         M32(bmi + 16) = 0; M32(bmi + 20) = b->size;
+        for (uint32_t i = 0; i < b->ncolors && M16(bmi + 14) <= 8; i++) M32(bmi + 40 + 4 * i) = b->colors[i];
         RET(1);
         return;
     }
+    for (uint32_t i = 0; i < b->ncolors && M16(bmi + 14) <= 8; i++) M32(bmi + 40 + 4 * i) = b->colors[i];
     uint32_t rows = (uint32_t)(b->h < 0 ? -b->h : b->h);
     if (start + lines > rows) lines = rows > start ? rows - start : 0;
     memcpy(GPTR(bits), GPTR(b->bits + start * b->stride), lines * b->stride);
@@ -159,9 +171,6 @@ static const Hle gdi[] = {
     {"gdi32.dll", "CreateBitmap", 5, g_CreateBitmap},
     {"gdi32.dll", "CreateCompatibleBitmap", 3, g_CreateCompatibleBitmap},
     {"gdi32.dll", "CreateDIBitmap", 6, g_CreateDIBitmap},
-    {"gdi32.dll", "GetObjectA", 3, g_GetObjectA},
-    {"gdi32.dll", "GetObjectType", 1, g_GetObjectType},
-    {"gdi32.dll", "DeleteObject", 1, g_DeleteObject},
     {"gdi32.dll", "GetDIBits", 7, g_GetDIBits},
     {"gdi32.dll", "SetDIBits", 7, g_SetDIBits},
     {"gdi32.dll", "GetBitmapBits", 3, g_GetBitmapBits},

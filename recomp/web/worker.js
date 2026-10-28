@@ -7,7 +7,9 @@ const params = new URLSearchParams(self.location.search);
 self.inputRing = new Int32Array(new SharedArrayBuffer((2 + 4 * 1024) * 4));
 // audioDone[sample] = generation of the last sound on that sample handle that finished playing (hle_audio.c).
 self.audioDone = new Int32Array(new SharedArrayBuffer(128 * 4));
-postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone });
+// Text pasted in the page: [0] = paste sequence, [1] = length, then UTF-16 code units (hle_menu.c).
+self.pasteBuf = new Int32Array(new SharedArrayBuffer(8 + 2 * 65536));
+postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone, paste: self.pasteBuf });
 
 function mountGame(FS) {
   const xhr = new XMLHttpRequest();
@@ -43,6 +45,8 @@ self.Module = {
     }
     if (code) Module.ENV._NC_AUTH_CODE = code;
     if (params.get('trace')) Module.ENV.PORT_TRACE_CLICK = '1';
+    // Debug switches read by the host (PORT_TRACE, PORT_PROFILE_API, ...) pass straight through.
+    for (const [k, v] of params) if (k.startsWith('PORT_')) Module.ENV[k] = v;
   }],
   onRuntimeInitialized() {
     mountGame(Module.FS);

@@ -47,7 +47,8 @@ def main():
         print(s, m)
     if fails:
         sys.exit(1)
-    objs = sorted(glob.glob(os.path.join(OUT, "obj", "*.o")))
+    # Only the objects of current sources: a renamed or deleted file must not leave its old object in the link.
+    objs = sorted(os.path.join(OUT, "obj", os.path.basename(src)[:-2] + ".o") for src in srcs)
     if "--link" in sys.argv:
         out = os.path.join(OUT, "nostale.js")
         r = subprocess.run([EMCC, *LINK, *objs, "-o", out], capture_output=True, text=True)

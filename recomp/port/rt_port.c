@@ -14,6 +14,7 @@ uint32_t port_guest_cmdline_addr;
 static FILE* log_file;
 static CPU* main_cpu;
 static int port_trace;
+int port_trace_methods;
 static int api_timing;
 int port_trace_budget;
 
@@ -286,7 +287,7 @@ void rt_call_host_raw(CPU* c, uint32_t target) {
         }
         if (!t->fn) port_fatal("unimplemented API %s!%s (called from %08x)", t->dll, t->name, M32(c->esp));
         fn_trace_drain(c);
-        int traced = port_trace || (port_trace_budget > 0 && !strstr(t->name, "::") && port_trace_budget--);
+        int traced = port_trace || (port_trace_budget > 0 && (port_trace_methods || !strstr(t->name, "::")) && port_trace_budget--);
         if (traced) port_log("api %s!%s from %08x esp=%08x args %08x %08x %08x %08x", t->dll, t->name, M32(c->esp), c->esp,
                              M32(c->esp + 4), M32(c->esp + 8), M32(c->esp + 12), M32(c->esp + 16));
         if (api_timing) {
@@ -396,6 +397,8 @@ static void load_image(const char* guest) {
         }
     }
     port_log("image loaded, %u imports, %u without an implementation yet", tramp_count, unresolved);
+    for (uint32_t k = 0; k < tramp_count; k++)
+        if (!tramps[k].fn) port_log("  unimplemented: %s!%s", tramps[k].dll, tramps[k].name);
 
     /* TLS: one static block; the guest's single fs:[0x2C] read goes to CPU.tls_slots. */
     uint32_t tls = rd32(opt + 96 + 9 * 8);
@@ -470,10 +473,12 @@ int main(int argc, char** argv) {
     port_trace = getenv("PORT_TRACE") != 0;
     api_timing = getenv("PORT_PROFILE_API") != 0;
     tramps = calloc(MAX_TRAMP, sizeof(Tramp));
-    hle_text_register();
+    hle_dc_register();
     hle_gdi_register();
     hle_kernel32_register();
     hle_user32_register();
+    hle_menu_register();
+    hle_system_register();
     hle_audio_register();
     hle_misc_register();
     hle_d3d9_register();
