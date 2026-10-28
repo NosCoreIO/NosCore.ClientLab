@@ -166,6 +166,8 @@ static uint32_t texel(uint32_t s, uint32_t x, uint32_t y) {
     }
 }
 
+uint32_t r_texel(uint32_t surface, uint32_t x, uint32_t y) { return texel(surface, x, y); }
+
 static int32_t wrap(int32_t i, int32_t n, int clamp) {
     if (clamp) return i < 0 ? 0 : i >= n ? n - 1 : i;
     i %= n;

@@ -550,6 +550,7 @@ static void k_GetProcAddress(CPU* c) {
     const char* name = ARG(1) < 0x10000 ? (snprintf(ord, sizeof ord, "#%u", ARG(1)), ord) : GSTR(ARG(1));
     if (ARG(0) == GUEST_BASE) { RET(0); return; }
     if (!dll) { RET(0); return; }
+    if (!hle_implemented(dll, name)) { set_last_error(127); RET(0); return; }   /* ERROR_PROC_NOT_FOUND */
     RET(hle_trampoline(dll, name));
 }
 static void k_DisableThreadLibraryCalls(CPU* c) { RET(1); }

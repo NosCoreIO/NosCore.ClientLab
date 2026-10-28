@@ -2,8 +2,10 @@
    draws are dropped. COM objects live in guest memory; their vtables hold trampoline addresses. */
 #include "port.h"
 #include "render.h"
+#include "image_file.h"
 #include <math.h>
 #include <stdlib.h>
+#include <strings.h>
 
 #define RET(v) (c->eax = (uint32_t)(v))
 #define THIS ARG(0)
@@ -299,7 +301,53 @@ static void s_LockRect(CPU* c) {
     RET(0);
 }
 static void s_GetContainer(CPU* c) { M32(ARG(2)) = M32(THIS + 44); RET(M32(THIS + 44) ? 0 : 0x80004002u); }
-static void s_GetDC(CPU* c) { M32(ARG(1)) = 0x00300100u; RET(0); }
+/* GetDC hands out a memory DC on a 32bpp copy of the surface (+60 holds it while out); ReleaseDC writes the copy
+   back. Only the RGB formats D3D allows GDI on qualify. */
+#define D3DERR_INVALIDCALL 0x8876086cu
+static int gdi_format(uint32_t f) { return f >= 20 && f <= 25; }
+static uint32_t surface_pixel(uint32_t s, uint32_t x, uint32_t y) {
+    uint32_t row = M32(s + 28) + y * M32(s + 32);
+    if (M32(s + 20) == 20) return 0xff000000u | M8(row + 3 * x) | M8(row + 3 * x + 1) << 8 | (uint32_t)M8(row + 3 * x + 2) << 16;
+    return r_texel(s, x, y);
+}
+static void surface_store(uint32_t s, uint32_t x, uint32_t y, uint32_t p) {
+    uint32_t row = M32(s + 28) + y * M32(s + 32), r = p >> 16 & 255, g = p >> 8 & 255, b = p & 255;
+    switch (M32(s + 20)) {
+    case 20: M8(row + 3 * x) = (uint8_t)b; M8(row + 3 * x + 1) = (uint8_t)g; M8(row + 3 * x + 2) = (uint8_t)r; break;
+    case 21: M32(row + 4 * x) = (M32(row + 4 * x) & 0xff000000u) | (p & 0xffffff); break;
+    case 22: M32(row + 4 * x) = p | 0xff000000u; break;
+    case 23: M16(row + 2 * x) = (uint16_t)((r >> 3) << 11 | (g >> 2) << 5 | b >> 3); break;
+    case 24: M16(row + 2 * x) = (uint16_t)(0x8000 | (r >> 3) << 10 | (g >> 3) << 5 | b >> 3); break;
+    case 25: M16(row + 2 * x) = (uint16_t)((M16(row + 2 * x) & 0x8000) | (r >> 3) << 10 | (g >> 3) << 5 | b >> 3); break;
+    }
+}
+static void s_GetDC(CPU* c) {
+    uint32_t s = THIS, w = M32(s + 12), h = M32(s + 16);
+    if (!ARG(1) || M32(s + 60) || !gdi_format(M32(s + 20))) { RET(D3DERR_INVALIDCALL); return; }
+    r_read_back(s);
+    uint32_t bmp = gdi_new_bitmap((int32_t)w, -(int32_t)h, 32);
+    GdiBitmap b;
+    gdi_bitmap(bmp, &b);
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) M32(b.bits + y * b.stride + 4 * x) = surface_pixel(s, x, y);
+    M32(s + 60) = hle_dc_memory(bmp);
+    M32(ARG(1)) = M32(s + 60);
+    RET(0);
+}
+static void s_ReleaseDC(CPU* c) {
+    uint32_t s = THIS, dc = M32(s + 60), w = M32(s + 12), h = M32(s + 16);
+    if (!dc || ARG(1) != dc) { RET(D3DERR_INVALIDCALL); return; }
+    uint32_t* px = malloc(4 * (size_t)w * h);
+    hle_dc_read(dc, (int)w, (int)h, px);
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) surface_store(s, x, y, px[y * w + x]);
+    free(px);
+    gdi_delete_bitmap(hle_dc_delete(dc));
+    M32(s + 60) = 0;
+    M32(s + 56) = 1;
+    if (M32(s + 44)) M32(M32(s + 44) + 56) = 1;
+    RET(0);
+}
 static void b_Lock(CPU* c) { M32(ARG(3)) = M32(THIS + 28) + ARG(1); RET(0); }
 static void b_GetDesc(CPU* c) { memset(GPTR(ARG(1)), 0, 24); M32(ARG(1)) = M32(THIS + 20); M32(ARG(1) + 20) = M32(THIS + 36); RET(0); }
 
@@ -316,7 +364,7 @@ static const Method texture_methods[] = {
 };
 static const Method surface_methods[] = {
     RESOURCE_METHODS, {"GetContainer", 3, s_GetContainer}, {"GetDesc", 2, s_GetDesc}, {"LockRect", 4, s_LockRect},
-    {"UnlockRect", 1, 0}, {"GetDC", 2, s_GetDC}, {"ReleaseDC", 2, 0},
+    {"UnlockRect", 1, 0}, {"GetDC", 2, s_GetDC}, {"ReleaseDC", 2, s_ReleaseDC},
 };
 static const Method vb_methods[] = {RESOURCE_METHODS, {"Lock", 5, b_Lock}, {"Unlock", 1, 0}, {"GetDesc", 2, b_GetDesc}};
 static const Method ib_methods[] = {RESOURCE_METHODS, {"Lock", 5, b_Lock}, {"Unlock", 1, 0}, {"GetDesc", 2, b_GetDesc}};
@@ -413,6 +461,59 @@ static void x_MatrixDeterminant(CPU* c) {
     FPUSH((double)(float)mat_inverse(m, 0));
 }
 static void x_CreateTexture(CPU* c) { M32(ARG(7)) = make_texture(ARG(1), ARG(2), ARG(3), ARG(5) ? ARG(5) : 21); RET(0); }
+
+/* D3DXSaveSurfaceToFileA(file, format, surface, palette, rect): P8 surfaces take their colours from the palette
+   (PALETTEENTRY: red, green, blue, flags). */
+static void x_SaveSurfaceToFileA(CPU* c) {
+    uint32_t s = ARG(2), pal = ARG(3), rect = ARG(4);
+    if (!ARG(0) || !s || M32(s + 8) != O_SURFACE) { RET(D3DERR_INVALIDCALL); return; }
+    int32_t x0 = 0, y0 = 0, x1 = (int32_t)M32(s + 12), y1 = (int32_t)M32(s + 16);
+    if (rect) {
+        int32_t l = (int32_t)M32(rect), t = (int32_t)M32(rect + 4), r = (int32_t)M32(rect + 8), b = (int32_t)M32(rect + 12);
+        if (l < 0 || t < 0 || r > x1 || b > y1 || l >= r || t >= b) { RET(D3DERR_INVALIDCALL); return; }
+        x0 = l; y0 = t; x1 = r; y1 = b;
+    }
+    if (M32(s + 20) == 41 && !pal) { RET(D3DERR_INVALIDCALL); return; }
+    r_read_back(s);
+    int w = x1 - x0, h = y1 - y0;
+    uint32_t* px = malloc(4 * (size_t)w * (size_t)h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            uint32_t X = (uint32_t)(x0 + x), Y = (uint32_t)(y0 + y);
+            if (M32(s + 20) == 41) {
+                uint32_t e = pal + 4 * M8(M32(s + 28) + Y * M32(s + 32) + X);
+                px[y * w + x] = 0xff000000u | (uint32_t)M8(e) << 16 | (uint32_t)M8(e + 1) << 8 | M8(e + 2);
+            } else px[y * w + x] = surface_pixel(s, X, Y);
+        }
+    char path[600];
+    port_host_path(GSTR(ARG(0)), path, sizeof path);
+    int ok = image_file_write(path, (int)ARG(1), w, h, px);
+    free(px);
+    RET(ok ? 0 : D3DERR_INVALIDCALL);
+}
+
+/* ewss.ews CaptureScene2(file, width, height, dc): the screenshot writer. The file's extension picks the format,
+   JPEG unless it names another one. */
+static void e_CaptureScene2(CPU* c) {
+    int w = (int)ARG(1), h = (int)ARG(2);
+    if (!ARG(0) || w <= 0 || h <= 0) { RET(0); return; }
+    uint32_t* px = malloc(4 * (size_t)w * (size_t)h);
+    int ok = hle_dc_read(ARG(3), w, h, px);
+    if (ok) {
+        const char* name = GSTR(ARG(0));
+        const char* ext = strrchr(name, '.');
+        int fmt = IMAGE_JPG;
+        if (ext && !strcasecmp(ext, ".bmp")) fmt = IMAGE_BMP;
+        else if (ext && !strcasecmp(ext, ".png")) fmt = IMAGE_PNG;
+        else if (ext && !strcasecmp(ext, ".tga")) fmt = IMAGE_TGA;
+        char path[600];
+        port_host_path(name, path, sizeof path);
+        ok = image_file_write(path, fmt, w, h, px);
+        port_log("screenshot %s: %s", name, ok ? "saved" : "could not be written");
+    }
+    free(px);
+    RET(ok);
+}
 
 /* ID3DXMatrixStack: +40 holds the stack array (32 matrices), +44 the depth. */
 static uint32_t ms_top(uint32_t s) { return M32(s + 40) + 64 * M32(s + 44); }
@@ -515,6 +616,8 @@ static const Hle d3d9[] = {
     {"d3dx9.dll", "D3DXMatrixInverse", 3, x_MatrixInverse},
     {"d3dx9.dll", "D3DXMatrixDeterminant", 1, x_MatrixDeterminant},
     {"d3dx9.dll", "D3DXCreateTexture", 8, x_CreateTexture},
+    {"d3dx9.dll", "D3DXSaveSurfaceToFileA", 5, x_SaveSurfaceToFileA},
+    {"ewss.ews", "CaptureScene2", 4, e_CaptureScene2},
 };
 
 #define VT(var, iface, arr) var = make_vtable(iface, arr, (int)(sizeof arr / sizeof arr[0]))

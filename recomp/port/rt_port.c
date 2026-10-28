@@ -202,6 +202,8 @@ static const Hle* hle_find(const char* dll, const char* name) {
     return 0;
 }
 
+int hle_implemented(const char* dll, const char* name) { return hle_find(dll, name) != 0; }
+
 uint32_t hle_trampoline(const char* dll, const char* name) {
     char d[32];
     lower(d, dll, sizeof d);
@@ -488,6 +490,7 @@ int main(int argc, char** argv) {
     hle_system_register();
     hle_audio_register();
     hle_misc_register();
+    hle_ole_register();
     hle_d3d9_register();
 
     main_cpu = calloc(1, sizeof(CPU));

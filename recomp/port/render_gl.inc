@@ -119,6 +119,7 @@ EM_JS(void, js_gl_texture, (uint32_t id, int w, int h, const uint8_t* rgba), {
 EM_JS(void, js_gl_draw, (int prim, const uint8_t* verts, int n, const int32_t* st), {
     const G = self.__gl, gl = G.gl, u = G.u, base = st >> 2, S = (i) => HEAP32[base + i];
     const P = G.prev || (G.prev = new Int32Array(40).fill(-1));
+    G.drawn = true;
     const changed = (from, to) => {
         let c = false;
         for (let i = from; i < to; i++) if (P[i] !== S(i)) { P[i] = S(i); c = true; }
@@ -175,6 +176,7 @@ EM_JS(void, js_gl_draw, (int prim, const uint8_t* verts, int n, const int32_t* s
 
 EM_JS(void, js_gl_clear, (int flags, uint32_t color, float z, int x, int y, int w, int h), {
     const G = self.__gl, gl = G.gl;
+    G.drawn = true;
     gl.scissor(x, G.h - y - h, w, h);
     let bits = 0;
     if (flags & 1) {
@@ -195,8 +197,37 @@ EM_JS(void, js_gl_present, (void), {
     const wait = 16.6 - (performance.now() - G.last);
     if (wait > 0) Atomics.wait(pace, 0, 0, wait);
     G.last = performance.now();
+    const gl = G.gl;
+    if (!G.kept) {
+        G.keptRb = gl.createRenderbuffer();
+        gl.bindRenderbuffer(gl.RENDERBUFFER, G.keptRb);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, G.w, G.h);
+        G.kept = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, G.kept);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, G.keptRb);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, G.kept);
+    gl.blitFramebuffer(0, 0, G.w, G.h, 0, 0, G.w, G.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.enable(gl.SCISSOR_TEST);
+    G.drawn = false;
     const bmp = G.canvas.transferToImageBitmap();
     postMessage({ type: 'bitmap', bmp }, [bmp]);
+});
+
+/* The frame as 32-bit BGRA rows, top row first. Presenting hands the drawing buffer to the page and leaves it blank,
+   so until the next draw the copy kept at the last present is the frame. */
+EM_JS(void, js_gl_read, (int w, int h, uint8_t* out, int pitch), {
+    const G = self.__gl, gl = G.gl, px = new Uint8Array(w * h * 4);
+    if (!G.drawn && G.kept) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, G.kept);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    for (let y = 0; y < h; y++)
+        for (let x = 0, s = (h - 1 - y) * w * 4, d = out + y * pitch; x < w; x++, s += 4, d += 4) {
+            HEAPU8[d] = px[s + 2]; HEAPU8[d + 1] = px[s + 1]; HEAPU8[d + 2] = px[s]; HEAPU8[d + 3] = 255;
+        }
 });
 
 static uint32_t gl_backbuffer;
@@ -345,6 +376,12 @@ static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, in
     js_gl_clear(flags, color, z, x, y, w, h);
 }
 
+void r_read_back(uint32_t surface) {
+    if (!gl_on || surface != gl_backbuffer || (SFMT(surface) != 21 && SFMT(surface) != 22)) return;
+    gl_flush();
+    js_gl_read((int)SW(surface), (int)SH(surface), GPTR(SBITS(surface)), (int)SPITCH(surface));
+}
+
 int r_gl_present(void) {
     if (!gl_on) return 0;
     double t = prof_now();
@@ -360,4 +397,5 @@ static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, in
     (void)flags; (void)color; (void)z; (void)x; (void)y; (void)w; (void)h;
 }
 int r_gl_present(void) { return 0; }
+void r_read_back(uint32_t surface) { (void)surface; }
 #endif
