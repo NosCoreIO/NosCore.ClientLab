@@ -254,7 +254,21 @@ static void put_vertex(uint8_t* dst, const Vtx* v, float tw, float th) {
     memcpy(dst + 20, v->uv, 16);
 }
 
+/* Each distinct texture-stage setup is logged once (first 48), to spot fixed-function features not emulated. */
+static void log_stage_setup(void) {
+    static uint32_t seen[48][10];
+    static int nseen;
+    uint32_t key[10] = {R.tss[0][1], R.tss[0][2] << 8 | R.tss[0][3], R.tss[0][4], R.tss[0][11], R.tss[0][24],
+                        R.tss[1][1], R.tss[1][2] << 8 | R.tss[1][3], R.tss[1][4], R.tss[1][11], R.tss[1][24]};
+    for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) return;
+    if (nseen >= 48) return;
+    memcpy(seen[nseen++], key, sizeof key);
+    port_log("stage setup: s0 op %u args %04x aop %u tci %x ttff %x | s1 op %u args %04x aop %u tci %x ttff %x | fvf %x",
+             key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7], key[8], key[9], R.fvf);
+}
+
 static void gl_state(int32_t* st) {
+    log_stage_setup();
     memset(st, 0, 40 * sizeof *st);
     for (int s = 0; s < 2; s++) {
         for (int k = 0; k < 6; k++) st[6 * s + k] = (int32_t)R.tss[s][1 + k];

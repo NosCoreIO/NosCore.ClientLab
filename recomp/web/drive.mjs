@@ -162,6 +162,19 @@ try {
   const windowErrors = (await logText()).slice(beforeWindows).split('\n')
     .filter((l) => /FATAL|exited|Delphi|fault|STUB/.test(l));
   console.log(windowErrors.slice(0, 12).join('\n') || 'windows: no errors');
+
+  // The test characters are game masters, so a map change is a chat command away.
+  step('teleport');
+  const beforeTeleport = (await logText()).length;
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(500);
+  await page.keyboard.type(`$Teleport ${arg('--map', '2')}`, { delay: 60 });
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(15000);
+  await shot('8-teleported.png');
+  const teleportLog = (await logText()).slice(beforeTeleport).split('\n');
+  console.log(teleportLog.filter((l) => /FATAL|exited|Delphi|fault|STUB/.test(l)).slice(0, 12).join('\n') || 'teleport: no errors');
+  console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
   }
 } catch (e) {
   console.log('error:', e.message);

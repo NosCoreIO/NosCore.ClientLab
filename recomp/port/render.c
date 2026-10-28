@@ -373,7 +373,7 @@ static uint32_t light_vertex(const float pos[3], const float nrm_in[3], int has_
 }
 
 /* world * view * projection, rebuilt only when one of them changes */
-static Mat wvp;
+static Mat wvp, wv;
 static void mat_mul(const Mat* a, const Mat* b, Mat* out) {
     for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++) {
@@ -384,7 +384,6 @@ static void mat_mul(const Mat* a, const Mat* b, Mat* out) {
 }
 static void update_wvp(void) {
     if (!wvp_dirty) return;
-    Mat wv;
     mat_mul(&R.world, &R.view, &wv);
     mat_mul(&wv, &R.proj, &wvp);
     wvp_dirty = 0;
@@ -393,7 +392,7 @@ static void update_wvp(void) {
 /* Vertex layout and per-draw constants, worked out once per draw call instead of once per vertex. */
 static struct {
     uint32_t pos, normal_at, diffuse_at, tex_at[4], tex_n[4];
-    int lit, has_diffuse, pretransformed, stage_set[STAGES];
+    int lit, has_diffuse, pretransformed, stage_set[STAGES], stage_gen[STAGES], needs_camera_pos, needs_camera_normal;
     uint32_t ttff[STAGES];
     float vw, vh, vx, vy;
 } LY;
@@ -421,9 +420,13 @@ static void layout_begin(void) {
         LY.tex_at[k] = off;
         off += 4 * LY.tex_n[k];
     }
+    LY.needs_camera_pos = LY.needs_camera_normal = 0;
     for (int st = 0; st < STAGES; st++) {
         LY.stage_set[st] = (int)(R.tss[st][11] & 3);
+        LY.stage_gen[st] = (int)(R.tss[st][11] >> 16);   /* D3DTSS_TCI_*: 1 camera-space normal, 2 camera-space position */
         LY.ttff[st] = R.tss[st][24];
+        if (LY.stage_gen[st] == 2) LY.needs_camera_pos = 1;
+        if (LY.stage_gen[st] == 1) LY.needs_camera_normal = 1;
     }
     LY.lit = R.rs[137] && (fvf & 0x10) && pos != 4;
     LY.vw = (float)(R.vp_set ? R.vp_w : SW(R.target));
@@ -441,12 +444,22 @@ static void fetch(uint32_t p, Vtx* o) {
         xform(&R.world, in, wp);
         o->diffuse = light_vertex(wp, nrm, LY.has_diffuse, o->diffuse);
     }
+    float cam_pos[4] = {0, 0, 0, 1}, cam_normal[4] = {0, 0, 0, 0};
+    if (!LY.pretransformed && LY.needs_camera_pos) xform(&wv, in, cam_pos);
+    if (!LY.pretransformed && LY.needs_camera_normal && (R.fvf & 0x10)) {
+        float nrm[4] = {MF32(p + LY.normal_at), MF32(p + LY.normal_at + 4), MF32(p + LY.normal_at + 8), 0};
+        xform(&wv, nrm, cam_normal);
+    }
     for (int st = 0; st < STAGES; st++) {
         int set = LY.stage_set[st];
         float tc[4] = {0, 0, 1, 0};
-        uint32_t n = LY.tex_n[set], at = p + LY.tex_at[set];
-        for (uint32_t j = 0; j < n; j++) tc[j] = MF32(at + 4 * j);
-        if (n == 3) tc[3] = 1;
+        if (LY.stage_gen[st] == 2) memcpy(tc, cam_pos, sizeof tc);
+        else if (LY.stage_gen[st] == 1) memcpy(tc, cam_normal, sizeof tc);
+        else {
+            uint32_t n = LY.tex_n[set], at = p + LY.tex_at[set];
+            for (uint32_t j = 0; j < n; j++) tc[j] = MF32(at + 4 * j);
+            if (n == 3) tc[3] = 1;
+        }
         uint32_t ttff = LY.ttff[st];
         if (ttff & 7) {
             float r[4];
