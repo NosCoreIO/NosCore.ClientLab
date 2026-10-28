@@ -6,12 +6,23 @@
 
 static int gl_on;
 
-/* Per-frame profile: time in draw calls and texture uploads against the whole frame, logged every 5 seconds. */
+/* Per-frame profile logged every 5 seconds. The split into draw calls, uploads and submission reads the clock
+   several times per draw, which costs more than the draws themselves, so it is only measured with PORT_PROFILE=1. */
 #include <time.h>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+static double prof_now(void) { return emscripten_get_now(); }
+#else
 static double prof_now(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+#endif
+static int prof_detail = -1;
+static double prof_mark(void) {
+    if (prof_detail < 0) prof_detail = getenv("PORT_PROFILE") != 0;
+    return prof_detail ? prof_now() : 0;
 }
 static double prof_draw, prof_upload, prof_frame_start, prof_frames_ms, prof_submit, prof_present, prof_fetch;
 static uint32_t prof_frames, prof_draw_calls, prof_vertices;
@@ -414,7 +425,7 @@ static struct {
 
 static double fetch_t0;
 static void layout_begin(void) {
-    fetch_t0 = prof_now();
+    fetch_t0 = prof_mark();
     uint32_t fvf = R.fvf, pos = fvf & 0xe, off = pos == 4 ? 16 : 12;
     if (pos >= 6 && pos <= 0xe) off += 4 * ((pos - 4) / 2);
     LY.pos = pos;
@@ -578,7 +589,7 @@ static void dump_draw(uint32_t prim, Vtx* v, uint32_t n) {
 
 static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
     if (dump_state == 2 && n) dump_draw(prim, v, n);
-    prof_fetch += prof_now() - fetch_t0;
+    prof_fetch += prof_mark() - fetch_t0;
     S.draws++;
     if (gl_on) { gl_draw_list(prim, v, n); return; }
     log_state_combo();
@@ -698,7 +709,11 @@ void r_prof_frame(void) {
     if (prof_frame_start > 0) prof_frames_ms += now - prof_frame_start;
     prof_frame_start = now;
     if (++prof_frames < 2 || prof_frames_ms < 5000) return;
-    port_log("profile: %.1f ms/frame (%.0f fps): draw calls %.1f ms (%u calls, %u prims; GL submit %.1f), texture uploads %.1f, "
+    if (!prof_detail)
+        port_log("profile: %.1f ms/frame (%.0f fps), %u draw calls, %u prims; PORT_PROFILE=1 splits the frame",
+                 prof_frames_ms / prof_frames, 1000.0 * prof_frames / prof_frames_ms, prof_draw_calls / prof_frames,
+                 prof_vertices / prof_frames);
+    else port_log("profile: %.1f ms/frame (%.0f fps): draw calls %.1f ms (%u calls, %u prims; GL submit %.1f), texture uploads %.1f, "
              "present %.1f, game %.1f; vertex fetch %.1f, network relay %.1f",
              prof_frames_ms / prof_frames, 1000.0 * prof_frames / prof_frames_ms, prof_draw / prof_frames,
              prof_draw_calls / prof_frames, prof_vertices / prof_frames, prof_submit / prof_frames, prof_upload / prof_frames,
@@ -733,33 +748,33 @@ void r_stats(void) {
 #include "render_gl.inc"
 
 void r_draw(uint32_t prim, uint32_t start, uint32_t count) {
-    double t = prof_now();
+    double t = prof_mark();
     draw_impl_draw(prim, start, count);
-    prof_draw += prof_now() - t;
+    prof_draw += prof_mark() - t;
     prof_draw_calls++;
     prof_vertices += count;
 }
 
 void r_draw_up(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride) {
-    double t = prof_now();
+    double t = prof_mark();
     draw_impl_draw_up(prim, count, data, stride);
-    prof_draw += prof_now() - t;
+    prof_draw += prof_mark() - t;
     prof_draw_calls++;
     prof_vertices += count;
 }
 
 void r_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t start_index, uint32_t count) {
-    double t = prof_now();
+    double t = prof_mark();
     draw_impl_draw_indexed(prim, base_vertex, start_index, count);
-    prof_draw += prof_now() - t;
+    prof_draw += prof_mark() - t;
     prof_draw_calls++;
     prof_vertices += count;
 }
 
 void r_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t idx_fmt, uint32_t data, uint32_t stride) {
-    double t = prof_now();
+    double t = prof_mark();
     draw_impl_draw_indexed_up(prim, count, indices, idx_fmt, data, stride);
-    prof_draw += prof_now() - t;
+    prof_draw += prof_mark() - t;
     prof_draw_calls++;
     prof_vertices += count;
 }

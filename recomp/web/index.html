@@ -44,7 +44,8 @@
 </main>
 <script>
   const canvas = document.getElementById('screen');
-  const ctx = canvas.getContext('2d');
+  // The software renderer sends pixels (2D context); WebGL sends bitmaps, which a bitmaprenderer takes without a copy.
+  let ctx = null, bitmaps = null;
   const status = document.getElementById('status');
   const log = document.getElementById('log');
   const worker = new Worker('/worker.js' + location.search);
@@ -65,14 +66,15 @@
     const m = e.data;
     if (m.type === 'frame') {
       if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = m.w; canvas.height = m.h; }
+      ctx = ctx || canvas.getContext('2d');
       ctx.putImageData(new ImageData(new Uint8ClampedArray(m.data.buffer), m.w, m.h), 0, 0);
       frames++;
       const now = performance.now();
       if (now - last > 1000) { status.textContent = `${m.w}x${m.h}, ${frames} frames/s shown`; frames = 0; last = now; }
     } else if (m.type === 'bitmap') {
       if (canvas.width !== m.bmp.width || canvas.height !== m.bmp.height) { canvas.width = m.bmp.width; canvas.height = m.bmp.height; }
-      ctx.drawImage(m.bmp, 0, 0);
-      m.bmp.close();
+      bitmaps = bitmaps || canvas.getContext('bitmaprenderer');
+      bitmaps.transferFromImageBitmap(m.bmp);
       frames++;
       const now = performance.now();
       if (now - last > 1000) { status.textContent = `${canvas.width}x${canvas.height}, ${frames} frames/s shown (WebGL)`; frames = 0; last = now; }
@@ -84,6 +86,9 @@
       ring = m.ring;
       audioDone = m.audioDone;
       pasteBuf = m.paste;
+      const vsync = m.vsync;
+      const tick = () => { Atomics.add(vsync, 0, 1); Atomics.notify(vsync, 0); requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
     } else if (m.type === 'cursor') {
       if (!m.visible) canvas.style.cursor = 'none';
       else if (!m.rgba) canvas.style.cursor = 'default';

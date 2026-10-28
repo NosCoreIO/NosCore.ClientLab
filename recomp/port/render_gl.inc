@@ -116,62 +116,76 @@ EM_JS(void, js_gl_texture, (uint32_t id, int w, int h, const uint8_t* rgba), {
 /* st: 0..5 stage 0 (colorop carg1 carg2 alphaop aarg1 aarg2), 6..11 stage 1, 12/13 texture ids, 14 tfactor,
    15 alpha test, 16 alpha func, 17 alpha ref, 18 blend, 19 src, 20 dst, 21 blend op, 22 z enable, 23 z write,
    24 z func, 25..28 scissor x y w h, 29..33 stage 0 sampler (mag min mip addressu addressv), 34..38 stage 1 */
-EM_JS(void, js_gl_draw, (int prim, const uint8_t* verts, int n, const int32_t* st), {
-    const G = self.__gl, gl = G.gl, u = G.u, base = st >> 2, S = (i) => HEAP32[base + i];
+/* Runs one recorded command list: the vertices of all its draws are uploaded at once, then each command (GL
+   primitive, first vertex, count, then 40 state words) sets what changed and draws. */
+EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, int ncmds), {
+    const G = self.__gl, gl = G.gl, u = G.u;
     const P = G.prev || (G.prev = new Int32Array(40).fill(-1));
     G.drawn = true;
+    // One large buffer takes every list; when it fills up it is orphaned, so the GPU never waits on a range still
+    // being read.
+    const RING = 1 << 24, bytes = nverts * 40;
+    if (G.ring === undefined || G.ring + bytes > RING) { gl.bufferData(gl.ARRAY_BUFFER, RING, gl.STREAM_DRAW); G.ring = 0; }
+    gl.bufferSubData(gl.ARRAY_BUFFER, G.ring, HEAPU8, verts, bytes);
+    const first = G.ring / 40;
+    G.ring += bytes;
+    let base = 0;
+    const S = (i) => HEAP32[base + i];
     const changed = (from, to) => {
         let c = false;
         for (let i = from; i < to; i++) if (P[i] !== S(i)) { P[i] = S(i); c = true; }
         return c;
     };
-    // Groups are tested one by one (no short-circuit) so the cache stays in step with GL.
-    const s0 = changed(0, 6), t0 = P[12] !== S(12), s1 = changed(6, 12), t1 = P[13] !== S(13);
-    if (s0 || t0) { gl.uniform4i(u.uS0, S(0), S(1), S(2), S(3)); gl.uniform4i(u.uA0, S(4), S(5), S(12) ? 1 : 0, 0); }
-    if (s1 || t1) { gl.uniform4i(u.uS1, S(6), S(7), S(8), S(9)); gl.uniform4i(u.uA1, S(10), S(11), S(13) ? 1 : 0, 0); }
-    if (changed(14, 15)) {
-        const tf = S(14) >>> 0;
-        gl.uniform4f(u.uTFactor, ((tf >>> 16) & 255) / 255, ((tf >>> 8) & 255) / 255, (tf & 255) / 255, (tf >>> 24) / 255);
-    }
-    if (changed(15, 18)) { gl.uniform2i(u.uATest, S(15), S(16)); gl.uniform1f(u.uARef, S(17) & 255); }
     const wrap = (a) => a === 2 ? gl.MIRRORED_REPEAT : (a === 3 || a === 4) ? gl.CLAMP_TO_EDGE : gl.REPEAT;
-    for (let k = 0; k < 2; k++) {
-        const b = 29 + 5 * k, texChanged = P[12 + k] !== S(12 + k), samplerChanged = changed(b, b + 5);
-        P[12 + k] = S(12 + k);
-        const id = S(12 + k) >>> 0;
-        const t = id ? G.textures.get(id) : null;
-        if (!t || (!texChanged && !samplerChanged)) continue;
-        gl.activeTexture(gl.TEXTURE0 + k);
-        gl.bindTexture(gl.TEXTURE_2D, t);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, S(b) >= 2 ? gl.LINEAR : gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, S(b + 1) >= 2 ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap(S(b + 3)));
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap(S(b + 4)));
+    const f = [gl.ONE, gl.ZERO, gl.ONE, gl.SRC_COLOR, gl.ONE_MINUS_SRC_COLOR, gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA,
+               gl.DST_ALPHA, gl.ONE_MINUS_DST_ALPHA, gl.DST_COLOR, gl.ONE_MINUS_DST_COLOR, gl.SRC_ALPHA_SATURATE];
+    const eq = [gl.FUNC_ADD, gl.FUNC_ADD, gl.FUNC_SUBTRACT, gl.FUNC_REVERSE_SUBTRACT, gl.MIN, gl.MAX];
+    for (let k = 0; k < ncmds; k++) {
+        const cmd = (cmds >> 2) + 43 * k;
+        base = cmd + 3;
+        // Groups are tested one by one (no short-circuit) so the cache stays in step with GL.
+        const s0 = changed(0, 6), t0 = P[12] !== S(12), s1 = changed(6, 12), t1 = P[13] !== S(13);
+        if (s0 || t0) { gl.uniform4i(u.uS0, S(0), S(1), S(2), S(3)); gl.uniform4i(u.uA0, S(4), S(5), S(12) ? 1 : 0, 0); }
+        if (s1 || t1) { gl.uniform4i(u.uS1, S(6), S(7), S(8), S(9)); gl.uniform4i(u.uA1, S(10), S(11), S(13) ? 1 : 0, 0); }
+        if (changed(14, 15)) {
+            const tf = S(14) >>> 0;
+            gl.uniform4f(u.uTFactor, ((tf >>> 16) & 255) / 255, ((tf >>> 8) & 255) / 255, (tf & 255) / 255, (tf >>> 24) / 255);
+        }
+        if (changed(15, 18)) { gl.uniform2i(u.uATest, S(15), S(16)); gl.uniform1f(u.uARef, S(17) & 255); }
+        for (let j = 0; j < 2; j++) {
+            const b = 29 + 5 * j, texChanged = P[12 + j] !== S(12 + j), samplerChanged = changed(b, b + 5);
+            P[12 + j] = S(12 + j);
+            const id = S(12 + j) >>> 0;
+            const t = id ? G.textures.get(id) : null;
+            if (!t || (!texChanged && !samplerChanged)) continue;
+            gl.activeTexture(gl.TEXTURE0 + j);
+            gl.bindTexture(gl.TEXTURE_2D, t);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, S(b) >= 2 ? gl.LINEAR : gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, S(b + 1) >= 2 ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap(S(b + 3)));
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap(S(b + 4)));
+        }
+        if (changed(18, 22)) {
+            if (S(18)) {
+                gl.enable(gl.BLEND);
+                gl.blendFunc(f[S(19)] ?? gl.ONE, f[S(20)] ?? gl.ZERO);
+                gl.blendEquation(eq[S(21)] ?? gl.FUNC_ADD);
+            } else gl.disable(gl.BLEND);
+        }
+        if (changed(22, 25)) {
+            if (S(22)) {
+                gl.enable(gl.DEPTH_TEST);
+                gl.depthFunc(0x1FF + Math.min(Math.max(S(24), 1), 8));
+                gl.depthMask(S(23) !== 0);
+            } else gl.disable(gl.DEPTH_TEST);
+        }
+        if (changed(25, 29)) gl.scissor(S(25), G.h - S(26) - S(28), S(27), S(28));
+        if (changed(38, 40)) {
+            const fc = S(38) >>> 0;
+            gl.uniform4f(u.uFog, ((fc >>> 16) & 255) / 255, ((fc >>> 8) & 255) / 255, (fc & 255) / 255, S(39) ? 1 : 0);
+        }
+        gl.drawArrays(HEAP32[cmd], first + HEAP32[cmd + 1], HEAP32[cmd + 2]);
     }
-    if (changed(18, 22)) {
-        if (S(18)) {
-            const f = [gl.ONE, gl.ZERO, gl.ONE, gl.SRC_COLOR, gl.ONE_MINUS_SRC_COLOR, gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA,
-                       gl.DST_ALPHA, gl.ONE_MINUS_DST_ALPHA, gl.DST_COLOR, gl.ONE_MINUS_DST_COLOR, gl.SRC_ALPHA_SATURATE];
-            const eq = [gl.FUNC_ADD, gl.FUNC_ADD, gl.FUNC_SUBTRACT, gl.FUNC_REVERSE_SUBTRACT, gl.MIN, gl.MAX];
-            gl.enable(gl.BLEND);
-            gl.blendFunc(f[S(19)] ?? gl.ONE, f[S(20)] ?? gl.ZERO);
-            gl.blendEquation(eq[S(21)] ?? gl.FUNC_ADD);
-        } else gl.disable(gl.BLEND);
-    }
-    if (changed(22, 25)) {
-        if (S(22)) {
-            gl.enable(gl.DEPTH_TEST);
-            gl.depthFunc(0x1FF + Math.min(Math.max(S(24), 1), 8));
-            gl.depthMask(S(23) !== 0);
-        } else gl.disable(gl.DEPTH_TEST);
-    }
-    if (changed(25, 29)) gl.scissor(S(25), G.h - S(26) - S(28), S(27), S(28));
-    if (changed(38, 40)) {
-        const fc = S(38) >>> 0;
-        gl.uniform4f(u.uFog, ((fc >>> 16) & 255) / 255, ((fc >>> 8) & 255) / 255, (fc & 255) / 255, S(39) ? 1 : 0);
-    }
-    gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(verts, verts + n * 40), gl.STREAM_DRAW);
-    gl.drawArrays(prim, 0, n);
 });
 
 EM_JS(void, js_gl_clear, (int flags, uint32_t color, float z, int x, int y, int w, int h), {
@@ -189,14 +203,16 @@ EM_JS(void, js_gl_clear, (int flags, uint32_t color, float z, int x, int y, int 
 });
 
 /* The client never sleeps between frames: left alone it renders hundreds of frames a second, saturating the GPU
-   process until the page itself stalls. Present holds it to about 60 frames a second, like vsync, with a real
-   blocking wait (Atomics.wait is allowed in a worker). */
+   process until the page itself stalls. Present holds it to one frame per display refresh, like vsync: it waits for
+   the page's refresh counter to move unless it already has since the last frame, so a slow frame never loses a
+   whole refresh. A notify wakes it; a timed wait rounds up to the 15.6 ms Windows timer tick, so the timeout only
+   matters when the page stops refreshing (hidden or covered), where it keeps the game near 60 frames a second. */
 EM_JS(void, js_gl_present, (void), {
-    const G = self.__gl;
-    const pace = G.pace || (G.pace = new Int32Array(new SharedArrayBuffer(4)));
-    const wait = 16.6 - (performance.now() - G.last);
-    if (wait > 0) Atomics.wait(pace, 0, 0, wait);
-    G.last = performance.now();
+    const G = self.__gl, V = self.vsync;
+    if (V) {
+        if (Atomics.load(V, 0) === G.vsyncSeen) Atomics.wait(V, 0, G.vsyncSeen, 16);
+        G.vsyncSeen = Atomics.load(V, 0);
+    }
     const gl = G.gl;
     if (!G.kept) {
         G.keptRb = gl.createRenderbuffer();
@@ -232,6 +248,7 @@ EM_JS(void, js_gl_read, (int w, int h, uint8_t* out, int pitch), {
 
 static uint32_t gl_backbuffer;
 static void gl_flush(void);
+#define FRAME_VERTS (1u << 18)
 static uint8_t* gl_verts;
 static uint8_t* gl_rgba;
 static uint32_t gl_rgba_size;
@@ -240,7 +257,7 @@ static void gl_start(uint32_t backbuffer) {
     gl_backbuffer = backbuffer;
     gl_on = js_gl_init((int)SW(backbuffer), (int)SH(backbuffer));
     if (gl_on) {
-        gl_verts = malloc(65536 * 40);
+        gl_verts = malloc(FRAME_VERTS * 40);
         port_log("render: WebGL2");
     }
 }
@@ -252,7 +269,7 @@ static uint32_t gl_texture(uint32_t tex) {
     if (!s || !SBITS(s)) return 0;
     if (M32(tex + 56) != 2) {
         gl_flush();
-        double t0 = prof_now();
+        double t0 = prof_mark();
         uint32_t w = SW(s), h = SH(s);
         if (w * h * 4 > gl_rgba_size) { free(gl_rgba); gl_rgba_size = w * h * 4; gl_rgba = malloc(gl_rgba_size); }
         uint8_t* p = gl_rgba;
@@ -263,23 +280,39 @@ static uint32_t gl_texture(uint32_t tex) {
             }
         js_gl_texture(tex, (int)w, (int)h, gl_rgba);
         M32(tex + 56) = 2;
-        prof_upload += prof_now() - t0;
+        prof_upload += prof_mark() - t0;
     }
     return tex;
 }
 
-/* Draws with identical state are merged into one triangle list: the client issues thousands of tiny draws per frame
-   and each call into JavaScript costs far more than the vertices it carries. */
-#define BATCH_VERTS 65535
-static int32_t batch_st[40];
-static uint32_t batch_n;
+/* A frame's draws are recorded and handed to JavaScript in one call: the client issues thousands of tiny draws per
+   frame and each call into JavaScript costs far more than the vertices it carries. Consecutive triangle draws with
+   identical state share one command. Anything that must see the drawing so far (a texture upload, a clear, a
+   readback, present) runs the list first. */
+#define MAX_CMDS 8192
+typedef struct { int32_t prim, first, count, st[40]; } GlCmd;
+static GlCmd gl_cmds[MAX_CMDS];
+static uint32_t gl_ncmds, gl_nverts;
 
 static void gl_flush(void) {
-    if (!batch_n) return;
-    double t = prof_now();
-    js_gl_draw(4, gl_verts, (int)batch_n, batch_st);
-    prof_submit += prof_now() - t;
-    batch_n = 0;
+    if (!gl_ncmds) return;
+    double t = prof_mark();
+    js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds);
+    prof_submit += prof_mark() - t;
+    gl_ncmds = gl_nverts = 0;
+}
+
+/* The command a draw appends to: the current one when it is a triangle list with the same state, else a new one. */
+static GlCmd* gl_command(int32_t prim, const int32_t* st, uint32_t verts) {
+    if (gl_nverts + verts > FRAME_VERTS || gl_ncmds == MAX_CMDS) gl_flush();
+    GlCmd* last = gl_ncmds ? &gl_cmds[gl_ncmds - 1] : 0;
+    if (last && prim == 4 && last->prim == 4 && !memcmp(last->st, st, sizeof last->st)) return last;
+    GlCmd* c = &gl_cmds[gl_ncmds++];
+    c->prim = prim;
+    c->first = (int32_t)gl_nverts;
+    c->count = 0;
+    memcpy(c->st, st, sizeof c->st);
+    return c;
 }
 
 static void put_vertex(uint8_t* dst, const Vtx* v, float tw, float th) {
@@ -351,23 +384,25 @@ static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
     int32_t st[40];
     gl_state(st);
     if (prim < 4 || prim > 6) {
-        gl_flush();
-        for (uint32_t k = 0; k < n && k < BATCH_VERTS; k++) put_vertex(gl_verts + 40 * k, &v[k], tw, th);
-        js_gl_draw((int)prim, gl_verts, (int)(n < BATCH_VERTS ? n : BATCH_VERTS), st);
+        static const int32_t gl_prim[4] = {0, 0, 1, 3};   /* POINTS, LINES, LINE_STRIP */
+        if (n > FRAME_VERTS) n = FRAME_VERTS;
+        GlCmd* c = gl_command(gl_prim[prim & 3], st, n);
+        for (uint32_t k = 0; k < n; k++) put_vertex(gl_verts + 40 * gl_nverts++, &v[k], tw, th);
+        c->count += (int32_t)n;
         return;
     }
     uint32_t tris = prim == 4 ? n / 3 : n - 2;
-    if (batch_n && (memcmp(st, batch_st, sizeof st) || batch_n + 3 * tris > BATCH_VERTS)) gl_flush();
-    memcpy(batch_st, st, sizeof st);
+    GlCmd* cmd = 0;
     for (uint32_t t = 0; t < tris; t++) {
-        if (batch_n + 3 > BATCH_VERTS) gl_flush();
+        if (!cmd || gl_nverts + 3 > FRAME_VERTS) cmd = gl_command(4, st, 3 * (tris - t));
         uint32_t a, b, c;
         if (prim == 4) { a = 3 * t; b = a + 1; c = a + 2; }
         else if (prim == 5) { a = t; b = t + 1; c = t + 2; }
         else { a = 0; b = t + 1; c = t + 2; }
-        put_vertex(gl_verts + 40 * batch_n++, &v[a], tw, th);
-        put_vertex(gl_verts + 40 * batch_n++, &v[b], tw, th);
-        put_vertex(gl_verts + 40 * batch_n++, &v[c], tw, th);
+        put_vertex(gl_verts + 40 * gl_nverts++, &v[a], tw, th);
+        put_vertex(gl_verts + 40 * gl_nverts++, &v[b], tw, th);
+        put_vertex(gl_verts + 40 * gl_nverts++, &v[c], tw, th);
+        cmd->count += 3;
     }
 }
 
