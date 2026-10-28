@@ -15,7 +15,10 @@
 #define GUEST_SCRATCH 0x0fe20000u
 #define TRAMP_BASE 0x0ff00000u
 #define TRAMP_LIMIT 0x10000000u
-#define SENTINEL_BASE 0x0fdf0000u
+/* Return addresses for host-to-guest calls. Never dereferenced; they sit above 0x70000000 like system DLL code,
+   because the client walks its call stack and treats any lower return address outside its own image as tampering
+   (and then ignores mouse clicks). */
+#define SENTINEL_BASE 0x7fdf0000u
 
 #define ARG(n) M32(c->esp + 4 + 4 * (n))
 #define GSTR(p) ((char*)(uintptr_t)(p))

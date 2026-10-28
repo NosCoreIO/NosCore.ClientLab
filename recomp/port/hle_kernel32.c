@@ -581,6 +581,20 @@ static void a_RegQueryValueExA(CPU* c) {
     RET(0);
 }
 
+/* The low 64 KB is never mapped on Windows; everything else in linear memory is readable here. The client uses this
+   to walk its SEH chain in an integrity check, so the first walks are logged. */
+static void k_IsBadReadPtr(CPU* c) {
+    uint32_t p = ARG(0);
+    static int logged;
+    if (ARG(1) == 8 && logged < 3) {
+        logged++;
+        port_log("IsBadReadPtr(%08x) from %08x, chain:", p, M32(c->esp));
+        for (uint32_t f = p, k = 0; f >= 0x10000 && f != 0xFFFFFFFFu && k < 24; f = M32(f), k++)
+            port_log("  frame %08x next %08x handler %08x", f, M32(f), M32(f + 4));
+    }
+    RET(p < 0x10000 ? 1 : 0);
+}
+
 /* ---- SEH: walk the guest's fs:[0] chain the way the OS dispatcher does ---- */
 
 #define EXCEPTION_RECORD_SIZE 80
@@ -738,6 +752,7 @@ static const Hle kernel32[] = {
     {"kernel32.dll", "Sleep", 1, k_Sleep},
     {"kernel32.dll", "CreateThread", 6, k_CreateThread},
     {"kernel32.dll", "GetTickCount", 0, k_GetTickCount},
+    {"kernel32.dll", "IsBadReadPtr", 2, k_IsBadReadPtr},
     {"winmm.dll", "timeGetTime", 0, k_timeGetTime},
     {"kernel32.dll", "QueryPerformanceFrequency", 1, k_QueryPerformanceFrequency},
     {"kernel32.dll", "QueryPerformanceCounter", 1, k_QueryPerformanceCounter},

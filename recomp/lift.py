@@ -965,6 +965,14 @@ def call_targets(L, fns):
     return extra, sorted(seeds)
 
 
+def handler_entries(L, h):
+    """A try handler is 'jmp HandleFinally/HandleAnyException; jmp @finally': @TryFinallyExit enters it at h + 5."""
+    out = [h]
+    if L.code[h - L.code_lo] == 0xE9:
+        out.append(h + 5)
+    return out
+
+
 def descend(L, starts, may_enter):
     """Recursive-descent disassembly: follows direct branches, jump tables and try/except/finally handler pushes.
     Returns {address: end of instruction}. may_enter(pos) decides whether to keep walking into pos."""
@@ -986,7 +994,7 @@ def descend(L, starts, may_enter):
                 t = i.operands[0].imm & 0xFFFFFFFF
                 nxt = L.disasm_range(i.address + i.size, i.address + i.size + 1)
                 if L.code_lo <= t < L.code_hi and nxt and nxt[0].mnemonic == "push" and "fs:" in nxt[0].op_str:
-                    work.append(t)
+                    work.extend(handler_entries(L, t))
             if m == "jmp" or m == "ret" or m == "int3":
                 break
             pos = i.address + i.size
@@ -1119,6 +1127,22 @@ def main():
                 extra_labels[owner[t]].add(t)
             else:
                 seeds.append(t)
+        # Any address the binary keeps as a pointer can be jumped to indirectly (finally continuations reached through
+        # the RTL's handler, method pointers), so it must be a label in whichever function owns that instruction.
+        for t in L.reloc_targets:
+            if t in owner and t not in entries:
+                extra_labels[owner[t]].add(t)
+        for e, name, rs in fns:
+            for lo, hi in rs:
+                for i in L.disasm_range(lo, hi):
+                    if i.mnemonic != "push" or not i.operands or i.operands[0].type != X.X86_OP_IMM:
+                        continue
+                    h = i.operands[0].imm & 0xFFFFFFFF
+                    nxt = L.disasm_range(i.address + i.size, i.address + i.size + 1)
+                    if L.code_lo <= h < L.code_hi and nxt and nxt[0].mnemonic == "push" and "fs:" in nxt[0].op_str:
+                        for t in handler_entries(L, h):
+                            if t in owner and t not in entries:
+                                extra_labels[owner[t]].add(t)
         print(f"{sum(len(v) for v in extra_labels.values())} mid-function call targets, {len(seeds)} uncovered call targets")
         if not seeds:
             break
