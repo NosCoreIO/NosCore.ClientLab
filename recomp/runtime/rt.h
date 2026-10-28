@@ -27,6 +27,14 @@ typedef union {
 typedef struct CPU CPU;
 typedef void (*RtFn)(CPU*, uint32_t, uint32_t);
 
+/* Guest memory never overlaps the CPU struct, so recompiled functions take it as restrict: otherwise every guest
+   store forces the compiler to reload registers and flags from it. */
+#ifdef _MSC_VER
+#define RT_RESTRICT __restrict
+#else
+#define RT_RESTRICT __restrict__
+#endif
+
 #ifdef RT_PORTABLE
 /* No longjmp in the portable host: every frame between a Delphi except handler and its try block is ours, so a
    pending non-local jump just propagates outward by returning (see guest_call and rt_call_host_raw). */

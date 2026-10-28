@@ -65,6 +65,14 @@ def flag_rw_ins(i):
     return r, w
 
 
+def call_flag_rw(i):
+    """A callee never reads the caller's flags, but may return a result in them (Delphi RTL compare helpers are
+    followed by jz/jnz), so a call writes every flag and reads none. ret and jumps out still keep all flags live."""
+    if i.mnemonic == "call":
+        return set(), set(ALL_FLAGS)
+    return flag_rw_ins(i)
+
+
 def flag_rw(m):
     if m in JCC_READS:
         return JCC_READS[m], set()
@@ -316,9 +324,7 @@ class FnGen:
                 for t in s:
                     live |= live_in[t]
                 for i in reversed(blocks[k]):
-                    r, w = flag_rw_ins(i)
-                    if i.mnemonic in ("call",):
-                        r, w = set(ALL_FLAGS), set(ALL_FLAGS)
+                    r, w = call_flag_rw(i)
                     live = (live - w) | r
                 if live != live_in[k]:
                     live_in[k] = live
@@ -331,9 +337,7 @@ class FnGen:
                 live |= live_in[t]
             for i in reversed(b):
                 live_after[i.address] = set(live)
-                r, w = flag_rw_ins(i)
-                if i.mnemonic == "call":
-                    r, w = set(ALL_FLAGS), set(ALL_FLAGS)
+                r, w = call_flag_rw(i)
                 live = (live - w) | r
         return live_after
 
@@ -413,7 +417,7 @@ class FnGen:
         fn = f"f_{self.entry:08x}"
         o = self.out
         o.append(f"/* {self.name} */")
-        o.append(f"void {fn}(CPU* c, uint32_t entry, uint32_t ret) {{")
+        o.append(f"void {fn}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{")
         o.append("  uint32_t tgt = entry, t, a, b, r; uint64_t q; int ind = 0; (void)t; (void)a; (void)b; (void)r; (void)q;")
         o.append("  RT_TRACE(c, entry, ret);")
         if self.uses_seh:
