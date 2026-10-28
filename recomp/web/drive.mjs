@@ -1,7 +1,7 @@
 // Drives the browser client through login into the world, clicks the ground, and saves screenshots and the log.
 // The browser is always closed at the end: the client reserves 1 GB+ and stacked runs exhaust RAM.
 //
-// usage: node drive.mjs [--url http://127.0.0.1:8077/] [--trace] [--out dir] [--headed]
+// usage: node drive.mjs [--url http://127.0.0.1:8077/] [--trace] [--params PORT_PROFILE_API=1] [--out dir] [--headed]
 import { createRequire } from 'node:module';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ const flag = (name) => process.argv.includes(name);
 
 const out = arg('--out', 'C:/tools/re/work/drive');
 // Message boxes answer themselves with their default button so nothing waits on a human.
-const url = arg('--url', 'http://127.0.0.1:8077/') + '?autodismiss=1' + (flag('--trace') ? '&trace=1' : '');
+const url = arg('--url', 'http://127.0.0.1:8077/') + '?autodismiss=1' + (flag('--trace') ? '&trace=1' : '') + (arg('--params', '') ? '&' + arg('--params', '') : '');
 mkdirSync(out, { recursive: true });
 
 // Screen positions on the 1680x1050 client.

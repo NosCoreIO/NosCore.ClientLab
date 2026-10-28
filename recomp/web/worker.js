@@ -9,7 +9,9 @@ self.inputRing = new Int32Array(new SharedArrayBuffer((2 + 4 * 1024) * 4));
 self.audioDone = new Int32Array(new SharedArrayBuffer(128 * 4));
 // Text pasted in the page: [0] = paste sequence, [1] = length, then UTF-16 code units (hle_menu.c).
 self.pasteBuf = new Int32Array(new SharedArrayBuffer(8 + 2 * 65536));
-postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone, paste: self.pasteBuf });
+// The page counts display refreshes here (one per requestAnimationFrame); Present waits for the next one.
+self.vsync = new Int32Array(new SharedArrayBuffer(4));
+postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone, paste: self.pasteBuf, vsync: self.vsync });
 
 function mountGame(FS) {
   const xhr = new XMLHttpRequest();
