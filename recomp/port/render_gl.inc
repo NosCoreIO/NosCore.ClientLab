@@ -14,7 +14,7 @@ EM_JS(int, js_gl_init, (int w, int h), {
     const vs = '#version 300 es\n' +
         'in vec4 aPos; in vec4 aCol; in vec4 aUV; in float aFog;\n' +
         'out vec4 vCol; out vec4 vUV; out float vFog;\n' +
-        'void main() { gl_Position = aPos; vCol = aCol.bgra; vUV = aUV; vFog = aFog; }\n';
+        'void main() { gl_Position = aPos; gl_PointSize = 1.0; vCol = aCol.bgra; vUV = aUV; vFog = aFog; }\n';
     const fs = '#version 300 es\n' +
         'precision highp float; precision highp int;\n' +
         'in vec4 vCol; in vec4 vUV; in float vFog;\n' +
@@ -110,7 +110,20 @@ EM_JS(void, js_gl_texture, (uint32_t id, int w, int h, const uint8_t* rgba), {
     gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, HEAPU8.subarray(rgba, rgba + w * h * 4));
     gl.generateMipmap(gl.TEXTURE_2D);
+    if (G.lods && G.lods.has(id)) gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, G.lods.get(id));
     if (G.prev) { G.prev[12] = -1; G.prev[13] = -1; }
+});
+
+/* SetLOD: the most detailed mip level sampled. */
+EM_JS(void, js_gl_texture_lod, (uint32_t id, int lod), {
+    const G = self.__gl, gl = G.gl, t = G.textures.get(id);
+    G.lods = G.lods || new Map();
+    G.lods.set(id, lod);
+    if (!t) return;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, lod);
+    if (G.prev) G.prev[12] = -1;
 });
 
 /* st: 0..5 stage 0 (colorop carg1 carg2 alphaop aarg1 aarg2), 6..11 stage 1, 12/13 texture ids, 14 tfactor,
@@ -417,6 +430,9 @@ void r_read_back(uint32_t surface) {
     js_gl_read((int)SW(surface), (int)SH(surface), GPTR(SBITS(surface)), (int)SPITCH(surface));
 }
 
+void r_preload(uint32_t tex) { if (gl_on) gl_texture(tex); }
+void r_texture_lod(uint32_t tex, uint32_t lod) { if (gl_on) js_gl_texture_lod(tex, (int)lod); }
+
 int r_gl_present(void) {
     if (!gl_on) return 0;
     double t = prof_now();
@@ -432,5 +448,7 @@ static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, in
     (void)flags; (void)color; (void)z; (void)x; (void)y; (void)w; (void)h;
 }
 int r_gl_present(void) { return 0; }
+void r_preload(uint32_t tex) { (void)tex; }
+void r_texture_lod(uint32_t tex, uint32_t lod) { (void)tex; (void)lod; }
 void r_read_back(uint32_t surface) { (void)surface; }
 #endif

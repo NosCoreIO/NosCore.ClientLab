@@ -599,7 +599,16 @@ static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
     else if (prim == 6) for (uint32_t k = 0; k < count && k + 2 < n; k++) triangle(&v[0], &v[k + 1], &v[k + 2]);
 }
 
-static uint32_t vertex_count(uint32_t prim, uint32_t count) { return prim == 4 ? 3 * count : prim == 5 || prim == 6 ? count + 2 : 0; }
+static uint32_t vertex_count(uint32_t prim, uint32_t count) {
+    switch (prim) {
+    case 1: return count;
+    case 2: return 2 * count;
+    case 3: return count + 1;
+    case 4: return 3 * count;
+    case 5: case 6: return count + 2;
+    default: return 0;
+    }
+}
 
 /* Vertex scratch, grown on demand: a large map's terrain is a single draw of well over 64k vertices. */
 static Vtx* vbuf;
