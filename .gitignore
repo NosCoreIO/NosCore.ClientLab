@@ -1,0 +1,26 @@
+# Client content is never committed. Users point the tools at their own install.
+client/
+*.exe
+*.dll
+*.NOS
+*.nos
+*.dat
+*.pak
+*.bin
+*.ini
+*.idb
+*.i64
+*.gpr
+*.rep/
+
+# Build output
+bin/
+obj/
+dist/
+node_modules/
+.vs/
+*.user
+
+# Python caches
+__pycache__/
+*.pyc

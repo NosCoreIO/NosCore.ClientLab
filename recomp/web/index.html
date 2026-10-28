@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NosTale Recomp</title>
+<style>
+  :root { --bg: #101014; --fg: #d8d8e0; --muted: #8a8a96; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  main { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; }
+  canvas { max-width: 100%; height: auto; background: #000; image-rendering: auto; }
+  #status { color: var(--muted); }
+  #log { width: min(100%, 1100px); height: 180px; overflow: auto; background: #0a0a0d; color: var(--muted);
+         font: 12px/1.35 ui-monospace, monospace; padding: 8px; box-sizing: border-box; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="screen" width="1024" height="768" tabindex="0"></canvas>
+  <div id="status">starting…</div>
+  <div id="log"></div>
+</main>
+<script>
+  const canvas = document.getElementById('screen');
+  const ctx = canvas.getContext('2d');
+  const status = document.getElementById('status');
+  const log = document.getElementById('log');
+  const worker = new Worker('/worker.js' + location.search);
+  let frames = 0, last = performance.now();
+  // Appending to textContent per line is quadratic; lines are batched per frame and the pane keeps the last 1000.
+  const LOG_LINES = 1000;
+  let lines = [], pending = [], flushQueued = false;
+  window.allLog = [];
+  function flushLog() {
+    flushQueued = false;
+    lines = lines.concat(pending);
+    pending = [];
+    if (lines.length > LOG_LINES) lines = lines.slice(-LOG_LINES);
+    log.textContent = lines.join('\n');
+    log.scrollTop = log.scrollHeight;
+  }
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'frame') {
+      if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = m.w; canvas.height = m.h; }
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(m.data.buffer), m.w, m.h), 0, 0);
+      frames++;
+      const now = performance.now();
+      if (now - last > 1000) { status.textContent = `${m.w}x${m.h}, ${frames} frames/s shown`; frames = 0; last = now; }
+    } else if (m.type === 'bitmap') {
+      if (canvas.width !== m.bmp.width || canvas.height !== m.bmp.height) { canvas.width = m.bmp.width; canvas.height = m.bmp.height; }
+      ctx.drawImage(m.bmp, 0, 0);
+      m.bmp.close();
+      frames++;
+      const now = performance.now();
+      if (now - last > 1000) { status.textContent = `${canvas.width}x${canvas.height}, ${frames} frames/s shown (WebGL)`; frames = 0; last = now; }
+    } else if (m.type === 'log') {
+      pending.push(m.text);
+      window.allLog.push(m.text);
+      if (!flushQueued) { flushQueued = true; requestAnimationFrame(flushLog); }
+    } else if (m.type === 'input') {
+      ring = m.ring;
+      audioDone = m.audioDone;
+    } else if (m.type === 'sound') {
+      sound(m);
+    } else if (m.type === 'net-open') {
+      netOpen(m.id, m.ring);
+    } else if (m.type === 'net-send') {
+      const c = nets.get(m.id);
+      if (c) c.sends = c.sends.then(() => fetch(`/net/send?id=${m.id}`, { method: 'POST', body: m.bytes })).catch(() => { });
+    } else if (m.type === 'net-close') {
+      const c = nets.get(m.id);
+      if (c) { c.open = false; nets.delete(m.id); c.sends.then(() => fetch(`/net/close?id=${m.id}`, { method: 'POST' })); }
+    }
+  };
+
+  // Relayed sockets (hle_misc.c): the page long-polls the dev server and fills the worker's ring, so the worker
+  // never blocks on the network.
+  const nets = new Map();
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function netOpen(id, ring) {
+    const hdr = new Int32Array(ring, 0, 4), data = new Uint8Array(ring, 16), size = data.length;
+    const conn = { open: true, sends: Promise.resolve() };
+    nets.set(id, conn);
+    (async () => {
+      while (conn.open) {
+        let r;
+        try { r = await fetch(`/net/recv?id=${id}&wait=1`); } catch { await sleep(100); continue; }
+        if (r.status === 410 || r.status === 404) break;
+        const bytes = new Uint8Array(await r.arrayBuffer());
+        for (let off = 0; off < bytes.length;) {
+          const written = Atomics.load(hdr, 0), free = size - (written - Atomics.load(hdr, 1));
+          if (free <= 0) { await sleep(5); continue; }
+          const n = Math.min(free, bytes.length - off), at = written % size, first = Math.min(n, size - at);
+          data.set(bytes.subarray(off, off + first), at);
+          if (n > first) data.set(bytes.subarray(off + first, off + n), 0);
+          Atomics.store(hdr, 0, written + n);
+          off += n;
+        }
+      }
+      Atomics.store(hdr, 2, 1);
+    })();
+  }
+
+  // Miles samples (hle_audio.c). Browsers only start audio after a user gesture, so the context resumes on the first
+  // click or key press; decoded buffers are cached by content.
+  let audio = null, audioDone = null;
+  window.soundStats = { played: 0, undecodable: 0 };
+  const voices = new Map(), decoded = new Map();
+  function audioContext() {
+    if (!audio) audio = new AudioContext();
+    return audio;
+  }
+  for (const ev of ['mousedown', 'keydown']) canvas.addEventListener(ev, () => audioContext().resume(), { capture: true });
+  function soundKey(bytes) {
+    let h = bytes.length;
+    for (let i = 0; i < bytes.length; i += Math.max(1, bytes.length >> 6)) h = (h * 31 + bytes[i]) | 0;
+    return h;
+  }
+  function stopVoice(id) {
+    const v = voices.get(id);
+    if (!v) return;
+    voices.delete(id);
+    v.source.onended = null;
+    try { v.source.stop(); } catch { }
+  }
+  async function sound(m) {
+    const ctx = audioContext();
+    if (m.op === 'stop') { stopVoice(m.id); return; }
+    if (m.op === 'volume') {
+      const v = voices.get(m.id);
+      if (v) { v.gain.gain.value = m.volume; v.panner.pan.value = m.pan * 2 - 1; }
+      return;
+    }
+    stopVoice(m.id);
+    const key = soundKey(m.bytes);
+    let buffer = decoded.get(key);
+    if (!buffer) {
+      try { buffer = await ctx.decodeAudioData(m.bytes.buffer); } catch { buffer = null; }
+      if (!buffer) { window.soundStats.undecodable++; if (audioDone) Atomics.store(audioDone, m.id, m.generation); return; }
+      decoded.set(key, buffer);
+    }
+    const source = ctx.createBufferSource(), gain = ctx.createGain(), panner = ctx.createStereoPanner();
+    source.buffer = buffer;
+    source.loop = m.loops === 0;
+    gain.gain.value = m.volume;
+    panner.pan.value = m.pan * 2 - 1;
+    source.connect(gain).connect(panner).connect(ctx.destination);
+    let left = m.loops > 1 ? m.loops - 1 : 0;
+    source.onended = () => {
+      if (voices.get(m.id)?.source !== source) return;
+      voices.delete(m.id);
+      if (audioDone) Atomics.store(audioDone, m.id, m.generation);
+    };
+    if (left > 0) { source.loop = true; setTimeout(() => { source.loop = false; }, buffer.duration * 1000 * left); }
+    voices.set(m.id, { source, gain, panner });
+    window.soundStats.played++;
+    source.start();
+  }
+
+  // Same event codes as pump_input in hle_user32.c.
+  const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7, dumpFrame: 8 };
+  let ring = null;
+  function send(type, a, x = 0, y = 0) {
+    if (!ring) return;
+    const head = Atomics.load(ring, 0), cap = (ring.length - 2) >> 2;
+    if (head - Atomics.load(ring, 1) >= cap) return;
+    const at = 2 + (head % cap) * 4;
+    ring[at] = type; ring[at + 1] = a; ring[at + 2] = x; ring[at + 3] = y;
+    Atomics.store(ring, 0, head + 1);
+  }
+  function pos(e) {
+    const r = canvas.getBoundingClientRect();
+    return [Math.round((e.clientX - r.left) * canvas.width / r.width), Math.round((e.clientY - r.top) * canvas.height / r.height)];
+  }
+  canvas.addEventListener('mousemove', (e) => send(IN.move, 0, ...pos(e)));
+  canvas.addEventListener('mousedown', (e) => { canvas.focus(); send(IN.down, e.button, ...pos(e)); e.preventDefault(); });
+  canvas.addEventListener('mouseup', (e) => send(IN.up, e.button, ...pos(e)));
+  canvas.addEventListener('wheel', (e) => { send(IN.wheel, e.deltaY < 0 ? 120 : -120, ...pos(e)); e.preventDefault(); }, { passive: false });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  const charKeys = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27 };
+  canvas.addEventListener('keydown', (e) => {
+    // F9 is not a game key: it asks the renderer to log every draw of the next frame.
+    if (e.key === 'F9') { send(IN.dumpFrame, 0); e.preventDefault(); return; }
+    send(IN.keydown, e.keyCode);
+    const ch = e.key.length === 1 ? e.key.charCodeAt(0) : charKeys[e.key];
+    if (ch !== undefined && !e.ctrlKey && !e.altKey) send(IN.char, ch);
+    e.preventDefault();
+  });
+  canvas.addEventListener('keyup', (e) => { send(IN.keyup, e.keyCode); e.preventDefault(); });
+</script>
+</body>
+</html>

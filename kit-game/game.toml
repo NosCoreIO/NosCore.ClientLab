@@ -1,0 +1,30 @@
+# NosTale (NosCore patched client) for recomp-kit. Draft: not yet run through the kit's setup/translate.
+# The kit lives at C:\tools\re\kits\recomp-kit; every kit tool takes --game-dir pointing here.
+
+[game]
+id = "nostale"
+name = "NosTale"
+app_name = "NosTaleRecomp"
+bundle_id = "io.noscore.nostale-recomp"
+executable = "NosCore.exe"
+sha256 = "398561ef13c5c577d83672fd89429926ceb2b2acaa92d3b74a5002286f0bd51a"
+image_base = 0x00400000
+entry_point = 0x0077cde8
+guest_root = 'C:\Nostale'
+developer_exe = "original/NosCore.exe"
+windows_version = "6.1"
+
+[translate]
+function_alignment = 4
+listings = "analysis/NosCore.exe"
+globals = "globals.toml"
+volatile_reads = []
+# Entry points found by our own lifter at run time (Delphi patterns Ghidra misses); see symbols/<md5>/recomp_seeds.txt.
+entry_points = []
+
+[controls]
+default_layout = "hidden"
+pad = "off"
+
+[bundle]
+exclude = []
