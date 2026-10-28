@@ -335,7 +335,9 @@ static void sock_poll(Sock* k) {
     double now = emscripten_get_now();
     if (now - k->last_poll < 8) return;
     k->last_poll = now;
+    double t0 = emscripten_get_now();
     int n = js_net_recv(k->remote, k->rx + k->rx_len, (int)(RX_CAP - k->rx_len));
+    port_prof_net += emscripten_get_now() - t0;
     if (n == -2) k->closed = 1;
     else if (n > 0) k->rx_len += (uint32_t)n;
 #else
@@ -423,7 +425,9 @@ static void ws_send(CPU* c) {
     Sock* k = sock_get(ARG(0));
 #ifdef __EMSCRIPTEN__
     if (k && k->connected) {
+        double t0 = emscripten_get_now();
         int n = js_net_send(k->remote, (const uint8_t*)GPTR(ARG(1)), (int)ARG(2));
+        port_prof_net += emscripten_get_now() - t0;
         static int logged;
         if (logged++ >= 20) port_log("send %08x: %u bytes", ARG(0), ARG(2));
         else {

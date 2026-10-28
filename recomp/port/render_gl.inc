@@ -5,10 +5,12 @@
 #include <emscripten.h>
 
 EM_JS(int, js_gl_init, (int w, int h), {
+    const report = (gl) => { const d = gl.getExtension('WEBGL_debug_renderer_info'); return d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); };
     if (typeof OffscreenCanvas === 'undefined' || typeof importScripts !== 'function') return 0;
     const canvas = new OffscreenCanvas(w, h);
     const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, preserveDrawingBuffer: false, depth: true });
     if (!gl) return 0;
+    postMessage({ type: 'log', text: 'WebGL renderer: ' + report(gl) });
     const vs = '#version 300 es\n' +
         'in vec4 aPos; in vec4 aCol; in vec4 aUV;\n' +
         'out vec4 vCol; out vec4 vUV;\n' +
@@ -104,6 +106,7 @@ EM_JS(void, js_gl_texture, (uint32_t id, int w, int h, const uint8_t* rgba), {
     gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, HEAPU8.subarray(rgba, rgba + w * h * 4));
     gl.generateMipmap(gl.TEXTURE_2D);
+    if (G.prev) { G.prev[12] = -1; G.prev[13] = -1; }
 });
 
 /* st: 0..5 stage 0 (colorop carg1 carg2 alphaop aarg1 aarg2), 6..11 stage 1, 12/13 texture ids, 14 tfactor,
@@ -111,41 +114,53 @@ EM_JS(void, js_gl_texture, (uint32_t id, int w, int h, const uint8_t* rgba), {
    24 z func, 25..28 scissor x y w h, 29..33 stage 0 sampler (mag min mip addressu addressv), 34..38 stage 1 */
 EM_JS(void, js_gl_draw, (int prim, const uint8_t* verts, int n, const int32_t* st), {
     const G = self.__gl, gl = G.gl, u = G.u, base = st >> 2, S = (i) => HEAP32[base + i];
-    gl.uniform4i(u.uS0, S(0), S(1), S(2), S(3));
-    gl.uniform4i(u.uA0, S(4), S(5), S(12) ? 1 : 0, 0);
-    gl.uniform4i(u.uS1, S(6), S(7), S(8), S(9));
-    gl.uniform4i(u.uA1, S(10), S(11), S(13) ? 1 : 0, 0);
-    const tf = S(14) >>> 0;
-    gl.uniform4f(u.uTFactor, ((tf >>> 16) & 255) / 255, ((tf >>> 8) & 255) / 255, (tf & 255) / 255, (tf >>> 24) / 255);
-    gl.uniform2i(u.uATest, S(15), S(16));
-    gl.uniform1f(u.uARef, S(17) & 255);
+    const P = G.prev || (G.prev = new Int32Array(40).fill(-1));
+    const changed = (from, to) => {
+        let c = false;
+        for (let i = from; i < to; i++) if (P[i] !== S(i)) { P[i] = S(i); c = true; }
+        return c;
+    };
+    // Groups are tested one by one (no short-circuit) so the cache stays in step with GL.
+    const s0 = changed(0, 6), t0 = P[12] !== S(12), s1 = changed(6, 12), t1 = P[13] !== S(13);
+    if (s0 || t0) { gl.uniform4i(u.uS0, S(0), S(1), S(2), S(3)); gl.uniform4i(u.uA0, S(4), S(5), S(12) ? 1 : 0, 0); }
+    if (s1 || t1) { gl.uniform4i(u.uS1, S(6), S(7), S(8), S(9)); gl.uniform4i(u.uA1, S(10), S(11), S(13) ? 1 : 0, 0); }
+    if (changed(14, 15)) {
+        const tf = S(14) >>> 0;
+        gl.uniform4f(u.uTFactor, ((tf >>> 16) & 255) / 255, ((tf >>> 8) & 255) / 255, (tf & 255) / 255, (tf >>> 24) / 255);
+    }
+    if (changed(15, 18)) { gl.uniform2i(u.uATest, S(15), S(16)); gl.uniform1f(u.uARef, S(17) & 255); }
     const wrap = (a) => a === 2 ? gl.MIRRORED_REPEAT : (a === 3 || a === 4) ? gl.CLAMP_TO_EDGE : gl.REPEAT;
     for (let k = 0; k < 2; k++) {
+        const b = 29 + 5 * k, texChanged = P[12 + k] !== S(12 + k), samplerChanged = changed(b, b + 5);
+        P[12 + k] = S(12 + k);
         const id = S(12 + k) >>> 0;
         const t = id ? G.textures.get(id) : null;
-        if (!t) continue;
-        const b = 29 + 5 * k, magLinear = S(b) >= 2, minLinear = S(b + 1) >= 2;
+        if (!t || (!texChanged && !samplerChanged)) continue;
         gl.activeTexture(gl.TEXTURE0 + k);
         gl.bindTexture(gl.TEXTURE_2D, t);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, magLinear ? gl.LINEAR : gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minLinear ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, S(b) >= 2 ? gl.LINEAR : gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, S(b + 1) >= 2 ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap(S(b + 3)));
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap(S(b + 4)));
     }
-    if (S(18)) {
-        const f = [gl.ONE, gl.ZERO, gl.ONE, gl.SRC_COLOR, gl.ONE_MINUS_SRC_COLOR, gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA,
-                   gl.DST_ALPHA, gl.ONE_MINUS_DST_ALPHA, gl.DST_COLOR, gl.ONE_MINUS_DST_COLOR, gl.SRC_ALPHA_SATURATE];
-        const eq = [gl.FUNC_ADD, gl.FUNC_ADD, gl.FUNC_SUBTRACT, gl.FUNC_REVERSE_SUBTRACT, gl.MIN, gl.MAX];
-        gl.enable(gl.BLEND);
-        gl.blendFunc(f[S(19)] ?? gl.ONE, f[S(20)] ?? gl.ZERO);
-        gl.blendEquation(eq[S(21)] ?? gl.FUNC_ADD);
-    } else gl.disable(gl.BLEND);
-    if (S(22)) {
-        gl.enable(gl.DEPTH_TEST);
-        gl.depthFunc(0x1FF + Math.min(Math.max(S(24), 1), 8));
-        gl.depthMask(S(23) !== 0);
-    } else gl.disable(gl.DEPTH_TEST);
-    gl.scissor(S(25), G.h - S(26) - S(28), S(27), S(28));
+    if (changed(18, 22)) {
+        if (S(18)) {
+            const f = [gl.ONE, gl.ZERO, gl.ONE, gl.SRC_COLOR, gl.ONE_MINUS_SRC_COLOR, gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA,
+                       gl.DST_ALPHA, gl.ONE_MINUS_DST_ALPHA, gl.DST_COLOR, gl.ONE_MINUS_DST_COLOR, gl.SRC_ALPHA_SATURATE];
+            const eq = [gl.FUNC_ADD, gl.FUNC_ADD, gl.FUNC_SUBTRACT, gl.FUNC_REVERSE_SUBTRACT, gl.MIN, gl.MAX];
+            gl.enable(gl.BLEND);
+            gl.blendFunc(f[S(19)] ?? gl.ONE, f[S(20)] ?? gl.ZERO);
+            gl.blendEquation(eq[S(21)] ?? gl.FUNC_ADD);
+        } else gl.disable(gl.BLEND);
+    }
+    if (changed(22, 25)) {
+        if (S(22)) {
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(0x1FF + Math.min(Math.max(S(24), 1), 8));
+            gl.depthMask(S(23) !== 0);
+        } else gl.disable(gl.DEPTH_TEST);
+    }
+    if (changed(25, 29)) gl.scissor(S(25), G.h - S(26) - S(28), S(27), S(28));
     gl.bufferData(gl.ARRAY_BUFFER, HEAPU8.subarray(verts, verts + n * 36), gl.STREAM_DRAW);
     gl.drawArrays(prim, 0, n);
 });
@@ -160,6 +175,7 @@ EM_JS(void, js_gl_clear, (int flags, uint32_t color, float z, int x, int y, int 
     }
     if (flags & 2) { gl.depthMask(true); gl.clearDepth(z); bits |= gl.DEPTH_BUFFER_BIT; }
     if (bits) gl.clear(bits);
+    if (G.prev) { G.prev[22] = G.prev[23] = G.prev[24] = -1; G.prev[25] = -1; }
 });
 
 EM_JS(void, js_gl_present, (void), {
@@ -171,6 +187,7 @@ EM_JS(void, js_gl_present, (void), {
 });
 
 static uint32_t gl_backbuffer;
+static void gl_flush(void);
 static uint8_t* gl_verts;
 static uint8_t* gl_rgba;
 static uint32_t gl_rgba_size;
@@ -190,6 +207,8 @@ static uint32_t gl_texture(uint32_t tex) {
     uint32_t s = M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
     if (!s || !SBITS(s)) return 0;
     if (M32(tex + 56) != 2) {
+        gl_flush();
+        double t0 = prof_now();
         uint32_t w = SW(s), h = SH(s);
         if (w * h * 4 > gl_rgba_size) { free(gl_rgba); gl_rgba_size = w * h * 4; gl_rgba = malloc(gl_rgba_size); }
         uint8_t* p = gl_rgba;
@@ -200,24 +219,38 @@ static uint32_t gl_texture(uint32_t tex) {
             }
         js_gl_texture(tex, (int)w, (int)h, gl_rgba);
         M32(tex + 56) = 2;
+        prof_upload += prof_now() - t0;
     }
     return tex;
 }
 
-static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
-    if (R.target != gl_backbuffer || n == 0) return;
-    float tw = (float)SW(R.target), th = (float)SH(R.target);
-    for (uint32_t k = 0; k < n; k++) {
-        float* f = (float*)(gl_verts + 36 * k);
-        float w = v[k].w > 0 ? v[k].w : 1;
-        f[0] = ((v[k].x + 0.5f) / tw * 2 - 1) * w;
-        f[1] = (1 - (v[k].y + 0.5f) / th * 2) * w;
-        f[2] = (v[k].z * 2 - 1) * w;
-        f[3] = w;
-        memcpy(gl_verts + 36 * k + 16, &v[k].diffuse, 4);
-        memcpy(gl_verts + 36 * k + 20, v[k].uv, 16);
-    }
-    int32_t st[40] = {0};
+/* Draws with identical state are merged into one triangle list: the client issues thousands of tiny draws per frame
+   and each call into JavaScript costs far more than the vertices it carries. */
+#define BATCH_VERTS 65535
+static int32_t batch_st[40];
+static uint32_t batch_n;
+
+static void gl_flush(void) {
+    if (!batch_n) return;
+    double t = prof_now();
+    js_gl_draw(4, gl_verts, (int)batch_n, batch_st);
+    prof_submit += prof_now() - t;
+    batch_n = 0;
+}
+
+static void put_vertex(uint8_t* dst, const Vtx* v, float tw, float th) {
+    float* f = (float*)dst;
+    float w = v->w > 0 ? v->w : 1;
+    f[0] = ((v->x + 0.5f) / tw * 2 - 1) * w;
+    f[1] = (1 - (v->y + 0.5f) / th * 2) * w;
+    f[2] = (v->z * 2 - 1) * w;
+    f[3] = w;
+    memcpy(dst + 16, &v->diffuse, 4);
+    memcpy(dst + 20, v->uv, 16);
+}
+
+static void gl_state(int32_t* st) {
+    memset(st, 0, 40 * sizeof *st);
     for (int s = 0; s < 2; s++) {
         for (int k = 0; k < 6; k++) st[6 * s + k] = (int32_t)R.tss[s][1 + k];
         st[12 + s] = (int32_t)gl_texture(R.tex_obj[s]);
@@ -233,14 +266,45 @@ static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
     st[22] = (int32_t)R.rs[7]; st[23] = (int32_t)R.rs[14]; st[24] = (int32_t)R.rs[23];
     st[25] = (int32_t)(R.vp_set ? R.vp_x : 0); st[26] = (int32_t)(R.vp_set ? R.vp_y : 0);
     st[27] = (int32_t)(R.vp_set ? R.vp_w : SW(R.target)); st[28] = (int32_t)(R.vp_set ? R.vp_h : SH(R.target));
-    js_gl_draw((int)prim, gl_verts, (int)n, st);
 }
 
-static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h) { js_gl_clear(flags, color, z, x, y, w, h); }
+static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
+    if (R.target != gl_backbuffer || n == 0) return;
+    float tw = (float)SW(R.target), th = (float)SH(R.target);
+    int32_t st[40];
+    gl_state(st);
+    if (prim < 4 || prim > 6) {
+        gl_flush();
+        for (uint32_t k = 0; k < n && k < BATCH_VERTS; k++) put_vertex(gl_verts + 36 * k, &v[k], tw, th);
+        js_gl_draw((int)prim, gl_verts, (int)(n < BATCH_VERTS ? n : BATCH_VERTS), st);
+        return;
+    }
+    uint32_t tris = prim == 4 ? n / 3 : n - 2;
+    if (batch_n && (memcmp(st, batch_st, sizeof st) || batch_n + 3 * tris > BATCH_VERTS)) gl_flush();
+    memcpy(batch_st, st, sizeof st);
+    for (uint32_t t = 0; t < tris; t++) {
+        if (batch_n + 3 > BATCH_VERTS) gl_flush();
+        uint32_t a, b, c;
+        if (prim == 4) { a = 3 * t; b = a + 1; c = a + 2; }
+        else if (prim == 5) { a = t; b = t + 1; c = t + 2; }
+        else { a = 0; b = t + 1; c = t + 2; }
+        put_vertex(gl_verts + 36 * batch_n++, &v[a], tw, th);
+        put_vertex(gl_verts + 36 * batch_n++, &v[b], tw, th);
+        put_vertex(gl_verts + 36 * batch_n++, &v[c], tw, th);
+    }
+}
+
+static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h) {
+    gl_flush();
+    js_gl_clear(flags, color, z, x, y, w, h);
+}
 
 int r_gl_present(void) {
     if (!gl_on) return 0;
+    double t = prof_now();
+    gl_flush();
     js_gl_present();
+    prof_present += prof_now() - t;
     return 1;
 }
 #else

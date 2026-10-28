@@ -31,7 +31,7 @@ const GROUND = [1000, 520];
 const browser = await chromium.launch({
   headless: !flag('--headed'),
   channel: process.env.DRIVE_CHANNEL || 'chrome',
-  args: ['--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
+  args: ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-swiftshader'],
 });
 let page;
 try {
@@ -86,8 +86,24 @@ try {
   step('enter world');
   await click(CHARACTER_SLOT);
   await page.waitForTimeout(2000);
+  const beforeStart = (await logText()).length;
+  // The map arrives as several large packets; a START pressed too early is ignored, so press it again once.
+  const entered = async (seconds) => {
+    for (let i = 0; i < seconds; i++) {
+      if (/recv 00000100: \d{4,} bytes/.test((await logText()).slice(beforeStart))) return true;
+      await page.waitForTimeout(1000);
+    }
+    return false;
+  };
   await click(START_BUTTON);
-  await page.waitForTimeout(25000);
+  if (!await entered(15)) {
+    step('START ignored, pressing again');
+    await click(CHARACTER_SLOT);
+    await page.waitForTimeout(2000);
+    await click(START_BUTTON);
+    if (!await entered(20)) throw new Error('did not enter the world');
+  }
+  await page.waitForTimeout(10000);
   await shot('3-world.png');
 
   step('click ground');

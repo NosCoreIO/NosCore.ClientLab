@@ -5,6 +5,17 @@
 #include <stdlib.h>
 
 static int gl_on;
+
+/* Per-frame profile: time in draw calls and texture uploads against the whole frame, logged every 5 seconds. */
+#include <time.h>
+static double prof_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+static double prof_draw, prof_upload, prof_frame_start, prof_frames_ms, prof_submit, prof_present, prof_fetch;
+static uint32_t prof_frames, prof_draw_calls, prof_vertices;
+double port_prof_net;
 static void gl_start(uint32_t backbuffer);
 static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h);
 
@@ -57,9 +68,11 @@ void r_init(uint32_t backbuffer) {
 }
 
 void r_set_render_target(uint32_t surface) { R.target = surface; R.vp_set = 0; }
+static int wvp_dirty = 1;
 void r_set_transform(uint32_t type, uint32_t addr) {
     Mat* m = type == 256 ? &R.world : type == 2 ? &R.view : type == 3 ? &R.proj : (type >= 16 && type < 24) ? &R.tex[type - 16] : 0;
     if (m) memcpy(m->m, GPTR(addr), 64);
+    if (type == 256 || type == 2 || type == 3) wvp_dirty = 1;
 }
 void r_get_transform(uint32_t type, uint32_t addr) {
     Mat* m = type == 256 ? &R.world : type == 2 ? &R.view : type == 3 ? &R.proj : (type >= 16 && type < 24) ? &R.tex[type - 16] : 0;
@@ -359,37 +372,82 @@ static uint32_t light_vertex(const float pos[3], const float nrm_in[3], int has_
     return r | (uint32_t)(a * 255 + 0.5f) << 24;
 }
 
-static void fetch(uint32_t p, Vtx* o) {
-    uint32_t fvf = R.fvf, off = 0, pos = fvf & 0xe;
-    float in[4] = {MF32(p), MF32(p + 4), MF32(p + 8), 1}, t[4], c[4];
-    off = pos == 4 ? 16 : 12;
+/* world * view * projection, rebuilt only when one of them changes */
+static Mat wvp;
+static void mat_mul(const Mat* a, const Mat* b, Mat* out) {
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+            float s = 0;
+            for (int k = 0; k < 4; k++) s += a->m[4 * i + k] * b->m[4 * k + j];
+            out->m[4 * i + j] = s;
+        }
+}
+static void update_wvp(void) {
+    if (!wvp_dirty) return;
+    Mat wv;
+    mat_mul(&R.world, &R.view, &wv);
+    mat_mul(&wv, &R.proj, &wvp);
+    wvp_dirty = 0;
+}
+
+/* Vertex layout and per-draw constants, worked out once per draw call instead of once per vertex. */
+static struct {
+    uint32_t pos, normal_at, diffuse_at, tex_at[4], tex_n[4];
+    int lit, has_diffuse, pretransformed, stage_set[STAGES];
+    uint32_t ttff[STAGES];
+    float vw, vh, vx, vy;
+} LY;
+
+static double fetch_t0;
+static void layout_begin(void) {
+    fetch_t0 = prof_now();
+    uint32_t fvf = R.fvf, pos = fvf & 0xe, off = pos == 4 ? 16 : 12;
     if (pos >= 6 && pos <= 0xe) off += 4 * ((pos - 4) / 2);
-    uint32_t normal_at = off;
+    LY.pos = pos;
+    LY.pretransformed = pos == 4;
+    LY.normal_at = off;
     if (fvf & 0x10) off += 12;
     if (fvf & 0x20) off += 4;
-    o->diffuse = 0xffffffffu;
-    if (fvf & 0x40) { o->diffuse = M32(p + off); off += 4; }
-    if (R.rs[137] && (fvf & 0x10) && pos != 4) {
-        float wp[4], nrm[3] = {MF32(p + normal_at), MF32(p + normal_at + 4), MF32(p + normal_at + 8)};
-        xform(&R.world, in, wp);
-        o->diffuse = light_vertex(wp, nrm, (fvf & 0x40) != 0, o->diffuse);
-    }
+    LY.has_diffuse = (fvf & 0x40) != 0;
+    LY.diffuse_at = off;
+    if (fvf & 0x40) off += 4;
     if (fvf & 0x80) off += 4;
-    float sets[4][4];
     uint32_t nsets = (fvf >> 8) & 15;
     for (uint32_t k = 0; k < 4; k++) {
-        float* tc = sets[k];
-        tc[0] = tc[1] = 0; tc[2] = 1; tc[3] = 0;
+        LY.tex_n[k] = 0;
         if (k >= nsets) continue;
         uint32_t tsize = (fvf >> (16 + 2 * k)) & 3;
-        int n = tsize == 0 ? 2 : tsize == 1 ? 3 : tsize == 2 ? 4 : 1;
-        for (int j = 0; j < n; j++) tc[j] = MF32(p + off + 4 * j);
-        if (n == 3) tc[3] = 1;
-        off += 4 * n;
+        LY.tex_n[k] = tsize == 0 ? 2 : tsize == 1 ? 3 : tsize == 2 ? 4 : 1;
+        LY.tex_at[k] = off;
+        off += 4 * LY.tex_n[k];
     }
     for (int st = 0; st < STAGES; st++) {
-        const float* tc = sets[R.tss[st][11] & 3];
-        uint32_t ttff = R.tss[st][24];
+        LY.stage_set[st] = (int)(R.tss[st][11] & 3);
+        LY.ttff[st] = R.tss[st][24];
+    }
+    LY.lit = R.rs[137] && (fvf & 0x10) && pos != 4;
+    LY.vw = (float)(R.vp_set ? R.vp_w : SW(R.target));
+    LY.vh = (float)(R.vp_set ? R.vp_h : SH(R.target));
+    LY.vx = (float)(R.vp_set ? R.vp_x : 0);
+    LY.vy = (float)(R.vp_set ? R.vp_y : 0);
+    if (!LY.pretransformed) update_wvp();
+}
+
+static void fetch(uint32_t p, Vtx* o) {
+    float in[4] = {MF32(p), MF32(p + 4), MF32(p + 8), 1}, t[4];
+    o->diffuse = LY.has_diffuse ? M32(p + LY.diffuse_at) : 0xffffffffu;
+    if (LY.lit) {
+        float wp[4], nrm[3] = {MF32(p + LY.normal_at), MF32(p + LY.normal_at + 4), MF32(p + LY.normal_at + 8)};
+        xform(&R.world, in, wp);
+        o->diffuse = light_vertex(wp, nrm, LY.has_diffuse, o->diffuse);
+    }
+    for (int st = 0; st < STAGES; st++) {
+        int set = LY.stage_set[st];
+        float tc[4] = {0, 0, 1, 0};
+        uint32_t n = LY.tex_n[set], at = p + LY.tex_at[set];
+        for (uint32_t j = 0; j < n; j++) tc[j] = MF32(at + 4 * j);
+        if (n == 3) tc[3] = 1;
+        uint32_t ttff = LY.ttff[st];
         if (ttff & 7) {
             float r[4];
             xform(&R.tex[st], tc, r);
@@ -399,14 +457,11 @@ static void fetch(uint32_t p, Vtx* o) {
             o->uv[2 * st] = tc[0]; o->uv[2 * st + 1] = tc[1];
         }
     }
-    uint32_t vw = R.vp_set ? R.vp_w : SW(R.target), vh = R.vp_set ? R.vp_h : SH(R.target), vx = R.vp_set ? R.vp_x : 0, vy = R.vp_set ? R.vp_y : 0;
-    if (pos == 4) { o->x = in[0]; o->y = in[1]; o->z = in[2]; o->w = 1; return; }
-    xform(&R.world, in, t);
-    xform(&R.view, t, c);
-    xform(&R.proj, c, t);
+    if (LY.pretransformed) { o->x = in[0]; o->y = in[1]; o->z = in[2]; o->w = 1; return; }
+    xform(&wvp, in, t);
     float w = t[3] != 0 ? t[3] : 1;
-    o->x = vx + (t[0] / w + 1) * 0.5f * vw;
-    o->y = vy + (1 - t[1] / w) * 0.5f * vh;
+    o->x = LY.vx + (t[0] / w + 1) * 0.5f * LY.vw;
+    o->y = LY.vy + (1 - t[1] / w) * 0.5f * LY.vh;
     o->z = t[2] / w;
     o->w = w;
 }
@@ -463,6 +518,7 @@ static void log_state_combo(void) {
 static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n);
 
 static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
+    prof_fetch += prof_now() - fetch_t0;
     S.draws++;
     if (gl_on) { gl_draw_list(prim, v, n); return; }
     log_state_combo();
@@ -476,7 +532,8 @@ static uint32_t vertex_count(uint32_t prim, uint32_t count) { return prim == 4 ?
 
 static Vtx vbuf[65536];
 
-void r_draw(uint32_t prim, uint32_t start, uint32_t count) {
+static void draw_impl_draw(uint32_t prim, uint32_t start, uint32_t count) {
+    layout_begin();
     uint32_t n = vertex_count(prim, count);
     if (!R.vb || !n || n > 65536 || !R.vb_stride) return;
     uint32_t base = M32(R.vb + 28) + R.vb_offset;
@@ -484,32 +541,49 @@ void r_draw(uint32_t prim, uint32_t start, uint32_t count) {
     draw_list(prim, count, vbuf, n);
 }
 
-void r_draw_up(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride) {
+static void draw_impl_draw_up(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride) {
+    layout_begin();
     uint32_t n = vertex_count(prim, count);
     if (!n || n > 65536) return;
     for (uint32_t k = 0; k < n; k++) fetch(data + k * stride, &vbuf[k]);
     draw_list(prim, count, vbuf, n);
 }
 
-void r_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t start_index, uint32_t count) {
-    uint32_t n = vertex_count(prim, count);
-    if (!R.vb || !R.ib || !n || n > 65536) return;
-    uint32_t vb = M32(R.vb + 28) + R.vb_offset, ib = M32(R.ib + 28), idx32 = M32(R.ib + 20) == 102;
+/* Indexed meshes share vertices between triangles: each referenced vertex is transformed and lit once, then the
+   index list picks from that cache. */
+static Vtx vcache[65536];
+
+static void draw_indexed_cached(uint32_t prim, uint32_t count, uint32_t n, uint32_t vb, uint32_t stride,
+                                uint32_t indices, int idx32, int32_t base_vertex) {
+    uint32_t lo = 0xffffffffu, hi = 0;
     for (uint32_t k = 0; k < n; k++) {
-        uint32_t i = idx32 ? M32(ib + 4 * (start_index + k)) : M16(ib + 2 * (start_index + k));
-        fetch(vb + (uint32_t)((int32_t)i + base_vertex) * R.vb_stride, &vbuf[k]);
+        uint32_t i = idx32 ? M32(indices + 4 * k) : M16(indices + 2 * k);
+        if (i < lo) lo = i;
+        if (i > hi) hi = i;
+    }
+    if (hi - lo >= 65536) return;
+    for (uint32_t i = lo; i <= hi; i++) fetch(vb + (uint32_t)((int32_t)i + base_vertex) * stride, &vcache[i - lo]);
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t i = idx32 ? M32(indices + 4 * k) : M16(indices + 2 * k);
+        vbuf[k] = vcache[i - lo];
     }
     draw_list(prim, count, vbuf, n);
 }
 
-void r_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t idx_fmt, uint32_t data, uint32_t stride) {
+static void draw_impl_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t start_index, uint32_t count) {
+    layout_begin();
+    uint32_t n = vertex_count(prim, count);
+    if (!R.vb || !R.ib || !n || n > 65536) return;
+    int idx32 = M32(R.ib + 20) == 102;
+    uint32_t ib = M32(R.ib + 28) + start_index * (idx32 ? 4 : 2);
+    draw_indexed_cached(prim, count, n, M32(R.vb + 28) + R.vb_offset, R.vb_stride, ib, idx32, base_vertex);
+}
+
+static void draw_impl_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t idx_fmt, uint32_t data, uint32_t stride) {
+    layout_begin();
     uint32_t n = vertex_count(prim, count);
     if (!n || n > 65536) return;
-    for (uint32_t k = 0; k < n; k++) {
-        uint32_t i = idx_fmt == 102 ? M32(indices + 4 * k) : M16(indices + 2 * k);
-        fetch(data + i * stride, &vbuf[k]);
-    }
-    draw_list(prim, count, vbuf, n);
+    draw_indexed_cached(prim, count, n, data, stride, indices, idx_fmt == 102, 0);
 }
 
 void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z) {
@@ -545,6 +619,22 @@ void r_dump_bmp(uint32_t surface, const char* path) {
     fclose(f);
 }
 
+void r_prof_frame(void) {
+    double now = prof_now();
+    if (prof_frame_start > 0) prof_frames_ms += now - prof_frame_start;
+    prof_frame_start = now;
+    if (++prof_frames < 2 || prof_frames_ms < 5000) return;
+    port_log("profile: %.1f ms/frame (%.0f fps): draw calls %.1f ms (%u calls, %u prims; GL submit %.1f), texture uploads %.1f, "
+             "present %.1f, game %.1f; vertex fetch %.1f, network relay %.1f",
+             prof_frames_ms / prof_frames, 1000.0 * prof_frames / prof_frames_ms, prof_draw / prof_frames,
+             prof_draw_calls / prof_frames, prof_vertices / prof_frames, prof_submit / prof_frames, prof_upload / prof_frames,
+             prof_present / prof_frames, (prof_frames_ms - prof_draw - prof_upload - prof_present) / prof_frames,
+             prof_fetch / prof_frames, port_prof_net / prof_frames);
+    port_report_api_time(prof_frames);
+    prof_frames = prof_draw_calls = prof_vertices = 0;
+    prof_frames_ms = prof_draw = prof_upload = prof_submit = prof_present = prof_fetch = port_prof_net = 0;
+}
+
 void r_stats(void) {
     port_log("render: %u draws (%u skipped), %u triangles, %u pixels covered, %u written; target %ux%u fmt %u; sample v0 x=%.1f y=%.1f u=%.3f v=%.3f",
              S.draws, S.skipped, S.tris, S.covered, S.written, R.target ? SW(R.target) : 0, R.target ? SH(R.target) : 0,
@@ -567,3 +657,35 @@ void r_stats(void) {
 }
 
 #include "render_gl.inc"
+
+void r_draw(uint32_t prim, uint32_t start, uint32_t count) {
+    double t = prof_now();
+    draw_impl_draw(prim, start, count);
+    prof_draw += prof_now() - t;
+    prof_draw_calls++;
+    prof_vertices += count;
+}
+
+void r_draw_up(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride) {
+    double t = prof_now();
+    draw_impl_draw_up(prim, count, data, stride);
+    prof_draw += prof_now() - t;
+    prof_draw_calls++;
+    prof_vertices += count;
+}
+
+void r_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t start_index, uint32_t count) {
+    double t = prof_now();
+    draw_impl_draw_indexed(prim, base_vertex, start_index, count);
+    prof_draw += prof_now() - t;
+    prof_draw_calls++;
+    prof_vertices += count;
+}
+
+void r_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t idx_fmt, uint32_t data, uint32_t stride) {
+    double t = prof_now();
+    draw_impl_draw_indexed_up(prim, count, indices, idx_fmt, data, stride);
+    prof_draw += prof_now() - t;
+    prof_draw_calls++;
+    prof_vertices += count;
+}

@@ -57,6 +57,9 @@ uint32_t guest_strdup(const char* s);
 
 int port_file_fd(uint32_t handle);
 extern uint32_t port_frames;
+extern double port_prof_net;
+double port_now_ms(void);
+void port_report_api_time(uint32_t frames);
 extern int port_trace_budget;
 void port_fn_trace_start(CPU* c);
 void port_threads_pump(CPU* c);

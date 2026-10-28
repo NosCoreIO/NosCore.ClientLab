@@ -153,6 +153,7 @@ static void v_Present(CPU* c) {
     static int checked;
     if (!checked) { checked = 1; shot_dir = getenv("PORT_SHOT_DIR"); }
     port_frames++;
+    r_prof_frame();
     if (++frames % 300 == 1) port_log("Present frame %u", frames);
     if (!r_gl_present()) web_present(backbuffer);
     if (shot_dir && (frames == 1 || frames % 600 == 0)) {

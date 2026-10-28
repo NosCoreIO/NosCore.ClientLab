@@ -1,4 +1,5 @@
 #include "port.h"
+#include <time.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <unistd.h>
@@ -13,6 +14,7 @@ uint32_t port_guest_cmdline_addr;
 static FILE* log_file;
 static CPU* main_cpu;
 static int port_trace;
+static int api_timing;
 int port_trace_budget;
 
 /* While a click trace is running, each guest function seen in the entry ring is logged once. */
@@ -150,6 +152,8 @@ typedef struct {
     uint8_t soft;
     uint8_t logged;
     HleFn fn;
+    double ms;
+    uint32_t calls;
 } Tramp;
 
 /* Unimplemented APIs whose stdcall argument count the SDK tells us become soft stubs: log once, return 0. */
@@ -243,6 +247,33 @@ const char* hle_module_name(uint32_t h) {
     return (int)k < module_count ? modules[k] : 0;
 }
 
+double port_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+/* The APIs that took the most time since the last report (time includes guest callbacks they make). */
+void port_report_api_time(uint32_t frames) {
+    if (!api_timing) return;
+    char line[600];
+    int len = 0;
+    double total = 0;
+    for (int k = 0; k < tramp_count; k++) total += tramps[k].ms;
+    len += snprintf(line + len, sizeof line - len, "api time %.1f ms/frame:", total / frames);
+    for (int pick = 0; pick < 6; pick++) {
+        int best = -1;
+        for (int k = 0; k < tramp_count; k++)
+            if (tramps[k].ms > 0 && (best < 0 || tramps[k].ms > tramps[best].ms)) best = k;
+        if (best < 0) break;
+        len += snprintf(line + len, sizeof line - len, " %s %.1f (%u)", tramps[best].name, tramps[best].ms / frames,
+                        tramps[best].calls / frames);
+        tramps[best].ms = -tramps[best].ms - 1;
+    }
+    for (int k = 0; k < tramp_count; k++) { tramps[k].ms = 0; tramps[k].calls = 0; }
+    port_log("%s", line);
+}
+
 /* Called by rt.c for every call or jump to a non-guest address. */
 void rt_call_host_raw(CPU* c, uint32_t target) {
     if (target >= TRAMP_BASE && target < TRAMP_LIMIT && ((target - TRAMP_BASE) % 16) == 0) {
@@ -258,7 +289,13 @@ void rt_call_host_raw(CPU* c, uint32_t target) {
         int traced = port_trace || (port_trace_budget > 0 && !strstr(t->name, "::") && port_trace_budget--);
         if (traced) port_log("api %s!%s from %08x esp=%08x args %08x %08x %08x %08x", t->dll, t->name, M32(c->esp), c->esp,
                              M32(c->esp + 4), M32(c->esp + 8), M32(c->esp + 12), M32(c->esp + 16));
-        t->fn(c);
+        if (api_timing) {
+            double t0 = port_now_ms();
+            t->fn(c);
+            t->ms += port_now_ms() - t0;
+            t->calls++;
+        } else
+            t->fn(c);
         if (traced) port_log("    -> %08x", c->eax);
         if (!c->pend) c->esp += 4 + (t->argc == CDECL_ARGS ? 0 : 4u * t->argc);
         return;
@@ -431,6 +468,7 @@ int main(int argc, char** argv) {
         if (s) { *s = 0; if (chdir(dir)) port_log("cannot chdir to %s", dir); }
     }
     port_trace = getenv("PORT_TRACE") != 0;
+    api_timing = getenv("PORT_PROFILE_API") != 0;
     tramps = calloc(MAX_TRAMP, sizeof(Tramp));
     hle_text_register();
     hle_gdi_register();
