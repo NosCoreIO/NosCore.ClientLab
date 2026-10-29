@@ -163,21 +163,72 @@ static void u_PtInRect(CPU* c) {
     uint32_t r = ARG(0);
     RET(x >= (int32_t)M32(r) && x < (int32_t)M32(r + 8) && y >= (int32_t)M32(r + 4) && y < (int32_t)M32(r + 12));
 }
+/* ---- display modes ---- */
+
+static const uint16_t modes[][2] = {{640, 480},   {800, 600},   {1024, 768},  {1280, 720},  {1280, 1024},
+                                    {1366, 768},  {1440, 900},  {1600, 900},  {1680, 1050}, {1920, 1080}};
+#define MODES (int)(sizeof modes / sizeof modes[0])
+#define DEFAULT_W 1920
+#define DEFAULT_H 1080
+#define DISPLAY_BPP 32
+#define DISPLAY_HZ 60
+uint32_t port_screen_w = DEFAULT_W, port_screen_h = DEFAULT_H;
+
+int port_display_mode(int k, uint32_t* w, uint32_t* h) {
+    if (k < 0 || k >= MODES) return 0;
+    *w = modes[k][0];
+    *h = modes[k][1];
+    return 1;
+}
+static int mode_listed(uint32_t w, uint32_t h) {
+    for (int k = 0; k < MODES; k++)
+        if (modes[k][0] == w && modes[k][1] == h) return 1;
+    return 0;
+}
+
+enum { DM_BITSPERPEL = 0x40000, DM_PELSWIDTH = 0x80000, DM_PELSHEIGHT = 0x100000, DM_DISPLAYFREQUENCY = 0x400000 };
+enum { CDS_TEST = 2, DISP_CHANGE_BADMODE = -2, WM_DISPLAYCHANGE = 0x7E };
+
+/* DEVMODEA: dmSize at 36, dmFields at 40, then dmBitsPerPel, dmPelsWidth, dmPelsHeight and dmDisplayFrequency at
+   104, 108, 112 and 120. */
 static void u_EnumDisplaySettingsA(CPU* c) {
-    uint32_t dm = ARG(2);
-    if (ARG(1) > 0 && ARG(1) != 0xFFFFFFFFu && ARG(1) != 0xFFFFFFFEu) { RET(0); return; }
+    uint32_t dm = ARG(2), n = ARG(1), w, h;
+    if (n == 0xFFFFFFFFu) { w = port_screen_w; h = port_screen_h; }
+    else if (n == 0xFFFFFFFEu) { w = DEFAULT_W; h = DEFAULT_H; }
+    else if (!port_display_mode((int)n, &w, &h)) { RET(0); return; }
     memset(GPTR(dm + 36), 0, 120);
     M16(dm + 36) = 156;
-    M32(dm + 104) = 32; M32(dm + 108) = 1920; M32(dm + 112) = 1080; M32(dm + 120) = 60;
+    M32(dm + 40) = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+    M32(dm + 104) = DISPLAY_BPP; M32(dm + 108) = w; M32(dm + 112) = h; M32(dm + 120) = DISPLAY_HZ;
     RET(1);
 }
-static void u_ChangeDisplaySettingsA(CPU* c) { RET(0); }
+/* Only the listed modes at 32 bits and 60 Hz exist; a null mode returns to the default one. Top-level windows hear
+   of the change through WM_DISPLAYCHANGE, as on Windows. */
+static void u_ChangeDisplaySettingsA(CPU* c) {
+    uint32_t dm = ARG(0), w = DEFAULT_W, h = DEFAULT_H;
+    if (dm) {
+        uint32_t fields = M32(dm + 40);
+        w = fields & DM_PELSWIDTH ? M32(dm + 108) : port_screen_w;
+        h = fields & DM_PELSHEIGHT ? M32(dm + 112) : port_screen_h;
+        if ((fields & DM_BITSPERPEL && M32(dm + 104) != DISPLAY_BPP) ||
+            (fields & DM_DISPLAYFREQUENCY && M32(dm + 120) > 1 && M32(dm + 120) != DISPLAY_HZ) || !mode_listed(w, h)) {
+            RET(DISP_CHANGE_BADMODE);
+            return;
+        }
+    }
+    if (ARG(1) & CDS_TEST) { RET(0); return; }
+    if (w != port_screen_w || h != port_screen_h) {
+        port_screen_w = w;
+        port_screen_h = h;
+        guest_call(c, hle_trampoline("user32.dll", "SendMessageA"), 4, 0xFFFF, WM_DISPLAYCHANGE, DISPLAY_BPP, w | h << 16);
+    }
+    RET(0);
+}
 
-/* One 1920x1080 primary monitor. */
 #define MONITOR 0x00650001u
 static void u_EnumDisplayMonitors(CPU* c) {
     uint32_t rect = guest_alloc(16, 16);
-    M32(rect) = 0; M32(rect + 4) = 0; M32(rect + 8) = 1920; M32(rect + 12) = 1080;
+    M32(rect) = 0; M32(rect + 4) = 0; M32(rect + 8) = port_screen_w; M32(rect + 12) = port_screen_h;
     guest_call(c, ARG(2), 4, MONITOR, 0, rect, ARG(3));
     guest_free(rect);
     RET(1);
@@ -185,8 +236,8 @@ static void u_EnumDisplayMonitors(CPU* c) {
 static void u_MonitorFrom(CPU* c) { RET(MONITOR); }
 static void u_GetMonitorInfoA(CPU* c) {
     uint32_t p = ARG(1), size = M32(p);
-    M32(p + 4) = 0; M32(p + 8) = 0; M32(p + 12) = 1920; M32(p + 16) = 1080;
-    M32(p + 20) = 0; M32(p + 24) = 0; M32(p + 28) = 1920; M32(p + 32) = 1040;
+    M32(p + 4) = 0; M32(p + 8) = 0; M32(p + 12) = port_screen_w; M32(p + 16) = port_screen_h;
+    M32(p + 20) = 0; M32(p + 24) = 0; M32(p + 28) = port_screen_w; M32(p + 32) = port_screen_h - PORT_TASKBAR_H;
     M32(p + 36) = 1;
     if (size >= 72) strcpy(GSTR(p + 40), "\\\\.\\DISPLAY1");
     RET(1);
@@ -496,6 +547,105 @@ static void n_RtlGetVersion(CPU* c) {
     RET(0);
 }
 
+/* ---- ewsf.ews: the loading splash ----
+   The DLL's only content is a Delphi form (RCDATA TNOSSPLASHFORM_F): a borderless window holding one TImage whose
+   picture is a JPEG. Show posts that JPEG to the page, which centres it over the screen until Free. */
+
+#ifdef __EMSCRIPTEN__
+EM_JS(void, js_splash, (const uint8_t* data, int size), {
+    if (typeof postMessage !== 'function') return;
+    const bytes = size ? HEAPU8.slice(data, data + size) : null;
+    postMessage({ type: 'splash', bytes }, bytes ? [bytes.buffer] : []);
+});
+#else
+static void js_splash(const uint8_t* data, int size) { (void)data; port_log("splash %s", size ? "shown" : "freed"); }
+#endif
+
+static uint32_t le32(const uint8_t* p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+static uint32_t le16(const uint8_t* p) { return p[0] | p[1] << 8; }
+
+/* Offset of the data of resource type/name in a PE image, or 0. Names compare case-insensitively, as Windows does. */
+static uint32_t pe_resource(const uint8_t* pe, uint32_t n, uint32_t type, const char* name, uint32_t* size) {
+    if (n < 0x40 || le16(pe) != 0x5a4d) return 0;
+    uint32_t nt = le32(pe + 0x3c);
+    if (nt + 0xf8 > n || le32(pe + nt) != 0x4550) return 0;
+    uint32_t sections = le16(pe + nt + 6), opt = nt + 24, sect = opt + le16(pe + nt + 20);
+    uint32_t rva = le32(pe + opt + 112), raw = 0;
+    for (uint32_t k = 0; k < sections && sect + 40 * k + 40 <= n; k++) {
+        const uint8_t* s = pe + sect + 40 * k;
+        if (rva >= le32(s + 12) && rva < le32(s + 12) + le32(s + 8)) raw = le32(s + 20) + rva - le32(s + 12);
+    }
+    if (!raw || raw >= n) return 0;
+    uint32_t dir = 0, want_id = type;
+    const char* want_name = 0;
+    for (int level = 0; level < 3; level++) {
+        uint32_t d = raw + dir, found = 0xFFFFFFFFu;
+        if (d + 16 > n) return 0;
+        uint32_t count = le16(pe + d + 12) + le16(pe + d + 14);
+        for (uint32_t k = 0; k < count && d + 16 + 8 * k + 8 <= n; k++) {
+            const uint8_t* e = pe + d + 16 + 8 * k;
+            uint32_t id = le32(e);
+            int match = level == 2;
+            if (!match && want_name && (id & 0x80000000u)) {
+                uint32_t s = raw + (id & 0x7fffffffu), len = s + 2 <= n ? le16(pe + s) : 0;
+                match = len == strlen(want_name) && s + 2 + 2 * len <= n;
+                for (uint32_t i = 0; match && i < len; i++)
+                    match = toupper(pe[s + 2 + 2 * i]) == toupper((unsigned char)want_name[i]) && !pe[s + 3 + 2 * i];
+            } else if (!match && !want_name)
+                match = !(id & 0x80000000u) && id == want_id;
+            if (match) { found = le32(e + 4); break; }
+        }
+        if (found == 0xFFFFFFFFu) return 0;
+        if (level < 2) {
+            if (!(found & 0x80000000u)) return 0;
+            dir = found & 0x7fffffffu;
+            want_name = name;
+            continue;
+        }
+        if (raw + found + 8 > n) return 0;
+        uint32_t data_rva = le32(pe + raw + found);
+        *size = le32(pe + raw + found + 4);
+        uint32_t off = raw + data_rva - rva;
+        return off + *size <= n ? off : 0;
+    }
+    return 0;
+}
+
+/* In a binary DFM, Picture.Data is a vaBinary (0x0A) block: length, the TGraphic class as a short string, then
+   for TJPEGImage the JPEG's own length and bytes. */
+static const uint8_t* dfm_jpeg(const uint8_t* dfm, uint32_t n, uint32_t* size) {
+    static const char key[] = "\x0cPicture.Data\x0a";
+    for (uint32_t i = 0; i + sizeof key - 1 + 4 + 12 + 4 <= n; i++) {
+        if (memcmp(dfm + i, key, sizeof key - 1)) continue;
+        const uint8_t* p = dfm + i + sizeof key - 1 + 4;
+        if (p[0] != 10 || memcmp(p + 1, "TJPEGImage", 10)) return 0;
+        *size = le32(p + 11);
+        return p + 15 + *size <= dfm + n ? p + 15 : 0;
+    }
+    return 0;
+}
+
+static void ewsf_ShowNostaleSplash(CPU* c) {
+    char path[600];
+    port_host_path("EWSF.EWS", path, sizeof path);
+    FILE* f = fopen(path, "rb");
+    if (!f) { port_log("ShowNostaleSplash: cannot open %s", path); RET(0); return; }
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t* pe = malloc((size_t)n);
+    size_t got = fread(pe, 1, (size_t)n, f);
+    fclose(f);
+    uint32_t res_size = 0, jpeg_size = 0;
+    uint32_t off = pe_resource(pe, (uint32_t)got, 10, "TNOSSPLASHFORM_F", &res_size);
+    const uint8_t* jpeg = off ? dfm_jpeg(pe + off, res_size, &jpeg_size) : 0;
+    if (jpeg) js_splash(jpeg, (int)jpeg_size);
+    else port_log("ShowNostaleSplash: no splash picture in %s", path);
+    free(pe);
+    RET(0);
+}
+static void ewsf_FreeNostaleSplash(CPU* c) { js_splash(0, 0); RET(0); }
+
 #define K(n, a, f) {"kernel32.dll", #n, a, f}
 /* The Steam stubs (steam_wrapper.dll / noscore_gf.dll) are cdecl: they end in a plain ret. */
 #define S(n) {"steam_wrapper.dll", #n, CDECL_ARGS, r_zero}
@@ -534,8 +684,8 @@ static const Hle misc[] = {
     {"winmm.dll", "timeGetDevCaps", 2, w_timeGetDevCaps},
     {"winmm.dll", "timeBeginPeriod", 1, r_zero},
     {"winmm.dll", "timeEndPeriod", 1, r_zero},
-    {"ewsf.ews", "ShowNostaleSplash", 0, r_zero},
-    {"ewsf.ews", "FreeNostaleSplash", 0, r_zero},
+    {"ewsf.ews", "ShowNostaleSplash", 0, ewsf_ShowNostaleSplash},
+    {"ewsf.ews", "FreeNostaleSplash", 0, ewsf_FreeNostaleSplash},
     {"noscore_gf.dll", "Steam_Init", CDECL_ARGS, s_one},
     {"noscore_gf.dll", "Steam_IsLoggedIn", CDECL_ARGS, s_one},
     {"noscore_gf.dll", "Steam_IsOverlayEnabled", CDECL_ARGS, r_zero},

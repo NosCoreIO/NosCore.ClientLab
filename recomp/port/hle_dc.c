@@ -330,7 +330,7 @@ typedef struct { uint32_t hwnd, bmp; } WindowSurface;
 static WindowSurface surfaces[64];
 
 static uint32_t window_surface(uint32_t hwnd) {
-    uint32_t w = 1920, h = 1080;
+    uint32_t w = port_screen_w, h = port_screen_h;
     if (hwnd) hle_window_client_size(hwnd, &w, &h);
     if (!w) w = 1;
     if (!h) h = 1;
@@ -2214,7 +2214,7 @@ static uint32_t emf_serialise(Emf* e, uint8_t** out) {
     for (int k = 0; k < 4; k++) W32(24 + 4 * k, e->frame[k]);
     W32(40, 0x464D4520); W32(44, 0x10000); W32(48, total); W32(52, 3); W32(56, 0);
     W32(60, desc_chars); W32(64, desc_chars ? 108 : 0); W32(68, 0);
-    W32(72, 1920); W32(76, 1080); W32(80, 508); W32(84, 286);
+    W32(72, port_screen_w); W32(76, port_screen_h); W32(80, port_screen_w * 254 / 960); W32(84, port_screen_h * 254 / 960);
     for (uint32_t k = 0; k < desc_chars; k++) p[108 + 2 * k] = M8(e->desc + k);
     uint32_t r = header;   /* EMR_STRETCHDIBITS */
     W32(r, 81); W32(r + 4, sdib);
