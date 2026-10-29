@@ -35,10 +35,20 @@ def main():
     for rnd in range(1, a.rounds + 1):
         if a.before:
             subprocess.run(a.before, shell=True, check=True)
-        subprocess.run(["node", os.path.join(HERE, "drive.mjs"), "--url", a.url, "--out", out, *extra])
-        with open(os.path.join(out, "full.log"), encoding="utf-8", errors="replace") as f:
+        log_path = os.path.join(out, "full.log")
+        if os.path.exists(log_path):
+            os.remove(log_path)
+        drive = subprocess.run(["node", os.path.join(HERE, "drive.mjs"), "--url", a.url, "--out", out, *extra])
+        if not os.path.exists(log_path):
+            print(f"round {rnd}: drive.mjs wrote no log (exit {drive.returncode})")
+            sys.exit(1)
+        with open(log_path, encoding="utf-8", errors="replace") as f:
             log = f.read()
         m = MISSING.search(log)
+        if not m and drive.returncode:
+            print(f"round {rnd}: drive.mjs failed (exit {drive.returncode}) before any missing-code stop")
+            print("\n".join(l for l in log.splitlines() if l.startswith("FATAL"))[:2000])
+            sys.exit(1)
         if not m:
             print(f"round {rnd}: no missing-code stop")
             print("\n".join(l for l in log.splitlines() if l.startswith("FATAL"))[:2000])

@@ -74,8 +74,8 @@ its JDK, Node with Playwright). Generated code and builds go to `$NOSRECOMP_WORK
 
 ```bash
 GHIDRA_HOME=/opt/ghidra tools/decompile.sh ~/Nostale/NosCore.exe        # Ghidra only: IDR needs Windows
-python3 recomp/lift.py ~/re/work/input/NosCore.exe ~/re/work/functions.txt ~/re/work/recomp/gen \
-    --seeds ~/re/work/recomp/seeds.txt
+W=${NOSRECOMP_WORK:-~/re/work}
+python3 recomp/lift.py $W/input/NosCore.exe $W/functions.txt $W/recomp/gen --seeds $W/recomp/seeds.txt
 python3 recomp/wasm/compile_all.py --web
 python3 recomp/web/serve.py --game ~/Nostale --user <account> --password <password>
 python3 recomp/web/iterate.py      # seeds each function the client stops on, re-lifts and rebuilds

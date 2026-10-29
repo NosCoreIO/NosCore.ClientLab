@@ -363,12 +363,12 @@
   // Same event codes as pump_input in hle_user32.c.
   const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7, dumpFrame: 8 };
   let ring = null;
-  function send(type, a, x = 0, y = 0) {
+  function send(type, a, x = 0, y = 0, time = performance.now()) {
     if (!ring) return;
     const head = Atomics.load(ring, 0), cap = ((ring.length - 2) / 5) | 0;
     if (head - Atomics.load(ring, 1) >= cap) return;
     const at = 2 + (head % cap) * 5;
-    ring[at] = type; ring[at + 1] = a; ring[at + 2] = x; ring[at + 3] = y; ring[at + 4] = Math.round(performance.now());
+    ring[at] = type; ring[at + 1] = a; ring[at + 2] = x; ring[at + 3] = y; ring[at + 4] = Math.round(time);
     Atomics.store(ring, 0, head + 1);
     Atomics.notify(ring, 0);
   }
@@ -376,9 +376,9 @@
     const r = canvas.getBoundingClientRect();
     return [Math.round((e.clientX - r.left) * canvas.width / r.width), Math.round((e.clientY - r.top) * canvas.height / r.height)];
   }
-  canvas.addEventListener('mousemove', (e) => send(IN.move, 0, ...pos(e)));
-  canvas.addEventListener('mousedown', (e) => { canvas.focus(); send(IN.down, e.button, ...pos(e)); e.preventDefault(); });
-  canvas.addEventListener('mouseup', (e) => send(IN.up, e.button, ...pos(e)));
+  canvas.addEventListener('mousemove', (e) => send(IN.move, 0, ...pos(e), e.timeStamp));
+  canvas.addEventListener('mousedown', (e) => { canvas.focus(); send(IN.down, e.button, ...pos(e), e.timeStamp); e.preventDefault(); });
+  canvas.addEventListener('mouseup', (e) => send(IN.up, e.button, ...pos(e), e.timeStamp));
   canvas.addEventListener('wheel', (e) => { send(IN.wheel, e.deltaY < 0 ? 120 : -120, ...pos(e)); e.preventDefault(); }, { passive: false });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   const charKeys = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27 };

@@ -217,6 +217,7 @@ try {
   }
 } catch (e) {
   console.log('error:', e.message);
+  process.exitCode = 1;
 } finally {
   if (profiler) {
     const { profile } = await profiler('Profiler.stop');
