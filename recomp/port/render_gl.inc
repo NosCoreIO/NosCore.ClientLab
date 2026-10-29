@@ -250,15 +250,21 @@ EM_JS(void, js_gl_resize, (int w, int h), {
 });
 
 /* The client never sleeps between frames: left alone it renders hundreds of frames a second, saturating the GPU
-   process until the page itself stalls. Present holds it to one frame per display refresh, like vsync: it waits for
-   the page's refresh counter to move unless it already has since the last frame, so a slow frame never loses a
-   whole refresh. A notify wakes it; a timed wait rounds up to the 15.6 ms Windows timer tick, so the timeout only
-   matters when the page stops refreshing (hidden or covered), where it keeps the game near 60 frames a second. */
+   process until the page itself stalls. The page shows one frame per display refresh from a queue of two and counts
+   the frames it has shown in vsync[0]; Present waits while two frames are already queued, which paces the game to the
+   display and lets one slow frame be absorbed by the spare instead of repeating a refresh. A notify wakes it; the
+   timeout only matters when the page stops refreshing (hidden or covered), where it keeps the game near 60 frames a
+   second, and the count is then resynchronised so a page that refreshes again does not leave every frame waiting. */
 EM_JS(void, js_gl_present, (void), {
     const G = self.__gl, V = self.vsync;
     if (V) {
-        if (Atomics.load(V, 0) === G.vsyncSeen) Atomics.wait(V, 0, G.vsyncSeen, 16);
-        G.vsyncSeen = Atomics.load(V, 0);
+        G.posted = G.posted || 0;
+        let shown = Atomics.load(V, 0);
+        if (G.posted - shown >= 2) {
+            Atomics.wait(V, 0, shown, 16);
+            shown = Atomics.load(V, 0);
+            if (G.posted - shown >= 2) G.posted = shown + 1;
+        }
     }
     const gl = G.gl;
     if (!G.kept) {
@@ -278,6 +284,7 @@ EM_JS(void, js_gl_present, (void), {
     G.drawn = false;
     const bmp = G.canvas.transferToImageBitmap();
     postMessage({ type: 'bitmap', bmp }, [bmp]);
+    G.posted = (G.posted || 0) + 1;
 });
 
 /* The frame as 32-bit BGRA rows, top row first. Presenting hands the drawing buffer to the page and leaves it blank,
@@ -319,12 +326,7 @@ static uint32_t gl_texture(uint32_t tex) {
         double t0 = prof_mark();
         uint32_t w = SW(s), h = SH(s);
         if (w * h * 4 > gl_rgba_size) { free(gl_rgba); gl_rgba_size = w * h * 4; gl_rgba = malloc(gl_rgba_size); }
-        uint8_t* p = gl_rgba;
-        for (uint32_t y = 0; y < h; y++)
-            for (uint32_t x = 0; x < w; x++, p += 4) {
-                uint32_t t = texel(s, x, y);
-                p[0] = (uint8_t)(t >> 16); p[1] = (uint8_t)(t >> 8); p[2] = (uint8_t)t; p[3] = (uint8_t)(t >> 24);
-            }
+        surface_rgba(s, gl_rgba);
         js_gl_texture(tex, (int)w, (int)h, gl_rgba);
         M32(tex + 56) = 2;
         prof_upload += prof_mark() - t0;

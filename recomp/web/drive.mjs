@@ -2,6 +2,7 @@
 // The browser is always closed at the end: the client reserves 1 GB+ and stacked runs exhaust RAM.
 //
 // usage: node drive.mjs [--url http://127.0.0.1:8077/] [--trace] [--params PORT_PROFILE_API=1] [--out dir] [--headed]
+//                       [--maps 2,145] [--cpuprofile]
 import { createRequire } from 'node:module';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,7 +35,26 @@ const browser = await chromium.launch({
   channel: process.env.DRIVE_CHANNEL || 'chrome',
   args: ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-swiftshader'],
 });
-let page;
+let page, profiler;
+// --cpuprofile samples the worker from entering the world to the end of the run into worker.cpuprofile (open it in
+// the DevTools Performance panel; link with compile_all.py --profiling to keep the function names).
+const attachWorker = async () => {
+  const cdp = await browser.newBrowserCDPSession();
+  const { targetInfos } = await cdp.send('Target.getTargets');
+  const worker = targetInfos.find((t) => t.type === 'worker');
+  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: worker.targetId, flatten: false });
+  const waiting = new Map();
+  let next = 1;
+  cdp.on('Target.receivedMessageFromTarget', (e) => {
+    const m = JSON.parse(e.message);
+    if (waiting.has(m.id)) { waiting.get(m.id)(m.result); waiting.delete(m.id); }
+  });
+  return (method, params = {}) => new Promise((resolve) => {
+    const id = next++;
+    waiting.set(id, resolve);
+    cdp.send('Target.sendMessageToTarget', { sessionId, message: JSON.stringify({ id, method, params }) });
+  });
+};
 try {
   scenario: {
   page = await browser.newPage({ viewport: { width: 1800, height: 1200 } });
@@ -109,7 +129,7 @@ try {
   // so press it again once.
   const entered = async (seconds) => {
     for (let i = 0; i < seconds; i++) {
-      if (/profile: .*, \d{4,} draw calls/.test((await logText()).slice(beforeStart))) return true;
+      if (/profile: .*[,(] ?\d{4,} (draw )?calls/.test((await logText()).slice(beforeStart))) return true;
       await page.waitForTimeout(1000);
     }
     return false;
@@ -124,6 +144,12 @@ try {
   }
   await page.waitForTimeout(10000);
   await shot('3-world.png');
+  if (flag('--cpuprofile')) {
+    profiler = await attachWorker();
+    await profiler('Profiler.enable');
+    await profiler('Profiler.setSamplingInterval', { interval: 500 });
+    await profiler('Profiler.start');
+  }
 
   step('click ground');
   const before = (await logText()).length;
@@ -148,6 +174,7 @@ try {
   console.log((await logText()).slice(beforeChat).split('\n').filter((l) => /^(send |FATAL)/.test(l)).join('\n'));
   console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
   console.log('sounds:', JSON.stringify(await page.evaluate(() => window.soundStats)));
+  console.log('frames:', JSON.stringify(await page.evaluate(() => window.frameStats)));
 
   step('game windows');
   const beforeWindows = (await logText()).length;
@@ -181,12 +208,18 @@ try {
     const teleportLog = (await logText()).slice(beforeTeleport).split('\n');
     console.log(teleportLog.filter((l) => /FATAL|exited|Delphi|fault|STUB/.test(l)).slice(0, 12).join('\n') || `map ${map}: no errors`);
     console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
+    console.log('frames:', JSON.stringify(await page.evaluate(() => window.frameStats)));
     if (teleportLog.some((l) => /FATAL|exited/.test(l))) break;
   }
   }
 } catch (e) {
   console.log('error:', e.message);
 } finally {
+  if (profiler) {
+    const { profile } = await profiler('Profiler.stop');
+    writeFileSync(join(out, 'worker.cpuprofile'), JSON.stringify(profile));
+    console.log('worker profile saved:', profile.nodes.length, 'nodes');
+  }
   if (page) writeFileSync(join(out, 'full.log'), await page.evaluate(() => (window.allLog || []).join('\n')).catch(() => ''));
   await browser.close();
 }

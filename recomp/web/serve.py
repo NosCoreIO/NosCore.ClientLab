@@ -123,16 +123,20 @@ def fetch_auth_code(auth_url, user, password):
 
 def make_handler(game, build, relay, auth):
     class Handler(http.server.BaseHTTPRequestHandler):
+        # Keep-alive: the worker reads game files in synchronous 1 MB range requests, and a new connection and thread
+        # per request made each one cost several milliseconds more.
+        protocol_version = "HTTP/1.1"
+
         def log_message(self, fmt, *args):
             pass
 
-        def headers_common(self, ctype, length):
+        def headers_common(self, ctype, length, immutable=False):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Cross-Origin-Opener-Policy", "same-origin")
             self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control", "max-age=31536000, immutable" if immutable else "no-cache")
 
         def resolve(self):
             path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
@@ -153,7 +157,7 @@ def make_handler(game, build, relay, auth):
                 for f in files:
                     full = os.path.join(root, f)
                     rel = os.path.relpath(full, game).replace("\\", "/")
-                    out.append({"path": rel, "size": os.path.getsize(full)})
+                    out.append({"path": rel, "size": os.path.getsize(full), "mtime": int(os.path.getmtime(full))})
             body = json.dumps(out).encode()
             self.send_response(200)
             self.headers_common("application/json", len(body))
@@ -215,8 +219,14 @@ def make_handler(game, build, relay, auth):
                 end = int(b) if a and b else size - 1
                 end = min(end, size - 1)
                 status = 206
+            # Game file URLs carry the file's modification time (worker.js), so a changed file gets a new URL and the
+            # browser may keep every range it has read: a reload reads them from its cache instead of from here.
+            versioned = url.path.startswith("/game/") and "v=" in url.query
             self.send_response(status)
-            self.headers_common(ctype, end - start + 1)
+            self.headers_common(ctype, end - start + 1, immutable=versioned)
+            if versioned:
+                self.send_header("Last-Modified", self.date_time_string(int(os.path.getmtime(full))))
+                self.send_header("ETag", f'"{size:x}-{url.query}"')
             if status == 206:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()

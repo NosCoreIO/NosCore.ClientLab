@@ -218,30 +218,46 @@ static uint32_t expand(uint32_t v, int bits) { return bits == 0 ? 255 : (v * 255
 
 static uint32_t rgb565(uint32_t v) { return 0xff000000u | expand((v >> 11) & 31, 5) << 16 | expand((v >> 5) & 63, 6) << 8 | expand(v & 31, 5); }
 
-static uint32_t dxt_texel(uint32_t s, uint32_t x, uint32_t y, uint32_t fmt) {
-    uint32_t bw = (SW(s) + 3) / 4, bsize = fmt == 0x31545844u ? 8 : 16;
-    uint32_t blk = SBITS(s) + ((y / 4) * bw + x / 4) * bsize, px = x & 3, py = y & 3;
-    uint32_t cblk = fmt == 0x31545844u ? blk : blk + 8, alpha = 255;
-    uint32_t c0 = M16(cblk), c1 = M16(cblk + 2), idx = (M32(cblk + 4) >> (2 * (py * 4 + px))) & 3;
-    uint32_t a = rgb565(c0), b = rgb565(c1), col;
+#define FMT_DXT1 0x31545844u
+#define FMT_DXT3 0x33545844u
+#define FMT_DXT5 0x35545844u
+
+/* The 16 ARGB texels of one DXT block, row by row. */
+static void dxt_block(uint32_t blk, uint32_t fmt, uint32_t out[16]) {
+    uint32_t cblk = fmt == FMT_DXT1 ? blk : blk + 8;
+    uint32_t c0 = M16(cblk), c1 = M16(cblk + 2), idx = M32(cblk + 4), a = rgb565(c0), b = rgb565(c1), col[4];
 #define MIX(p, q, wp, wq, d) ((((((p) >> 16) & 255) * (wp) + (((q) >> 16) & 255) * (wq)) / (d)) << 16 | (((((p) >> 8) & 255) * (wp) + (((q) >> 8) & 255) * (wq)) / (d)) << 8 | ((((p) & 255) * (wp) + ((q) & 255) * (wq)) / (d)))
-    if (idx == 0) col = a & 0xffffff;
-    else if (idx == 1) col = b & 0xffffff;
-    else if (c0 > c1 || fmt != 0x31545844u) col = idx == 2 ? MIX(a, b, 2, 1, 3) : MIX(a, b, 1, 2, 3);
-    else if (idx == 2) col = MIX(a, b, 1, 1, 2);
-    else { col = 0; alpha = 0; }
-    if (fmt == 0x33545844u) alpha = expand((M16(blk + 2 * py) >> (4 * px)) & 15, 4);
-    else if (fmt == 0x35545844u) {
-        uint32_t a0 = M8(blk), a1 = M8(blk + 1);
-        uint64_t bits = 0;
-        for (int k = 0; k < 6; k++) bits |= (uint64_t)M8(blk + 2 + k) << (8 * k);
-        uint32_t ai = (uint32_t)(bits >> (3 * (py * 4 + px))) & 7;
-        if (ai == 0) alpha = a0;
-        else if (ai == 1) alpha = a1;
-        else if (a0 > a1) alpha = ((8 - ai) * a0 + (ai - 1) * a1) / 7;
-        else alpha = ai == 6 ? 0 : ai == 7 ? 255 : ((6 - ai) * a0 + (ai - 1) * a1) / 5;
+    col[0] = 0xff000000u | (a & 0xffffff);
+    col[1] = 0xff000000u | (b & 0xffffff);
+    if (c0 > c1 || fmt != FMT_DXT1) {
+        col[2] = 0xff000000u | MIX(a, b, 2, 1, 3);
+        col[3] = 0xff000000u | MIX(a, b, 1, 2, 3);
+    } else {
+        col[2] = 0xff000000u | MIX(a, b, 1, 1, 2);
+        col[3] = 0;
     }
-    return alpha << 24 | col;
+    uint32_t alpha[8] = {0}, abits_lo = 0, abits_hi = 0;
+    if (fmt == FMT_DXT5) {
+        uint32_t a0 = M8(blk), a1 = M8(blk + 1);
+        alpha[0] = a0;
+        alpha[1] = a1;
+        for (uint32_t i = 2; i < 8; i++)
+            alpha[i] = a0 > a1 ? ((8 - i) * a0 + (i - 1) * a1) / 7 : i == 6 ? 0 : i == 7 ? 255 : ((6 - i) * a0 + (i - 1) * a1) / 5;
+        abits_lo = M8(blk + 2) | M8(blk + 3) << 8 | M8(blk + 4) << 16;
+        abits_hi = M8(blk + 5) | M8(blk + 6) << 8 | M8(blk + 7) << 16;
+    }
+    for (uint32_t k = 0; k < 16; k++) {
+        uint32_t t = col[(idx >> (2 * k)) & 3];
+        if (fmt == FMT_DXT3) t = (t & 0xffffff) | expand((M16(blk + 2 * (k / 4)) >> (4 * (k & 3))) & 15, 4) << 24;
+        else if (fmt == FMT_DXT5) t = (t & 0xffffff) | alpha[(k < 8 ? abits_lo >> (3 * k) : abits_hi >> (3 * (k - 8))) & 7] << 24;
+        out[k] = t;
+    }
+}
+
+static uint32_t dxt_texel(uint32_t s, uint32_t x, uint32_t y, uint32_t fmt) {
+    uint32_t bw = (SW(s) + 3) / 4, bsize = fmt == FMT_DXT1 ? 8 : 16, t[16];
+    dxt_block(SBITS(s) + ((y / 4) * bw + x / 4) * bsize, fmt, t);
+    return t[(y & 3) * 4 + (x & 3)];
 }
 
 static uint32_t texel(uint32_t s, uint32_t x, uint32_t y) {
@@ -256,8 +272,66 @@ static uint32_t texel(uint32_t s, uint32_t x, uint32_t y) {
     case 28: return (uint32_t)M8(row + x) << 24 | 0xffffff;
     case 50: v = M8(row + x); return 0xff000000u | v << 16 | v << 8 | v;
     case 51: v = M16(row + 2 * x); return (v >> 8) << 24 | (v & 255) << 16 | (v & 255) << 8 | (v & 255);
-    case 0x31545844u: case 0x33545844u: case 0x35545844u: return dxt_texel(s, x, y, fmt);
+    case FMT_DXT1: case FMT_DXT3: case FMT_DXT5: return dxt_texel(s, x, y, fmt);
     default: return 0xffff00ffu;
+    }
+}
+
+/* ARGB as the R, G, B, A bytes WebGL takes. */
+static uint32_t to_rgba(uint32_t t) { return (t & 0xff00ff00u) | (t >> 16 & 0xff) | (t & 0xff) << 16; }
+
+/* A whole surface as R, G, B, A bytes, for uploads and readbacks. Going through texel() costs a call and a format
+   switch per pixel, and for DXT a whole block decode per pixel; this converts rows, 16-bit formats through a table. */
+static void surface_rgba(uint32_t s, uint8_t* bytes) {
+    static uint32_t* tables[27];
+    uint32_t w = SW(s), h = SH(s), fmt = SFMT(s), *o = (uint32_t*)bytes;
+    switch (fmt) {
+    case 21: case 22: {
+        uint32_t opaque = fmt == 22 ? 0xff000000u : 0;
+        for (uint32_t y = 0; y < h; y++) {
+            const uint32_t* row = (const uint32_t*)GPTR(SBITS(s) + y * SPITCH(s));
+            for (uint32_t x = 0; x < w; x++) *o++ = to_rgba(row[x] | opaque);
+        }
+        return;
+    }
+    case 23: case 24: case 25: case 26: {
+        if (!tables[fmt]) {
+            tables[fmt] = malloc(65536 * 4);
+            for (uint32_t v = 0; v < 65536; v++) {
+                uint32_t t = fmt == 23 ? rgb565(v)
+                           : fmt == 26 ? expand(v >> 12, 4) << 24 | expand((v >> 8) & 15, 4) << 16 | expand((v >> 4) & 15, 4) << 8 | expand(v & 15, 4)
+                           : (fmt == 24 || (v & 0x8000) ? 0xff000000u : 0) | expand((v >> 10) & 31, 5) << 16 | expand((v >> 5) & 31, 5) << 8 | expand(v & 31, 5);
+                tables[fmt][v] = to_rgba(t);
+            }
+        }
+        const uint32_t* table = tables[fmt];
+        for (uint32_t y = 0; y < h; y++) {
+            const uint16_t* row = (const uint16_t*)GPTR(SBITS(s) + y * SPITCH(s));
+            for (uint32_t x = 0; x < w; x++) *o++ = table[row[x]];
+        }
+        return;
+    }
+    case 28:
+        for (uint32_t y = 0; y < h; y++) {
+            const uint8_t* row = (const uint8_t*)GPTR(SBITS(s) + y * SPITCH(s));
+            for (uint32_t x = 0; x < w; x++) *o++ = (uint32_t)row[x] << 24 | 0xffffff;
+        }
+        return;
+    case FMT_DXT1: case FMT_DXT3: case FMT_DXT5: {
+        uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4, bsize = fmt == FMT_DXT1 ? 8 : 16, t[16];
+        for (uint32_t by = 0; by < bh; by++)
+            for (uint32_t bx = 0; bx < bw; bx++) {
+                dxt_block(SBITS(s) + (by * bw + bx) * bsize, fmt, t);
+                for (uint32_t k = 0; k < 16; k++) {
+                    uint32_t x = bx * 4 + (k & 3), y = by * 4 + k / 4;
+                    if (x < w && y < h) o[y * w + x] = to_rgba(t[k]);
+                }
+            }
+        return;
+    }
+    default:
+        for (uint32_t y = 0; y < h; y++)
+            for (uint32_t x = 0; x < w; x++) *o++ = to_rgba(texel(s, x, y));
     }
 }
 
@@ -833,23 +907,46 @@ void r_dump_bmp(uint32_t surface, const char* path) {
 void r_prof_frame(void) {
     if (dump_state == 2) { dump_state = 0; port_log("frame dump: %u draws", dump_draws); }
     else if (dump_state == 1) { dump_state = 2; dump_draws = 0; }
+    /* A frame whose work (everything but the wait in Present) exceeds one refresh misses its vsync, which a 5 s
+       average hides: count those and keep the worst. */
+    static double at_draw, at_upload, at_present, worst, worst_draw, worst_upload;
+    static uint32_t late;
     double now = prof_now();
-    if (prof_frame_start > 0) prof_frames_ms += now - prof_frame_start;
+    if (prof_frame_start > 0) {
+        double frame = now - prof_frame_start, work = frame - (prof_present - at_present);
+        prof_frames_ms += frame;
+        if (work > 16.7) late++;
+        if (work > worst) {
+            worst = work;
+            worst_draw = prof_draw - at_draw;
+            worst_upload = prof_upload - at_upload;
+        }
+    }
     prof_frame_start = now;
+    at_draw = prof_draw;
+    at_upload = prof_upload;
+    at_present = prof_present;
     if (++prof_frames < 2 || prof_frames_ms < 5000) return;
     if (!prof_detail)
-        port_log("profile: %.1f ms/frame (%.0f fps), %u draw calls, %u prims; PORT_PROFILE=1 splits the frame",
+        port_log("profile: %.1f ms/frame (%.0f fps), %u draw calls, %u prims, %u late frames, worst %.0f ms of work; "
+                 "PORT_PROFILE=1 splits the frame",
                  prof_frames_ms / prof_frames, 1000.0 * prof_frames / prof_frames_ms, prof_draw_calls / prof_frames,
-                 prof_vertices / prof_frames);
+                 prof_vertices / prof_frames, late, worst);
     else port_log("profile: %.1f ms/frame (%.0f fps): draw calls %.1f ms (%u calls, %u prims; GL submit %.1f), texture uploads %.1f, "
              "present %.1f, game %.1f; vertex fetch %.1f, network relay %.1f",
              prof_frames_ms / prof_frames, 1000.0 * prof_frames / prof_frames_ms, prof_draw / prof_frames,
              prof_draw_calls / prof_frames, prof_vertices / prof_frames, prof_submit / prof_frames, prof_upload / prof_frames,
              prof_present / prof_frames, (prof_frames_ms - prof_draw - prof_upload - prof_present) / prof_frames,
              prof_fetch / prof_frames, port_prof_net / prof_frames);
+    if (prof_detail)
+        port_log("frames: %u late, worst %.1f ms of work (draw calls %.1f, texture uploads %.1f, game %.1f)", late,
+                 worst, worst_draw, worst_upload, worst - worst_draw - worst_upload);
+    late = 0;
+    worst = 0;
     port_report_api_time(prof_frames);
     prof_frames = prof_draw_calls = prof_vertices = 0;
     prof_frames_ms = prof_draw = prof_upload = prof_submit = prof_present = prof_fetch = port_prof_net = 0;
+    at_draw = at_upload = at_present = 0;
 }
 
 void r_stats(void) {
