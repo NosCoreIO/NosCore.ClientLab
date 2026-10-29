@@ -63,6 +63,28 @@
     log.textContent = lines.join('\n');
     log.scrollTop = log.scrollHeight;
   }
+  // WebGL frames are shown one per display refresh from a queue of at most two, so a frame that comes a little late
+  // still has one ready behind it instead of the refresh repeating the last frame. shownCount[0] counts the frames
+  // shown; the worker reads it to stay at most two frames ahead (js_gl_present in render_gl.inc).
+  window.frameStats = { refreshes: 0, shown: 0, repeated: 0, overwritten: 0 };
+  const queued = [];
+  let shownCount = null;
+  function showFrame() {
+    const f = window.frameStats, bmp = queued.shift();
+    f.refreshes++;
+    if (bmp) {
+      if (canvas.width !== bmp.width || canvas.height !== bmp.height) { canvas.width = bmp.width; canvas.height = bmp.height; }
+      bitmaps = bitmaps || canvas.getContext('bitmaprenderer');
+      bitmaps.transferFromImageBitmap(bmp);
+      f.shown++;
+      frames++;
+      Atomics.add(shownCount, 0, 1);
+      Atomics.notify(shownCount, 0);
+      const now = performance.now();
+      if (now - last > 1000) { status.textContent = `${canvas.width}x${canvas.height}, ${frames} frames/s shown (WebGL)`; frames = 0; last = now; }
+    } else if (f.shown) f.repeated++;
+    requestAnimationFrame(showFrame);
+  }
   worker.onmessage = (e) => {
     const m = e.data;
     if (m.type === 'frame') {
@@ -73,12 +95,8 @@
       const now = performance.now();
       if (now - last > 1000) { status.textContent = `${m.w}x${m.h}, ${frames} frames/s shown`; frames = 0; last = now; }
     } else if (m.type === 'bitmap') {
-      if (canvas.width !== m.bmp.width || canvas.height !== m.bmp.height) { canvas.width = m.bmp.width; canvas.height = m.bmp.height; }
-      bitmaps = bitmaps || canvas.getContext('bitmaprenderer');
-      bitmaps.transferFromImageBitmap(m.bmp);
-      frames++;
-      const now = performance.now();
-      if (now - last > 1000) { status.textContent = `${canvas.width}x${canvas.height}, ${frames} frames/s shown (WebGL)`; frames = 0; last = now; }
+      queued.push(m.bmp);
+      while (queued.length > 2) { queued.shift().close(); window.frameStats.overwritten++; }
     } else if (m.type === 'log') {
       pending.push(m.text);
       window.allLog.push(m.text);
@@ -87,9 +105,8 @@
       ring = m.ring;
       audioDone = m.audioDone;
       pasteBuf = m.paste;
-      const vsync = m.vsync;
-      const tick = () => { Atomics.add(vsync, 0, 1); Atomics.notify(vsync, 0); requestAnimationFrame(tick); };
-      requestAnimationFrame(tick);
+      shownCount = m.vsync;
+      requestAnimationFrame(showFrame);
     } else if (m.type === 'cursor') {
       if (!m.visible) canvas.style.cursor = 'none';
       else if (!m.rgba) canvas.style.cursor = 'default';
@@ -110,6 +127,10 @@
       navigator.clipboard?.writeText(m.text).catch(() => { });
     } else if (m.type === 'open-url') {
       window.open(m.url, '_blank', 'noopener');
+    } else if (m.type === 'read-ahead') {
+      // Only fills the browser's cache (worker.js lazyRead); the worker's own request for the range then hits it.
+      for (const [from, to] of m.ranges)
+        fetch(m.url, { headers: { Range: `bytes=${from}-${to}` } }).then((r) => r.arrayBuffer()).catch(() => { });
     } else if (m.type === 'sound') {
       sound(m);
     } else if (m.type === 'splash') {

@@ -63,6 +63,9 @@ def main():
         web = [f for f in LINK if not f.startswith("-sNODERAWFS")] + [
             "-sENVIRONMENT=worker", "-sFORCE_FILESYSTEM=1", "-sINVOKE_RUN=0",
             "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV"]
+        # Keeps function names in the wasm for CPU profiles (drive.mjs --cpuprofile); the code is unchanged.
+        if "--profiling" in sys.argv:
+            web.append("--profiling-funcs")
         r = subprocess.run([EMCC, *web, *objs, "-o", out], capture_output=True, text=True)
         print((r.stdout + r.stderr)[-3000:])
         if r.returncode:
