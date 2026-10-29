@@ -5,11 +5,13 @@
 //                       [--maps 2,145] [--cpuprofile]
 import { createRequire } from 'node:module';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 const require = createRequire(import.meta.url);
+const windows = process.platform === 'win32';
 const playwrightPath = process.env.PLAYWRIGHT_PATH
-  || 'C:/Program Files/nodejs/node_modules/@playwright/cli/node_modules/playwright';
+  || (windows ? 'C:/Program Files/nodejs/node_modules/@playwright/cli/node_modules/playwright' : 'playwright');
 const { chromium } = require(playwrightPath);
 
 const arg = (name, fallback) => {
@@ -18,7 +20,8 @@ const arg = (name, fallback) => {
 };
 const flag = (name) => process.argv.includes(name);
 
-const out = arg('--out', 'C:/tools/re/work/drive');
+const work = process.env.NOSRECOMP_WORK || (windows ? 'C:/tools/re/work' : join(homedir(), 're/work'));
+const out = arg('--out', join(work, 'drive'));
 // Message boxes answer themselves with their default button so nothing waits on a human.
 const url = arg('--url', 'http://127.0.0.1:8077/') + '?autodismiss=1' + (flag('--trace') ? '&trace=1' : '') + (arg('--params', '') ? '&' + arg('--params', '') : '');
 mkdirSync(out, { recursive: true });
@@ -32,8 +35,8 @@ const GROUND = [1000, 520];
 
 const browser = await chromium.launch({
   headless: !flag('--headed'),
-  channel: process.env.DRIVE_CHANNEL || 'chrome',
-  args: ['--use-angle=d3d11', '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-swiftshader'],
+  channel: process.env.DRIVE_CHANNEL || (windows ? 'chrome' : undefined),
+  args: [...(windows ? ['--use-angle=d3d11'] : []), '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-swiftshader'],
 });
 let page, profiler;
 // --cpuprofile samples the worker from entering the world to the end of the run into worker.cpuprofile (open it in

@@ -5,16 +5,18 @@ usage: compile_all.py [--link] [--web [--web-out DIR]]
 import concurrent.futures as cf
 import glob
 import os
+import shutil
 import subprocess
 import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-GEN = r"C:\tools\re\work\recomp\gen"
-OUT = r"C:\tools\re\work\wasm"
+WORK = os.environ.get("NOSRECOMP_WORK", r"C:\tools\re\work" if os.name == "nt" else os.path.expanduser("~/re/work"))
+GEN = os.path.join(WORK, "recomp", "gen")
+OUT = os.path.join(WORK, "wasm")
 RT = os.path.join(HERE, "..", "runtime")
 PORT = os.path.join(HERE, "..", "port")
-EMCC = r"C:\tools\emsdk\upstream\emscripten\emcc.exe"
+EMCC = os.environ.get("EMCC") or shutil.which("emcc") or r"C:\tools\emsdk\upstream\emscripten\emcc.exe"
 FLAGS = ["-O2", "-w", "-c", "-sSUPPORT_LONGJMP=0"]
 LINK = ["-O2", "-sGLOBAL_BASE=536870912", "-sINITIAL_MEMORY=1024MB", "-sALLOW_MEMORY_GROWTH=1",
         "-sMAXIMUM_MEMORY=2048MB", "-sSTACK_SIZE=64MB", "-sNODERAWFS=1", "-sEXIT_RUNTIME=1",

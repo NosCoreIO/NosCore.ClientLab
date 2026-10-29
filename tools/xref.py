@@ -40,7 +40,8 @@ def resolve(funcs, key):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--dir", default=r"C:\tools\re\work\decomp")
+    work = os.environ.get("NOSRECOMP_WORK", r"C:\tools\re\work" if os.name == "nt" else os.path.expanduser("~/re/work"))
+    p.add_argument("--dir", default=os.path.join(work, "decomp"))
     p.add_argument("cmd", choices=["callers", "callees", "body", "grep"])
     p.add_argument("target")
     p.add_argument("-d", "--depth", type=int, default=1)
