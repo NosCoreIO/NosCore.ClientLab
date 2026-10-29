@@ -127,10 +127,6 @@
       navigator.clipboard?.writeText(m.text).catch(() => { });
     } else if (m.type === 'open-url') {
       window.open(m.url, '_blank', 'noopener');
-    } else if (m.type === 'read-ahead') {
-      // Only fills the browser's cache (worker.js lazyRead); the worker's own request for the range then hits it.
-      for (const [from, to] of m.ranges)
-        fetch(m.url, { headers: { Range: `bytes=${from}-${to}` } }).then((r) => r.arrayBuffer()).catch(() => { });
     } else if (m.type === 'sound') {
       sound(m);
     } else if (m.type === 'splash') {

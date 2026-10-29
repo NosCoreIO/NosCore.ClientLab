@@ -13,12 +13,12 @@ self.pasteBuf = new Int32Array(new SharedArrayBuffer(8 + 2 * 65536));
 self.vsync = new Int32Array(new SharedArrayBuffer(4));
 postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone, paste: self.pasteBuf, vsync: self.vsync });
 
-// Game files are fetched on demand in 256 KB ranges, one synchronous request per range first touched (the worker
-// never yields, so it cannot wait on anything asynchronous). The client reads its archives at scattered offsets, a
-// sprite here and a texture there, so small ranges waste less than Emscripten's 1 MB lazy-file chunks; reads copy
-// whole slices instead of byte by byte. After a miss the page reads the next ranges ahead into the browser's cache,
-// which helps files read front to back (a map, a sound), and every range stays cached across reloads.
-const CHUNK = 256 * 1024, READ_AHEAD = 2;
+// Game files are fetched on demand in 256 KB chunks with synchronous range requests (the worker never yields, so it
+// cannot wait on anything asynchronous), and each chunk is kept once read. The client reads its archives at scattered
+// offsets, a sprite here and a texture there, so chunks are small; reads copy whole slices. One request covers every
+// missing chunk a read needs, and a file being read front to back (a map, the music) is fetched two chunks ahead, so a
+// request's fixed cost is paid once rather than per chunk. Every range stays in the browser's cache across reloads.
+const CHUNK = 256 * 1024, AHEAD = 2;
 
 function fetchRange(url, from, to) {
   const xhr = new XMLHttpRequest();
@@ -30,23 +30,30 @@ function fetchRange(url, from, to) {
   return new Uint8Array(xhr.response);
 }
 
-function gameChunk(game, n) {
-  let chunk = game.chunks.get(n);
-  if (!chunk) {
-    const ranges = [];
-    for (let k = n + 1; k <= n + READ_AHEAD && k * CHUNK < game.size; k++)
-      if (!game.chunks.has(k)) ranges.push([k * CHUNK, Math.min((k + 1) * CHUNK, game.size) - 1]);
-    if (ranges.length) postMessage({ type: 'read-ahead', url: game.url, ranges });
-    chunk = fetchRange(game.url, n * CHUNK, Math.min((n + 1) * CHUNK, game.size) - 1);
-    game.chunks.set(n, chunk);
+// Loads the missing chunks among first..last, each contiguous run of them in one request; when the read continues
+// where the last one ended, the request also takes the chunks ahead.
+function loadChunks(game, first, last, sequential) {
+  let missing = false;
+  for (let n = first; n <= last && !missing; n++) missing = !game.chunks.has(n);
+  if (!missing) return;
+  if (sequential) last = Math.min(last + AHEAD, Math.ceil(game.size / CHUNK) - 1);
+  for (let n = first; n <= last;) {
+    if (game.chunks.has(n)) { n++; continue; }
+    let end = n;
+    while (end < last && !game.chunks.has(end + 1)) end++;
+    const bytes = fetchRange(game.url, n * CHUNK, Math.min((end + 1) * CHUNK, game.size) - 1);
+    for (let k = n; k <= end; k++) game.chunks.set(k, bytes.subarray((k - n) * CHUNK, (k - n + 1) * CHUNK));
+    n = end + 1;
   }
-  return chunk;
 }
 
 function gameRead(game, buffer, offset, length, position) {
   const size = Math.max(0, Math.min(game.size - position, length));
+  if (!size) return 0;
+  loadChunks(game, Math.floor(position / CHUNK), Math.floor((position + size - 1) / CHUNK), position === game.end);
+  game.end = position + size;
   for (let done = 0; done < size;) {
-    const at = position + done, chunk = gameChunk(game, Math.floor(at / CHUNK)), from = at % CHUNK;
+    const at = position + done, chunk = game.chunks.get(Math.floor(at / CHUNK)), from = at % CHUNK;
     const take = Math.min(chunk.length - from, size - done);
     buffer.set(chunk.subarray(from, from + take), offset + done);
     done += take;
@@ -59,7 +66,7 @@ function gameRead(game, buffer, offset, length, position) {
 function mountGameFile(FS, dir, name, url, size) {
   const node = FS.createFile(dir, name, { isDevice: false }, true, true);
   const file = node.stream_ops, fileNode = node.node_ops;
-  node.game = { url, size, chunks: new Map() };
+  node.game = { url, size, chunks: new Map(), end: -1 };
   node.usedBytes = size;
   const materialise = (n) => {
     if (!n.game) return;
