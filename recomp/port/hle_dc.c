@@ -1568,8 +1568,11 @@ static void u_LoadCursorFromFileA(CPU* c) {
     RET(h);
 }
 
-/* As on Windows, no cursor shape (SetCursor(NULL)) or a negative display count hides the cursor. */
+/* As on Windows, no cursor shape (SetCursor(NULL)) or a negative display count hides the cursor. While Direct3D shows
+   its hardware cursor, that one is on screen instead. */
+static int cursor_overridden;
 static void show_cursor(void) {
+    if (cursor_overridden) return;
     Icon* ic = icon_get(current_cursor);
     if (!cursor_visible || !ic) { js_set_cursor(0, 0, 0, 0, 0, 0); return; }
     GdiBitmap cb;
@@ -1582,6 +1585,15 @@ static void show_cursor(void) {
         }
     js_set_cursor(rgba, ic->w, ic->h, ic->hot_x, ic->hot_y, 1);
     free(rgba);
+}
+void hle_cursor_override(const uint8_t* rgba, int w, int h, int hx, int hy) {
+    cursor_overridden = 1;
+    js_set_cursor(rgba, w, h, hx, hy, 1);
+}
+void hle_cursor_restore(void) {
+    if (!cursor_overridden) return;
+    cursor_overridden = 0;
+    show_cursor();
 }
 static void u_SetCursor(CPU* c) {
     uint32_t old = current_cursor;

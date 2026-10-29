@@ -2,6 +2,7 @@
    (FVF vertices, world/view/projection + texture matrix, TFACTOR/diffuse modulation, alpha test and blending). */
 #include "render.h"
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 
 static int gl_on;
@@ -45,6 +46,7 @@ static struct {
     uint32_t tex_obj[8];
     uint32_t vb, vb_offset, vb_stride, ib, fvf;
     uint32_t vp_x, vp_y, vp_w, vp_h;
+    uint32_t sc_x, sc_y, sc_w, sc_h;   /* scissor rect, used while D3DRS_SCISSORTESTENABLE is set */
     uint32_t target;
     int vp_set;
     float light[8][26];   /* D3DLIGHT9 as floats (type, diffuse, specular, ambient, position, direction, range, ...) */
@@ -54,7 +56,13 @@ static struct {
 
 static void identity(Mat* m) { memset(m, 0, sizeof *m); m->m[0] = m->m[5] = m->m[10] = m->m[15] = 1; }
 
-void r_init(uint32_t backbuffer) {
+static int wvp_dirty = 1;
+static int has_depth = 1;
+static void gl_resize(uint32_t backbuffer);
+
+/* The state a freshly created or reset device starts with. */
+static void reset_state(uint32_t backbuffer) {
+    memset(&R, 0, sizeof R);
     identity(&R.world); identity(&R.view); identity(&R.proj);
     for (int k = 0; k < 8; k++) identity(&R.tex[k]);
     R.rs[7] = 1;          /* ZENABLE */
@@ -68,6 +76,7 @@ void r_init(uint32_t backbuffer) {
     R.rs[141] = 1;        /* COLORVERTEX */
     R.rs[145] = 1;        /* DIFFUSEMATERIALSOURCE COLOR1 */
     R.rs[146] = 2;        /* SPECULARMATERIALSOURCE COLOR2 */
+    R.rs[22] = 3;         /* CULLMODE CCW */
     for (int s = 0; s < 8; s++) {
         R.tss[s][1] = s ? 1 : 4; R.tss[s][2] = 2; R.tss[s][3] = 1;
         R.tss[s][4] = s ? 1 : 2; R.tss[s][5] = 2; R.tss[s][6] = 1;
@@ -75,7 +84,83 @@ void r_init(uint32_t backbuffer) {
         R.samp[s][5] = R.samp[s][6] = 1;
     }
     R.target = backbuffer;
+    R.sc_w = SW(backbuffer);
+    R.sc_h = SH(backbuffer);
+    wvp_dirty = 1;
+    has_depth = 1;
+}
+void r_init(uint32_t backbuffer) {
+    reset_state(backbuffer);
     gl_start(backbuffer);
+}
+void r_reset(uint32_t backbuffer) {
+    reset_state(backbuffer);
+    gl_resize(backbuffer);
+}
+void r_set_depth(int present) { has_depth = present; }
+void r_set_scissor(uint32_t rect) {
+    R.sc_x = M32(rect); R.sc_y = M32(rect + 4);
+    R.sc_w = M32(rect + 8) - M32(rect); R.sc_h = M32(rect + 12) - M32(rect + 4);
+}
+void r_get_scissor(uint32_t rect) {
+    M32(rect) = R.sc_x; M32(rect + 4) = R.sc_y; M32(rect + 8) = R.sc_x + R.sc_w; M32(rect + 12) = R.sc_y + R.sc_h;
+}
+uint32_t r_get_fvf(void) { return R.fvf; }
+void r_get_stream(uint32_t* vb, uint32_t* offset, uint32_t* stride) { *vb = R.vb; *offset = R.vb_offset; *stride = R.vb_stride; }
+uint32_t r_get_indices(void) { return R.ib; }
+
+/* The area draws and clears reach: the viewport, cut down to the scissor rect while the scissor test is on. */
+static void draw_area(int32_t* x, int32_t* y, int32_t* w, int32_t* h) {
+    int32_t x0 = (int32_t)(R.vp_set ? R.vp_x : 0), y0 = (int32_t)(R.vp_set ? R.vp_y : 0);
+    int32_t x1 = x0 + (int32_t)(R.vp_set ? R.vp_w : SW(R.target)), y1 = y0 + (int32_t)(R.vp_set ? R.vp_h : SH(R.target));
+    if (R.rs[174]) {
+        int32_t sx = (int32_t)R.sc_x, sy = (int32_t)R.sc_y;
+        if (sx > x0) x0 = sx;
+        if (sy > y0) y0 = sy;
+        if (sx + (int32_t)R.sc_w < x1) x1 = sx + (int32_t)R.sc_w;
+        if (sy + (int32_t)R.sc_h < y1) y1 = sy + (int32_t)R.sc_h;
+    }
+    *x = x0; *y = y0;
+    *w = x1 > x0 ? x1 - x0 : 0;
+    *h = y1 > y0 ? y1 - y0 : 0;
+}
+
+/* State blocks: the state is one snapshot of R; a mask picks the bytes a block covers. */
+uint32_t r_state_size(void) { return sizeof R; }
+void r_state_save(uint8_t* out) { memcpy(out, &R, sizeof R); }
+void r_state_load(const uint8_t* in, const uint8_t* mask) {
+    uint8_t* r = (uint8_t*)&R;
+    for (uint32_t k = 0; k < sizeof R; k++) if (mask[k]) r[k] = in[k];
+    wvp_dirty = 1;
+}
+#define MARK(field) memset(mask + offsetof(__typeof__(R), field), 1, sizeof R.field)
+#define MARK_RS(i) memset(mask + offsetof(__typeof__(R), rs) + 4 * (i), 1, 4)
+/* D3DSBT_ALL (1), PIXELSTATE (2), VERTEXSTATE (3). The render target is never part of a state block. */
+void r_state_mask(int type, uint8_t* mask) {
+    static const uint8_t vertex_rs[] = {22, 28, 34, 35, 36, 37, 38, 48, 136, 137, 139, 140, 141, 142, 143, 145, 146, 147,
+                                        148, 151, 152, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 166, 167, 170,
+                                        172, 173, 178, 179, 180, 181, 182, 183, 184};
+    memset(mask, 0, sizeof R);
+    if (type == 1) {
+        memset(mask, 1, sizeof R);
+        memset(mask + offsetof(__typeof__(R), target), 0, sizeof R.target);
+        return;
+    }
+    if (type == 3) {
+        for (size_t k = 0; k < sizeof vertex_rs; k++) MARK_RS(vertex_rs[k]);
+        MARK(light); MARK(light_on); MARK(fvf);
+        for (int st = 0; st < 8; st++) {
+            memset(mask + offsetof(__typeof__(R), tss) + 4 * (33 * st + 11), 1, 4);
+            memset(mask + offsetof(__typeof__(R), tss) + 4 * (33 * st + 24), 1, 4);
+        }
+        return;
+    }
+    MARK(rs); MARK(tss); MARK(samp);
+    for (size_t k = 0; k < sizeof vertex_rs; k++) memset(mask + offsetof(__typeof__(R), rs) + 4 * vertex_rs[k], 0, 4);
+    for (int st = 0; st < 8; st++) {
+        memset(mask + offsetof(__typeof__(R), tss) + 4 * (33 * st + 11), 0, 4);
+        memset(mask + offsetof(__typeof__(R), tss) + 4 * (33 * st + 24), 0, 4);
+    }
 }
 
 void r_set_render_target(uint32_t surface) {
@@ -90,7 +175,6 @@ void r_set_render_target(uint32_t surface) {
     R.target = surface;
     R.vp_set = 0;
 }
-static int wvp_dirty = 1;
 void r_set_transform(uint32_t type, uint32_t addr) {
     Mat* m = type == 256 ? &R.world : type == 2 ? &R.view : type == 3 ? &R.proj : (type >= 16 && type < 24) ? &R.tex[type - 16] : 0;
     if (m) memcpy(m->m, GPTR(addr), 64);
@@ -525,6 +609,7 @@ static void triangle(const Vtx* a, const Vtx* b, const Vtx* c) {
     S.tris++;
     float area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
     if (fabsf(area) < 1e-6f) return;
+    if ((R.rs[22] == 2 && area > 0) || (R.rs[22] == 3 && area < 0)) return;   /* screen y points down: area > 0 is clockwise */
     int32_t tw = (int32_t)SW(R.target), th = (int32_t)SH(R.target);
     int32_t x0 = (int32_t)floorf(fminf(a->x, fminf(b->x, c->x))), x1 = (int32_t)ceilf(fmaxf(a->x, fmaxf(b->x, c->x)));
     int32_t y0 = (int32_t)floorf(fminf(a->y, fminf(b->y, c->y))), y1 = (int32_t)ceilf(fmaxf(a->y, fmaxf(b->y, c->y)));
@@ -595,7 +680,7 @@ static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
     log_state_combo();
     if (!R.target || !SBITS(R.target) || (SFMT(R.target) != 21 && SFMT(R.target) != 22)) { S.skipped++; return; }
     if (prim == 4) for (uint32_t k = 0; k < count && 3 * k + 2 < n; k++) triangle(&v[3 * k], &v[3 * k + 1], &v[3 * k + 2]);
-    else if (prim == 5) for (uint32_t k = 0; k < count && k + 2 < n; k++) triangle(&v[k], &v[k + 1], &v[k + 2]);
+    else if (prim == 5) for (uint32_t k = 0; k < count && k + 2 < n; k++) triangle(&v[k + (k & 1)], &v[k + 1 - (k & 1)], &v[k + 2]);
     else if (prim == 6) for (uint32_t k = 0; k < count && k + 2 < n; k++) triangle(&v[0], &v[k + 1], &v[k + 2]);
 }
 
@@ -678,21 +763,55 @@ static void draw_impl_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t in
     draw_indexed_cached(prim, count, n, data, stride, indices, idx_fmt == 102, 0);
 }
 
-void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z) {
+static void clear_area(uint32_t flags, uint32_t color, float z, int32_t x, int32_t y, int32_t w, int32_t h) {
     uint32_t t = R.target;
-    if (gl_on) {
-        gl_clear((int)flags, color, z, (int)(R.vp_set ? R.vp_x : 0), (int)(R.vp_set ? R.vp_y : 0),
-                 (int)(R.vp_set ? R.vp_w : SW(t)), (int)(R.vp_set ? R.vp_h : SH(t)));
-        return;
-    }
+    if (w <= 0 || h <= 0) return;
+    if (gl_on) { gl_clear((int)flags, color, z, x, y, w, h); return; }
     if ((flags & 2) && t) {
         float* zp = depth_for_target();
-        for (uint32_t k = 0; k < zw * zh; k++) zp[k] = z;
+        for (int32_t yy = y; yy < y + h; yy++)
+            for (int32_t xx = x; xx < x + w; xx++) zp[(uint32_t)yy * zw + (uint32_t)xx] = z;
     }
     if (!(flags & 1) || !t || !SBITS(t) || (SFMT(t) != 21 && SFMT(t) != 22)) return;
-    for (uint32_t y = 0; y < SH(t); y++)
-        for (uint32_t x = 0; x < SW(t); x++) M32(SBITS(t) + y * SPITCH(t) + 4 * x) = color;
-    (void)count; (void)rects;
+    for (int32_t yy = y; yy < y + h; yy++)
+        for (int32_t xx = x; xx < x + w; xx++) M32(SBITS(t) + (uint32_t)yy * SPITCH(t) + 4 * (uint32_t)xx) = color;
+}
+/* Clear covers the viewport (cut by the scissor rect when that test is on), or each of the rects within it. */
+void r_clear(uint32_t count, uint32_t rects, uint32_t flags, uint32_t color, float z) {
+    int32_t x, y, w, h;
+    draw_area(&x, &y, &w, &h);
+    if (!has_depth) flags &= ~6u;
+    if (!count || !rects) { clear_area(flags, color, z, x, y, w, h); return; }
+    for (uint32_t k = 0; k < count; k++) {
+        uint32_t r = rects + 16 * k;
+        int32_t l = (int32_t)M32(r), t = (int32_t)M32(r + 4), rr = (int32_t)M32(r + 8), b = (int32_t)M32(r + 12);
+        if (l < x) l = x;
+        if (t < y) t = y;
+        if (rr > x + w) rr = x + w;
+        if (b > y + h) b = y + h;
+        clear_area(flags, color, z, l, t, rr - l, b - t);
+    }
+}
+
+/* ProcessVertices: transforms count vertices of stream 0 into a pretransformed (XYZRHW) buffer laid out by dst_fvf. */
+void r_process_vertices(uint32_t start, uint32_t count, uint32_t dst, uint32_t dst_fvf, uint32_t dst_stride) {
+    layout_begin();
+    if (!R.vb || !R.vb_stride) return;
+    uint32_t base = M32(R.vb + 28) + R.vb_offset, sets = (dst_fvf >> 8) & 15;
+    for (uint32_t k = 0; k < count; k++) {
+        Vtx v;
+        fetch(base + (start + k) * R.vb_stride, &v);
+        uint32_t o = dst + k * dst_stride;
+        MF32(o) = v.x; MF32(o + 4) = v.y; MF32(o + 8) = v.z; MF32(o + 12) = v.w != 0 ? 1 / v.w : 1;
+        o += 16;
+        if (dst_fvf & 0x40) { M32(o) = v.diffuse; o += 4; }
+        if (dst_fvf & 0x80) { M32(o) = 0; o += 4; }
+        for (uint32_t t = 0; t < sets; t++) {
+            uint32_t size = (dst_fvf >> (16 + 2 * t)) & 3, n = size == 0 ? 2 : size == 1 ? 3 : size == 2 ? 4 : 1;
+            for (uint32_t j = 0; j < n; j++) MF32(o + 4 * j) = t < STAGES && j < 2 ? v.uv[2 * t + j] : 0;
+            o += 4 * n;
+        }
+    }
 }
 
 void r_dump_bmp(uint32_t surface, const char* path) {

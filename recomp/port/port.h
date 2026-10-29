@@ -118,4 +118,6 @@ int gdi_bitmap_object(uint32_t h, uint32_t size, uint32_t out);
 int gdi_bitmap(uint32_t h, GdiBitmap* out);
 int gdi_delete_bitmap(uint32_t h);
 void hle_d3d9_register(void);
+void hle_cursor_override(const uint8_t* rgba, int w, int h, int hx, int hy);
+void hle_cursor_restore(void);
 void web_present(uint32_t surface);
