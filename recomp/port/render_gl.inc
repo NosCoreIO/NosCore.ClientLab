@@ -128,12 +128,13 @@ EM_JS(void, js_gl_texture_lod, (uint32_t id, int lod), {
 
 /* st: 0..5 stage 0 (colorop carg1 carg2 alphaop aarg1 aarg2), 6..11 stage 1, 12/13 texture ids, 14 tfactor,
    15 alpha test, 16 alpha func, 17 alpha ref, 18 blend, 19 src, 20 dst, 21 blend op, 22 z enable, 23 z write,
-   24 z func, 25..28 scissor x y w h, 29..33 stage 0 sampler (mag min mip addressu addressv), 34..38 stage 1 */
+   24 z func, 25..28 scissor x y w h, 29..33 stage 0 sampler (mag min mip addressu addressv), 34..38 stage 1,
+   38 fog colour, 39 fog on, 40 cull mode */
 /* Runs one recorded command list: the vertices of all its draws are uploaded at once, then each command (GL
    primitive, first vertex, count, then 40 state words) sets what changed and draws. */
 EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, int ncmds), {
     const G = self.__gl, gl = G.gl, u = G.u;
-    const P = G.prev || (G.prev = new Int32Array(40).fill(-1));
+    const P = G.prev || (G.prev = new Int32Array(41).fill(-1));
     G.drawn = true;
     // One large buffer takes every list; when it fills up it is orphaned, so the GPU never waits on a range still
     // being read.
@@ -154,7 +155,7 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
                gl.DST_ALPHA, gl.ONE_MINUS_DST_ALPHA, gl.DST_COLOR, gl.ONE_MINUS_DST_COLOR, gl.SRC_ALPHA_SATURATE];
     const eq = [gl.FUNC_ADD, gl.FUNC_ADD, gl.FUNC_SUBTRACT, gl.FUNC_REVERSE_SUBTRACT, gl.MIN, gl.MAX];
     for (let k = 0; k < ncmds; k++) {
-        const cmd = (cmds >> 2) + 43 * k;
+        const cmd = (cmds >> 2) + 44 * k;
         base = cmd + 3;
         // Groups are tested one by one (no short-circuit) so the cache stays in step with GL.
         const s0 = changed(0, 6), t0 = P[12] !== S(12), s1 = changed(6, 12), t1 = P[13] !== S(13);
@@ -197,6 +198,11 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
             const fc = S(38) >>> 0;
             gl.uniform4f(u.uFog, ((fc >>> 16) & 255) / 255, ((fc >>> 8) & 255) / 255, (fc & 255) / 255, S(39) ? 1 : 0);
         }
+        // Screen-clockwise (y down) stays clockwise in clip space (y up): a GL back face.
+        if (changed(40, 41)) {
+            if (S(40) === 2 || S(40) === 3) { gl.enable(gl.CULL_FACE); gl.cullFace(S(40) === 2 ? gl.BACK : gl.FRONT); }
+            else gl.disable(gl.CULL_FACE);
+        }
         gl.drawArrays(HEAP32[cmd], first + HEAP32[cmd + 1], HEAP32[cmd + 2]);
     }
 });
@@ -213,6 +219,34 @@ EM_JS(void, js_gl_clear, (int flags, uint32_t color, float z, int x, int y, int 
     if (flags & 2) { gl.depthMask(true); gl.clearDepth(z); bits |= gl.DEPTH_BUFFER_BIT; }
     if (bits) gl.clear(bits);
     if (G.prev) { G.prev[22] = G.prev[23] = G.prev[24] = -1; G.prev[25] = -1; }
+});
+
+/* Writes rows of RGBA (top row first) into the drawing buffer at x, y. */
+EM_JS(void, js_gl_write, (int x, int y, int w, int h, const uint8_t* rgba), {
+    const G = self.__gl, gl = G.gl;
+    if (!G.wtex) { G.wtex = gl.createTexture(); G.wfb = gl.createFramebuffer(); }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, G.wtex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, HEAPU8.subarray(rgba, rgba + w * h * 4));
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, G.wfb);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, G.wtex, 0);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.blitFramebuffer(0, 0, w, h, x, G.h - y, x + w, G.h - y - h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    G.drawn = true;
+    if (G.prev) { G.prev[12] = -1; G.prev[25] = -1; }
+});
+
+EM_JS(void, js_gl_resize, (int w, int h), {
+    const G = self.__gl, gl = G.gl;
+    G.canvas.width = w;
+    G.canvas.height = h;
+    G.w = w;
+    G.h = h;
+    gl.viewport(0, 0, w, h);
+    if (G.kept) { gl.deleteFramebuffer(G.kept); gl.deleteRenderbuffer(G.keptRb); G.kept = null; }
+    if (G.prev) G.prev[25] = -1;
 });
 
 /* The client never sleeps between frames: left alone it renders hundreds of frames a second, saturating the GPU
@@ -303,7 +337,7 @@ static uint32_t gl_texture(uint32_t tex) {
    identical state share one command. Anything that must see the drawing so far (a texture upload, a clear, a
    readback, present) runs the list first. */
 #define MAX_CMDS 8192
-typedef struct { int32_t prim, first, count, st[40]; } GlCmd;
+typedef struct { int32_t prim, first, count, st[41]; } GlCmd;
 static GlCmd gl_cmds[MAX_CMDS];
 static uint32_t gl_ncmds, gl_nverts;
 
@@ -371,7 +405,7 @@ static void log_raster_setup(void) {
 static void gl_state(int32_t* st) {
     log_stage_setup();
     log_raster_setup();
-    memset(st, 0, 40 * sizeof *st);
+    memset(st, 0, 41 * sizeof *st);
     for (int s = 0; s < 2; s++) {
         for (int k = 0; k < 6; k++) st[6 * s + k] = (int32_t)R.tss[s][1 + k];
         st[12 + s] = (int32_t)gl_texture(R.tex_obj[s]);
@@ -384,17 +418,17 @@ static void gl_state(int32_t* st) {
     st[14] = (int32_t)R.rs[60]; st[15] = (int32_t)R.rs[15]; st[16] = (int32_t)R.rs[25]; st[17] = (int32_t)R.rs[24];
     st[18] = (int32_t)R.rs[27]; st[19] = (int32_t)R.rs[19]; st[20] = (int32_t)R.rs[20];
     st[21] = (int32_t)(R.rs[171] ? R.rs[171] : 1);
-    st[22] = (int32_t)R.rs[7]; st[23] = (int32_t)R.rs[14]; st[24] = (int32_t)R.rs[23];
-    st[25] = (int32_t)(R.vp_set ? R.vp_x : 0); st[26] = (int32_t)(R.vp_set ? R.vp_y : 0);
-    st[27] = (int32_t)(R.vp_set ? R.vp_w : SW(R.target)); st[28] = (int32_t)(R.vp_set ? R.vp_h : SH(R.target));
+    st[22] = has_depth ? (int32_t)R.rs[7] : 0; st[23] = (int32_t)R.rs[14]; st[24] = (int32_t)R.rs[23];
+    draw_area(&st[25], &st[26], &st[27], &st[28]);
     st[38] = (int32_t)R.rs[34];
     st[39] = (int32_t)(R.rs[28] != 0);
+    st[40] = (int32_t)R.rs[22];
 }
 
 static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
     if (R.target != gl_backbuffer || n == 0) return;
     float tw = (float)SW(R.target), th = (float)SH(R.target);
-    int32_t st[40];
+    int32_t st[41];
     gl_state(st);
     if (prim < 4 || prim > 6) {
         static const int32_t gl_prim[4] = {0, 0, 1, 3};   /* POINTS, LINES, LINE_STRIP */
@@ -410,7 +444,7 @@ static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
         if (!cmd || gl_nverts + 3 > FRAME_VERTS) cmd = gl_command(4, st, 3 * (tris - t));
         uint32_t a, b, c;
         if (prim == 4) { a = 3 * t; b = a + 1; c = a + 2; }
-        else if (prim == 5) { a = t; b = t + 1; c = t + 2; }
+        else if (prim == 5) { a = t + (t & 1); b = t + 1 - (t & 1); c = t + 2; }   /* odd strip triangles keep the winding */
         else { a = 0; b = t + 1; c = t + 2; }
         put_vertex(gl_verts + 40 * gl_nverts++, &v[a], tw, th);
         put_vertex(gl_verts + 40 * gl_nverts++, &v[b], tw, th);
@@ -430,6 +464,29 @@ void r_read_back(uint32_t surface) {
     js_gl_read((int)SW(surface), (int)SH(surface), GPTR(SBITS(surface)), (int)SPITCH(surface));
 }
 
+static void gl_resize(uint32_t backbuffer) {
+    gl_flush();
+    gl_backbuffer = backbuffer;
+    if (gl_on) js_gl_resize((int)SW(backbuffer), (int)SH(backbuffer));
+}
+
+/* Puts what the host wrote into the backbuffer's memory (a lock, a GDI DC, a surface copy) onto the drawing buffer. */
+void r_write_back(uint32_t surface) {
+    if (!gl_on || surface != gl_backbuffer) return;
+    gl_flush();
+    uint32_t w = SW(surface), h = SH(surface);
+    if (w * h * 4 > gl_rgba_size) { free(gl_rgba); gl_rgba_size = w * h * 4; gl_rgba = malloc(gl_rgba_size); }
+    uint8_t* p = gl_rgba;
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++, p += 4) {
+            uint32_t t = texel(surface, x, y);
+            p[0] = (uint8_t)(t >> 16); p[1] = (uint8_t)(t >> 8); p[2] = (uint8_t)t; p[3] = 255;
+        }
+    js_gl_write(0, 0, (int)w, (int)h, gl_rgba);
+}
+int r_on_gpu(uint32_t surface) { return gl_on && surface == gl_backbuffer; }
+void r_fill(uint32_t color, int x, int y, int w, int h) { gl_clear(1, color, 0, x, y, w, h); }
+
 void r_preload(uint32_t tex) { if (gl_on) gl_texture(tex); }
 void r_texture_lod(uint32_t tex, uint32_t lod) { if (gl_on) js_gl_texture_lod(tex, (int)lod); }
 
@@ -443,6 +500,10 @@ int r_gl_present(void) {
 }
 #else
 static void gl_start(uint32_t backbuffer) { (void)backbuffer; }
+static void gl_resize(uint32_t backbuffer) { (void)backbuffer; }
+void r_write_back(uint32_t surface) { (void)surface; }
+int r_on_gpu(uint32_t surface) { (void)surface; return 0; }
+void r_fill(uint32_t color, int x, int y, int w, int h) { (void)color; (void)x; (void)y; (void)w; (void)h; }
 static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) { (void)prim; (void)v; (void)n; }
 static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h) {
     (void)flags; (void)color; (void)z; (void)x; (void)y; (void)w; (void)h;

@@ -5,16 +5,18 @@
 #include "render.h"
 #include "image_file.h"
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <strings.h>
 
 #define RET(v) (c->eax = (uint32_t)(v))
 #define THIS ARG(0)
 
-enum { O_D3D = 1, O_DEVICE, O_TEXTURE, O_SURFACE, O_VB, O_IB, O_OTHER, O_MATSTACK, O_SWAPCHAIN };
+enum { O_D3D = 1, O_DEVICE, O_TEXTURE, O_SURFACE, O_VB, O_IB, O_STATEBLOCK, O_MATSTACK, O_SWAPCHAIN, O_VDECL, O_QUERY };
 /* object layout: +0 vtbl +4 refs +8 kind +12 width +16 height +20 format +24 levels +28 data +32 pitch +36 size
    +40 surfaces (texture: array of level surfaces) +44 container +48 usage +52 pool +56 upload state +60 GetDC dc
-   +64 locked +68 priority +72 LOD +76 autogen filter */
+   +64 locked +68 priority +72 LOD +76 autogen filter; state block +40 block index; vertex declaration +28 elements
+   +36 element count +20 equivalent FVF; query +20 type +24 issued */
 #define OBJ_SIZE 96
 
 typedef struct {
@@ -37,9 +39,11 @@ typedef struct {
 static void m_ok(CPU* c) { RET(0); }
 static void m_addref(CPU* c) { RET(++M32(THIS + 4)); }
 static void m_release(CPU* c) { uint32_t r = M32(THIS + 4); RET(r ? --M32(THIS + 4) : 0); }
+static void addref(uint32_t o) { if (o) M32(o + 4)++; }
 
 static uint32_t make_vtable(const char* iface, const Method* m, int n);
-static uint32_t vt_d3d, vt_device, vt_texture, vt_surface, vt_vb, vt_ib, vt_other, vt_matstack, vt_swapchain;
+static void mat_mul(uint32_t out, uint32_t a, uint32_t b);
+static uint32_t vt_d3d, vt_device, vt_texture, vt_surface, vt_vb, vt_ib, vt_stateblock, vt_matstack, vt_swapchain, vt_vdecl, vt_query;
 
 static uint32_t make_obj(uint32_t vtbl, int kind) {
     uint32_t o = guest_alloc(OBJ_SIZE, 16);
@@ -63,19 +67,22 @@ static const Guid IID_IDirect3DSurface9 = {0x0cfbaf3a, 0x9ff6, 0x429a, {0x99, 0x
 static const Guid IID_IDirect3DVertexBuffer9 = {0xb64bb1b5, 0xfd70, 0x4df6, {0xbf, 0x91, 0x19, 0xd0, 0xa1, 0x24, 0x54, 0xe3}};
 static const Guid IID_IDirect3DIndexBuffer9 = {0x7c9dd65e, 0xd3f7, 0x4529, {0xac, 0xee, 0x78, 0x58, 0x30, 0xac, 0xde, 0x35}};
 static const Guid IID_IDirect3DSwapChain9 = {0x794950f2, 0xadfc, 0x458a, {0x90, 0x5e, 0x10, 0xa1, 0x0b, 0x8b, 0x50, 0x3b}};
+static const Guid IID_IDirect3DStateBlock9 = {0xb07c4fe5, 0x310d, 0x4ba8, {0xa2, 0x3c, 0x4f, 0x0f, 0x20, 0x6f, 0x21, 0x8b}};
+static const Guid IID_IDirect3DVertexDeclaration9 = {0xdd13c59c, 0x36fa, 0x4098, {0xa8, 0xfb, 0xc7, 0xed, 0x39, 0xdc, 0x85, 0x46}};
+static const Guid IID_IDirect3DQuery9 = {0xd9771460, 0xa695, 0x4f26, {0xbb, 0xd3, 0x27, 0xb8, 0x40, 0xb5, 0x41, 0xcc}};
 static const Guid IID_ID3DXMatrixStack = {0xc7885ba7, 0xf990, 0x4fe7, {0x92, 0x2d, 0x85, 0x15, 0xe4, 0x77, 0xdd, 0x85}};
 
 static int implements(uint32_t kind, const void* iid) {
-    const Guid* by_kind[9][4] = {
+    const Guid* by_kind[12][4] = {
         [O_D3D] = {&IID_IDirect3D9}, [O_DEVICE] = {&IID_IDirect3DDevice9},
         [O_TEXTURE] = {&IID_IDirect3DResource9, &IID_IDirect3DBaseTexture9, &IID_IDirect3DTexture9},
         [O_SURFACE] = {&IID_IDirect3DResource9, &IID_IDirect3DSurface9},
         [O_VB] = {&IID_IDirect3DResource9, &IID_IDirect3DVertexBuffer9}, [O_IB] = {&IID_IDirect3DResource9, &IID_IDirect3DIndexBuffer9},
-        [O_MATSTACK] = {&IID_ID3DXMatrixStack},
+        [O_STATEBLOCK] = {&IID_IDirect3DStateBlock9}, [O_MATSTACK] = {&IID_ID3DXMatrixStack},
+        [O_SWAPCHAIN] = {&IID_IDirect3DSwapChain9}, [O_VDECL] = {&IID_IDirect3DVertexDeclaration9}, [O_QUERY] = {&IID_IDirect3DQuery9},
     };
     if (!memcmp(iid, &IID_IUnknown, 16)) return 1;
-    if (kind == O_SWAPCHAIN) return !memcmp(iid, &IID_IDirect3DSwapChain9, 16);
-    if (kind >= 9) return 0;
+    if (kind >= 12) return 0;
     for (int k = 0; k < 4 && by_kind[kind][k]; k++)
         if (!memcmp(iid, by_kind[kind][k], 16)) return 1;
     return 0;
@@ -139,15 +146,16 @@ static uint32_t make_buffer(uint32_t vt, int kind, uint32_t size, uint32_t fmt) 
 /* ---- IDirect3D9 ---- */
 
 /* D3DCAPS9 describing what the WebGL renderer does: fixed function only, two texture stages, eight lights, no
-   stencil, culling, scissor, user clip planes, shaders, cube or volume textures. */
+   stencil, user clip planes, shaders, offscreen render targets, cube or volume textures. */
 static void fill_caps(uint32_t p) {
     memset(GPTR(p), 0, 304);
     M32(p) = 1;                                 /* DeviceType HAL */
     M32(p + 12) = 0x40000000u;                  /* Caps2: CANAUTOGENMIPMAP */
     M32(p + 20) = 0x80000001u;                  /* PresentationIntervals: ONE, IMMEDIATE */
+    M32(p + 24) = 1;                            /* CursorCaps: COLOR, shown as the page's cursor */
     M32(p + 28) = 0x0009A650u;                  /* DevCaps: system-memory vertices, video-memory textures, DrawPrimitives2(Ex), hardware T&L and rasterisation */
-    M32(p + 32) = 0x00000812u;                  /* PrimitiveMiscCaps: MASKZ, CULLNONE, BLENDOP */
-    M32(p + 36) = 0x00000090u;                  /* RasterCaps: ZTEST, FOGVERTEX */
+    M32(p + 32) = 0x00000872u;                  /* PrimitiveMiscCaps: MASKZ, CULLNONE/CW/CCW, BLENDOP */
+    M32(p + 36) = 0x01000090u;                  /* RasterCaps: ZTEST, FOGVERTEX, SCISSORTEST */
     M32(p + 40) = 0xFF;                         /* ZCmpCaps */
     M32(p + 44) = M32(p + 48) = 0x1FFF;         /* Src/DestBlendCaps */
     M32(p + 52) = 0xFF;                         /* AlphaCmpCaps */
@@ -174,6 +182,7 @@ static void fill_caps(uint32_t p) {
     M32(p + 192) = 256;                         /* MaxStreamStride */
     M32(p + 232) = 1;                           /* NumberOfAdaptersInGroup */
     M32(p + 240) = 1;                           /* NumSimultaneousRTs */
+    M32(p + 244) = 0x03000300u;                 /* StretchRectFilterCaps: MIN/MAG point+linear */
 }
 
 /* ---- format support, matching what texel() decodes and what the canvas can display ---- */
@@ -243,19 +252,68 @@ static void d_EnumAdapterModes(CPU* c) { fill_mode(ARG(4)); RET(0); }
 static void d_GetAdapterDisplayMode(CPU* c) { fill_mode(ARG(2)); RET(0); }
 static void d_GetDeviceCaps(CPU* c) { fill_caps(ARG(3)); RET(0); }
 static void d_GetAdapterMonitor(CPU* c) { RET(1); }
-static uint32_t the_device, the_d3d, backbuffer, depthbuffer;
-static void d_CreateDevice(CPU* c) {
-    uint32_t pp = ARG(5), w = M32(pp), h = M32(pp + 4), hwnd = M32(pp + 28) ? M32(pp + 28) : ARG(3);
+static uint32_t the_device, the_d3d, backbuffer;
+
+/* Device state the renderer does not hold. */
+static struct {
+    uint32_t pp[14];                 /* D3DPRESENT_PARAMETERS */
+    uint32_t focus, flags;           /* CreateDevice focus window and behaviour flags */
+    uint32_t depth;                  /* depth-stencil surface, 0 for none */
+    uint32_t swapchain;
+    uint16_t gamma[768];
+    int sw_vp, dialog_mode;
+    uint32_t clip_status[2];
+    uint32_t palette;
+    uint32_t cursor_surface, cursor_hx, cursor_hy, cursor_x, cursor_y;
+    int cursor_shown;
+} dev;
+/* Device state that state blocks capture alongside render.c's. */
+static struct {
+    uint32_t vdecl, stream_freq, npatch;
+    uint32_t vs_f[256][4], ps_f[256][4], vs_i[16][4], ps_i[16][4], vs_b[16], ps_b[16];
+} ds;
+static uint8_t* palettes[65536];
+
+/* Sizes the backbuffer from the presentation parameters (or the window) and creates the automatic depth buffer. */
+static void present_parameters(uint32_t pp, uint32_t window) {
+    uint32_t w = M32(pp), h = M32(pp + 4), hwnd = M32(pp + 28) ? M32(pp + 28) : window;
     if (!w || !h) hle_window_client_size(hwnd, &w, &h);
     if (!w) w = 1024;
     if (!h) h = 768;
     M32(pp) = w;
     M32(pp + 4) = h;
-    port_log("IDirect3D9::CreateDevice %ux%u format %u", w, h, M32(pp + 8));
+    if (!M32(pp + 8)) M32(pp + 8) = 22;
+    if (!M32(pp + 12)) M32(pp + 12) = 1;
+    memcpy(dev.pp, GPTR(pp), sizeof dev.pp);
+    backbuffer = make_surface(w, h, M32(pp + 8), 0);
+    M32(backbuffer + 48) = 1;   /* D3DUSAGE_RENDERTARGET */
+    dev.depth = M32(pp + 36) ? make_surface(w, h, M32(pp + 40), 0) : 0;
+    if (dev.depth) M32(dev.depth + 48) = 2;   /* D3DUSAGE_DEPTHSTENCIL */
+}
+static void default_device_state(void) {
+    memset(&ds, 0, sizeof ds);
+    ds.stream_freq = 1;
+    memset(dev.clip_status, 0, sizeof dev.clip_status);
+    dev.palette = 0xFFFF;
+    for (int k = 0; k < 256; k++) dev.gamma[k] = dev.gamma[256 + k] = dev.gamma[512 + k] = (uint16_t)(k * 257);
+}
+static int in_scene;
+static void d_CreateDevice(CPU* c) {
+    uint32_t pp = ARG(5);
+    if (!pp || !ARG(6) || ARG(1) != 0 || ARG(2) != 1) { RET(D3DERR_INVALIDCALL); return; }
+    present_parameters(pp, ARG(3));
+    int ok = backbuffer_format(M32(pp + 8)) && (!M32(pp + 36) || depth_format(M32(pp + 40)));
+    port_log("IDirect3D9::CreateDevice %ux%u format %u, depth %s %u, flags %x%s", M32(pp), M32(pp + 4), M32(pp + 8),
+             M32(pp + 36) ? "auto" : "none", M32(pp + 40), ARG(4), ok ? "" : ": not available");
+    if (!ok) { RET(D3DERR_NOTAVAILABLE); return; }
+    dev.focus = ARG(3);
+    dev.flags = ARG(4);
+    dev.sw_vp = (dev.flags & 0x20) != 0;   /* D3DCREATE_SOFTWARE_VERTEXPROCESSING */
     the_device = make_obj(vt_device, O_DEVICE);
-    backbuffer = make_surface(w, h, M32(pp + 8) ? M32(pp + 8) : 22, 0);
-    depthbuffer = make_surface(w, h, 75, 0);
+    dev.swapchain = make_obj(vt_swapchain, O_SWAPCHAIN);
     r_init(backbuffer);
+    r_set_depth(dev.depth != 0);
+    default_device_state();
     M32(ARG(6)) = the_device;
     RET(0);
 }
@@ -280,10 +338,20 @@ static void v_GetAvailableTextureMem(CPU* c) { RET(512u << 20); }
 static void v_GetDirect3D(CPU* c) { M32(ARG(1)) = the_d3d; M32(the_d3d + 4)++; RET(0); }
 static void v_GetDeviceCaps(CPU* c) { fill_caps(ARG(1)); RET(0); }
 static void v_GetDisplayMode(CPU* c) { fill_mode(ARG(2)); RET(0); }
-static void v_GetCreationParameters(CPU* c) { memset(GPTR(ARG(1)), 0, 16); RET(0); }
-static void v_GetSwapChain(CPU* c) { M32(ARG(2)) = make_obj(vt_swapchain, O_SWAPCHAIN); RET(0); }
+static void v_GetCreationParameters(CPU* c) {
+    uint32_t p = ARG(1);
+    if (!p) { RET(D3DERR_INVALIDCALL); return; }
+    M32(p) = 0; M32(p + 4) = 1; M32(p + 8) = dev.focus; M32(p + 12) = dev.flags;
+    RET(0);
+}
+static void v_GetSwapChain(CPU* c) {
+    if (!ARG(2) || ARG(1) != 0) { RET(D3DERR_INVALIDCALL); return; }
+    addref(dev.swapchain);
+    M32(ARG(2)) = dev.swapchain;
+    RET(0);
+}
 static void v_GetNumberOfSwapChains(CPU* c) { RET(1); }
-static void v_Present(CPU* c) {
+static void present_frame(void) {
     static const char* shot_dir;
     static int checked;
     if (!checked) { checked = 1; shot_dir = getenv("PORT_SHOT_DIR"); }
@@ -304,10 +372,24 @@ static void v_Present(CPU* c) {
         r_dump_bmp(backbuffer, path);
         r_stats();
     }
-    RET(0);
 }
-static void v_GetBackBuffer(CPU* c) { M32(backbuffer + 4)++; M32(ARG(4)) = backbuffer; RET(0); }
-static void v_GetRasterStatus(CPU* c) { memset(GPTR(ARG(2)), 0, 8); RET(0); }
+static void v_Present(CPU* c) { present_frame(); RET(0); }
+static uint32_t back_buffer(uint32_t index, uint32_t out) {
+    if (!out || index != 0) return D3DERR_INVALIDCALL;
+    addref(backbuffer);
+    M32(out) = backbuffer;
+    return 0;
+}
+static void v_GetBackBuffer(CPU* c) { RET(ARG(1) != 0 ? D3DERR_INVALIDCALL : back_buffer(ARG(2), ARG(4))); }
+/* Not in vertical blank; the scan line follows a 60 Hz refresh. */
+static uint32_t raster_status(uint32_t p) {
+    if (!p) return D3DERR_INVALIDCALL;
+    double phase = fmod(port_now_ms(), 1000.0 / 60) / (1000.0 / 60);
+    M32(p) = 0;
+    M32(p + 4) = (uint32_t)(phase * M32(backbuffer + 16));
+    return 0;
+}
+static void v_GetRasterStatus(CPU* c) { RET(ARG(1) != 0 ? D3DERR_INVALIDCALL : raster_status(ARG(2))); }
 static void v_CreateTexture(CPU* c) {
     uint32_t usage = ARG(4), f = ARG(5), out = ARG(7);
     if (!out || !ARG(1) || !ARG(2) || (usage & 3) || !texture_format(f)) {
@@ -341,22 +423,50 @@ static void v_CreateIndexBuffer(CPU* c) {
     M32(ARG(5)) = b;
     RET(0);
 }
-static void v_CreateRenderTarget(CPU* c) { M32(ARG(7)) = make_surface(ARG(1), ARG(2), ARG(3), 0); RET(0); }
-static void v_CreateDepthStencilSurface(CPU* c) { M32(ARG(7)) = make_surface(ARG(1), ARG(2), ARG(3), 0); RET(0); }
-static void v_CreateOffscreenPlainSurface(CPU* c) { M32(ARG(5)) = make_surface(ARG(1), ARG(2), ARG(3), 0); RET(0); }
-static void v_GetRenderTarget(CPU* c) { M32(backbuffer + 4)++; M32(ARG(2)) = backbuffer; RET(0); }
-static void v_GetDepthStencilSurface(CPU* c) { M32(depthbuffer + 4)++; M32(ARG(1)) = depthbuffer; RET(0); }
+/* Draws reach only the backbuffer, so no other render target can be made. */
+static void v_CreateRenderTarget(CPU* c) { if (ARG(7)) M32(ARG(7)) = 0; RET(D3DERR_NOTAVAILABLE); }
+static void v_CreateDepthStencilSurface(CPU* c) {
+    if (!ARG(7) || !ARG(1) || !ARG(2) || !depth_format(ARG(3))) { RET(D3DERR_INVALIDCALL); return; }
+    uint32_t s = make_surface(ARG(1), ARG(2), ARG(3), 0);
+    M32(s + 48) = 2;
+    M32(ARG(7)) = s;
+    RET(0);
+}
+static void v_CreateOffscreenPlainSurface(CPU* c) {
+    uint32_t f = ARG(3);
+    if (!ARG(5) || !ARG(1) || !ARG(2) || !(texture_format(f) || f == 20)) { RET(D3DERR_INVALIDCALL); return; }
+    uint32_t s = make_surface(ARG(1), ARG(2), f, 0);
+    M32(s + 52) = ARG(4);
+    M32(ARG(5)) = s;
+    RET(0);
+}
+static void v_GetRenderTarget(CPU* c) {
+    if (!ARG(2)) { RET(D3DERR_INVALIDCALL); return; }
+    if (ARG(1) != 0) { M32(ARG(2)) = 0; RET(D3DERR_NOTFOUND); return; }
+    addref(backbuffer);
+    M32(ARG(2)) = backbuffer;
+    RET(0);
+}
+static void v_SetDepthStencilSurface(CPU* c) {
+    uint32_t s = ARG(1);
+    if (s && (M32(s + 8) != O_SURFACE || !depth_format(M32(s + 20)))) { RET(D3DERR_INVALIDCALL); return; }
+    dev.depth = s;
+    r_set_depth(s != 0);
+    RET(0);
+}
+static void v_GetDepthStencilSurface(CPU* c) {
+    if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; }
+    M32(ARG(1)) = dev.depth;
+    if (!dev.depth) { RET(D3DERR_NOTFOUND); return; }
+    addref(dev.depth);
+    RET(0);
+}
 static void v_GetViewport(CPU* c) {
     uint32_t p = ARG(1);
     M32(p) = 0; M32(p + 4) = 0; M32(p + 8) = M32(backbuffer + 12); M32(p + 12) = M32(backbuffer + 16);
     MF32(p + 16) = 0.0f; MF32(p + 20) = 1.0f;
     RET(0);
 }
-static void v_zero_out1(CPU* c) { if (ARG(1)) M32(ARG(1)) = 0; RET(0); }
-static void v_zero_out2(CPU* c) { if (ARG(2)) M32(ARG(2)) = 0; RET(0); }
-static void v_new_other_out2(CPU* c) { M32(ARG(2)) = make_obj(vt_other, O_OTHER); RET(0); }
-static void v_new_other_out1(CPU* c) { M32(ARG(1)) = make_obj(vt_other, O_OTHER); RET(0); }
-static int in_scene;
 static void v_BeginScene(CPU* c) {
     if (in_scene) { RET(D3DERR_INVALIDCALL); return; }
     in_scene = 1;
@@ -371,8 +481,7 @@ static void v_ValidateDevice(CPU* c) { if (ARG(1)) M32(ARG(1)) = 1; RET(0); }
 
 /* ---- pipeline state and draws go to the software rasteriser ---- */
 
-static void v_SetFVF(CPU* c) { r_set_fvf(ARG(1)); RET(0); }
-static void v_SetVertexDeclaration(CPU* c) { RET(0); }
+static void v_SetFVF(CPU* c) { r_set_fvf(ARG(1)); ds.vdecl = 0; RET(0); }
 static void v_SetTransform(CPU* c) { r_set_transform(ARG(1), ARG(2)); RET(0); }
 static void v_GetTransformR(CPU* c) { r_get_transform(ARG(1), ARG(2)); RET(0); }
 static void v_SetRenderState(CPU* c) { r_set_render_state(ARG(1), ARG(2)); RET(0); }
@@ -382,71 +491,53 @@ static void v_SetSamplerState(CPU* c) { r_set_sampler(ARG(1), ARG(2), ARG(3)); R
 static void v_GetSamplerStateR(CPU* c) { M32(ARG(3)) = r_get_sampler(ARG(1), ARG(2)); RET(0); }
 static void v_GetTextureStageStateR(CPU* c) { M32(ARG(3)) = r_get_tss(ARG(1), ARG(2)); RET(0); }
 static void v_SetTexture(CPU* c) { r_set_texture(ARG(1), ARG(2)); RET(0); }
-static void v_GetTextureR(CPU* c) { M32(ARG(2)) = r_get_texture(ARG(1)); RET(0); }
-static void v_SetStreamSource(CPU* c) { if (ARG(1) == 0) r_set_stream(ARG(2), ARG(3), ARG(4)); RET(0); }
+static void v_GetTextureR(CPU* c) {
+    if (!ARG(2)) { RET(D3DERR_INVALIDCALL); return; }
+    M32(ARG(2)) = r_get_texture(ARG(1));
+    addref(M32(ARG(2)));
+    RET(0);
+}
+static void v_SetStreamSource(CPU* c) {
+    if (ARG(1) != 0) { RET(D3DERR_INVALIDCALL); return; }   /* MaxStreams is 1 */
+    r_set_stream(ARG(2), ARG(3), ARG(4));
+    RET(0);
+}
 static void v_SetIndices(CPU* c) { r_set_indices(ARG(1)); RET(0); }
 static void v_SetViewport(CPU* c) { r_set_viewport(ARG(1)); RET(0); }
-static void v_SetRenderTarget(CPU* c) { if (ARG(1) == 0) r_set_render_target(ARG(2) ? ARG(2) : backbuffer); RET(0); }
-static void v_Clear(CPU* c) { uint32_t zb = ARG(5); float z; memcpy(&z, &zb, 4); r_clear(ARG(1), ARG(2), ARG(3), ARG(4), z); RET(0); }
+static void v_SetRenderTarget(CPU* c) {
+    if (ARG(1) != 0 || ARG(2) != backbuffer) { RET(D3DERR_INVALIDCALL); return; }
+    r_set_render_target(ARG(2));
+    RET(0);
+}
+/* D3DCLEAR_ZBUFFER needs a depth buffer and D3DCLEAR_STENCIL one with stencil bits. */
+static void v_Clear(CPU* c) {
+    uint32_t zb = ARG(5), flags = ARG(3);
+    float z;
+    memcpy(&z, &zb, 4);
+    if ((ARG(1) && !ARG(2)) || ((flags & 6) && !dev.depth) || ((flags & 4) && M32(dev.depth + 20) != 75)) { RET(D3DERR_INVALIDCALL); return; }
+    r_clear(ARG(1), ARG(2), flags, ARG(4), z);
+    RET(0);
+}
 static void v_DrawPrimitive(CPU* c) { r_draw(ARG(1), ARG(2), ARG(3)); RET(0); }
 static void v_DrawPrimitiveUP(CPU* c) { r_draw_up(ARG(1), ARG(2), ARG(3), ARG(4)); RET(0); }
 static void v_DrawIndexedPrimitive(CPU* c) { r_draw_indexed(ARG(1), (int32_t)ARG(2), ARG(5), ARG(6)); RET(0); }
 static void v_DrawIndexedPrimitiveUP(CPU* c) { r_draw_indexed_up(ARG(1), ARG(4), ARG(5), ARG(6), ARG(7), ARG(8)); RET(0); }
-static void v_SetVertexShader(CPU* c) { RET(0); }
 static void v_SetLight(CPU* c) { r_set_light(ARG(1), ARG(2)); RET(0); }
 static void v_GetLightR(CPU* c) { r_get_light(ARG(1), ARG(2)); RET(0); }
 static void v_LightEnable(CPU* c) { r_light_enable(ARG(1), ARG(2)); RET(0); }
 static void v_GetLightEnableR(CPU* c) { M32(ARG(2)) = r_light_enabled(ARG(1)); RET(0); }
 static void v_SetMaterial(CPU* c) { r_set_material(ARG(1)); RET(0); }
 static void v_GetMaterialR(CPU* c) { r_get_material(ARG(1)); RET(0); }
-static void v_SetPixelShader(CPU* c) { RET(0); }
 
-static const Method device_methods[] = {
-    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release},
-    {"TestCooperativeLevel", 1, v_TestCooperativeLevel}, {"GetAvailableTextureMem", 1, v_GetAvailableTextureMem},
-    {"EvictManagedResources", 1, 0}, {"GetDirect3D", 2, v_GetDirect3D}, {"GetDeviceCaps", 2, v_GetDeviceCaps},
-    {"GetDisplayMode", 3, v_GetDisplayMode}, {"GetCreationParameters", 2, v_GetCreationParameters},
-    {"SetCursorProperties", 4, 0}, {"SetCursorPosition", 4, 0}, {"ShowCursor", 2, 0},
-    {"CreateAdditionalSwapChain", 3, v_new_other_out2}, {"GetSwapChain", 3, v_GetSwapChain},
-    {"GetNumberOfSwapChains", 1, v_GetNumberOfSwapChains}, {"Reset", 2, 0}, {"Present", 5, v_Present},
-    {"GetBackBuffer", 5, v_GetBackBuffer}, {"GetRasterStatus", 3, v_GetRasterStatus}, {"SetDialogBoxMode", 2, 0},
-    {"SetGammaRamp", 4, 0}, {"GetGammaRamp", 3, 0}, {"CreateTexture", 9, v_CreateTexture},
-    {"CreateVolumeTexture", 10, v_CreateVolumeTexture}, {"CreateCubeTexture", 8, v_CreateCubeTexture},
-    {"CreateVertexBuffer", 7, v_CreateVertexBuffer}, {"CreateIndexBuffer", 7, v_CreateIndexBuffer},
-    {"CreateRenderTarget", 9, v_CreateRenderTarget}, {"CreateDepthStencilSurface", 9, v_CreateDepthStencilSurface},
-    {"UpdateSurface", 5, 0}, {"UpdateTexture", 3, 0}, {"GetRenderTargetData", 3, 0}, {"GetFrontBufferData", 3, 0},
-    {"StretchRect", 6, 0}, {"ColorFill", 4, 0}, {"CreateOffscreenPlainSurface", 7, v_CreateOffscreenPlainSurface},
-    {"SetRenderTarget", 3, v_SetRenderTarget}, {"GetRenderTarget", 3, v_GetRenderTarget}, {"SetDepthStencilSurface", 2, 0},
-    {"GetDepthStencilSurface", 2, v_GetDepthStencilSurface}, {"BeginScene", 1, v_BeginScene}, {"EndScene", 1, v_EndScene},
-    {"Clear", 7, v_Clear}, {"SetTransform", 3, v_SetTransform}, {"GetTransform", 3, v_GetTransformR}, {"MultiplyTransform", 3, 0},
-    {"SetViewport", 2, v_SetViewport}, {"GetViewport", 2, v_GetViewport}, {"SetMaterial", 2, v_SetMaterial}, {"GetMaterial", 2, v_GetMaterialR},
-    {"SetLight", 3, v_SetLight}, {"GetLight", 3, v_GetLightR}, {"LightEnable", 3, v_LightEnable}, {"GetLightEnable", 3, v_GetLightEnableR},
-    {"SetClipPlane", 3, 0}, {"GetClipPlane", 3, 0}, {"SetRenderState", 3, v_SetRenderState}, {"GetRenderState", 3, v_GetRenderStateR},
-    {"CreateStateBlock", 3, v_new_other_out2}, {"BeginStateBlock", 1, 0}, {"EndStateBlock", 2, v_new_other_out1},
-    {"SetClipStatus", 2, 0}, {"GetClipStatus", 2, 0}, {"GetTexture", 3, v_GetTextureR}, {"SetTexture", 3, v_SetTexture},
-    {"GetTextureStageState", 4, v_GetTextureStageStateR}, {"SetTextureStageState", 4, v_SetTextureStageState}, {"GetSamplerState", 4, v_GetSamplerStateR},
-    {"SetSamplerState", 4, v_SetSamplerState}, {"ValidateDevice", 2, v_ValidateDevice}, {"SetPaletteEntries", 3, 0},
-    {"GetPaletteEntries", 3, 0}, {"SetCurrentTexturePalette", 2, 0}, {"GetCurrentTexturePalette", 2, v_zero_out1},
-    {"SetScissorRect", 2, 0}, {"GetScissorRect", 2, 0}, {"SetSoftwareVertexProcessing", 2, 0},
-    {"GetSoftwareVertexProcessing", 1, 0}, {"SetNPatchMode", 2, 0}, {"GetNPatchMode", 1, 0},
-    {"DrawPrimitive", 4, v_DrawPrimitive}, {"DrawIndexedPrimitive", 7, v_DrawIndexedPrimitive}, {"DrawPrimitiveUP", 5, v_DrawPrimitiveUP},
-    {"DrawIndexedPrimitiveUP", 9, v_DrawIndexedPrimitiveUP}, {"ProcessVertices", 7, 0}, {"CreateVertexDeclaration", 3, v_new_other_out2},
-    {"SetVertexDeclaration", 2, v_SetVertexDeclaration}, {"GetVertexDeclaration", 2, v_zero_out1}, {"SetFVF", 2, v_SetFVF},
-    {"GetFVF", 2, v_zero_out1}, {"CreateVertexShader", 3, v_new_other_out2}, {"SetVertexShader", 2, v_SetVertexShader},
-    {"GetVertexShader", 2, v_zero_out1}, {"SetVertexShaderConstantF", 4, 0}, {"GetVertexShaderConstantF", 4, 0},
-    {"SetVertexShaderConstantI", 4, 0}, {"GetVertexShaderConstantI", 4, 0}, {"SetVertexShaderConstantB", 4, 0},
-    {"GetVertexShaderConstantB", 4, 0}, {"SetStreamSource", 5, v_SetStreamSource}, {"GetStreamSource", 5, v_zero_out2},
-    {"SetStreamSourceFreq", 3, 0}, {"GetStreamSourceFreq", 3, v_zero_out2}, {"SetIndices", 2, v_SetIndices},
-    {"GetIndices", 2, v_zero_out1}, {"CreatePixelShader", 3, v_new_other_out2}, {"SetPixelShader", 2, v_SetPixelShader},
-    {"GetPixelShader", 2, v_zero_out1}, {"SetPixelShaderConstantF", 4, 0}, {"GetPixelShaderConstantF", 4, 0},
-    {"SetPixelShaderConstantI", 4, 0}, {"GetPixelShaderConstantI", 4, 0}, {"SetPixelShaderConstantB", 4, 0},
-    {"GetPixelShaderConstantB", 4, 0}, {"DrawRectPatch", 4, 0}, {"DrawTriPatch", 4, 0}, {"DeletePatch", 2, 0},
-    {"CreateQuery", 3, v_new_other_out2},
-};
 
 /* ---- resources ---- */
 
-static void r_GetDevice(CPU* c) { M32(ARG(1)) = the_device; RET(0); }
+static void r_GetDevice(CPU* c) {
+    if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; }
+    addref(the_device);
+    M32(ARG(1)) = the_device;
+    RET(0);
+}
 static void r_GetType(CPU* c) { uint32_t k = M32(THIS + 8); RET(k == O_TEXTURE ? 3 : k == O_SURFACE ? 1 : k == O_VB ? 6 : k == O_IB ? 7 : 1); }
 static void t_GetLevelCount(CPU* c) { RET(M32(THIS + 24)); }
 static uint32_t level(uint32_t t, uint32_t l) { return l < M32(t + 24) ? M32(M32(t + 40) + 4 * l) : 0; }
@@ -481,6 +572,7 @@ static uint32_t lock_surface(uint32_t s, uint32_t locked, uint32_t rect, uint32_
 static uint32_t unlock_surface(uint32_t s) {
     if (!s || !M32(s + 64)) return D3DERR_INVALIDCALL;
     M32(s + 64) = 0;
+    if (M32(s + 56) == 1) r_write_back(s);
     return 0;
 }
 static void t_LockRect(CPU* c) {
@@ -533,6 +625,7 @@ static void s_ReleaseDC(CPU* c) {
         for (uint32_t x = 0; x < w; x++) surface_store(s, x, y, px[y * w + x]);
     free(px);
     gdi_delete_bitmap(hle_dc_delete(dc));
+    r_write_back(s);
     M32(s + 60) = 0;
     M32(s + 56) = 1;
     if (M32(s + 44)) M32(M32(s + 44) + 56) = 1;
@@ -660,14 +753,579 @@ static const Method surface_methods[] = {
 };
 static const Method vb_methods[] = {RESOURCE_METHODS, {"Lock", 5, b_Lock}, {"Unlock", 1, b_Unlock}, {"GetDesc", 2, b_GetDesc}};
 static const Method ib_methods[] = {RESOURCE_METHODS, {"Lock", 5, b_Lock}, {"Unlock", 1, b_Unlock}, {"GetDesc", 2, b_GetDesc}};
-static const Method other_methods[] = {
-    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Method3", 1, 0},
-    {"Method4", 1, 0}, {"Method5", 1, 0}, {"Method6", 1, 0}, {"Method7", 1, 0}, {"Method8", 1, 0},
+/* ---- surface copies ---- */
+
+static int is_surface(uint32_t s) { return s && M32(s + 8) == O_SURFACE; }
+static void pixel_store(uint32_t s, uint32_t x, uint32_t y, uint32_t p) {
+    uint32_t row = M32(s + 28) + y * M32(s + 32), a = p >> 24, r = p >> 16 & 255, g = p >> 8 & 255, b = p & 255;
+    switch (M32(s + 20)) {
+    case 21: M32(row + 4 * x) = p; break;
+    case 25: M16(row + 2 * x) = (uint16_t)((a >= 128 ? 0x8000 : 0) | (r >> 3) << 10 | (g >> 3) << 5 | b >> 3); break;
+    case 26: M16(row + 2 * x) = (uint16_t)((a >> 4) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | b >> 4); break;
+    default: surface_store(s, x, y, p);
+    }
+}
+static void touched(uint32_t s) {
+    M32(s + 56) = 1;
+    if (M32(s + 44)) M32(M32(s + 44) + 56) = 1;
+    r_write_back(s);
+}
+/* A RECT inside the surface, or the whole surface when rect is NULL: left, top, right, bottom. */
+static int read_rect(uint32_t rect, uint32_t s, int32_t* r) {
+    r[0] = 0; r[1] = 0; r[2] = (int32_t)M32(s + 12); r[3] = (int32_t)M32(s + 16);
+    if (!rect) return 1;
+    int32_t l = (int32_t)M32(rect), t = (int32_t)M32(rect + 4), rr = (int32_t)M32(rect + 8), b = (int32_t)M32(rect + 12);
+    if (l < 0 || t < 0 || l >= rr || t >= b || rr > r[2] || b > r[3]) return 0;
+    r[0] = l; r[1] = t; r[2] = rr; r[3] = b;
+    return 1;
+}
+/* Copies a rectangle byte for byte between surfaces of one format; DXT rectangles go by whole blocks. */
+static void copy_bytes(uint32_t src, int32_t l, int32_t t, int32_t w, int32_t h, uint32_t dst, int32_t x, int32_t y) {
+    uint32_t f = M32(src + 20), unit = fmt_bits(f) / 8;
+    if (block_format(f)) {
+        unit = f == FMT_DXT1 ? 8 : 16;
+        l /= 4; t /= 4; x /= 4; y /= 4; w = (w + 3) / 4; h = (h + 3) / 4;
+    }
+    for (int32_t r = 0; r < h; r++)
+        memcpy(GPTR(M32(dst + 28) + (uint32_t)(y + r) * M32(dst + 32) + (uint32_t)x * unit),
+               GPTR(M32(src + 28) + (uint32_t)(t + r) * M32(src + 32) + (uint32_t)l * unit), (size_t)w * unit);
+}
+
+static void v_UpdateSurface(CPU* c) {
+    uint32_t src = ARG(1), dst = ARG(3), pt = ARG(4);
+    int32_t r[4];
+    if (!is_surface(src) || !is_surface(dst) || M32(src + 20) != M32(dst + 20) || !read_rect(ARG(2), src, r)) { RET(D3DERR_INVALIDCALL); return; }
+    int32_t x = pt ? (int32_t)M32(pt) : 0, y = pt ? (int32_t)M32(pt + 4) : 0, w = r[2] - r[0], h = r[3] - r[1];
+    if (x < 0 || y < 0 || x + w > (int32_t)M32(dst + 12) || y + h > (int32_t)M32(dst + 16) ||
+        (block_format(M32(src + 20)) && ((r[0] | r[1] | x | y) & 3))) { RET(D3DERR_INVALIDCALL); return; }
+    copy_bytes(src, r[0], r[1], w, h, dst, x, y);
+    touched(dst);
+    RET(0);
+}
+/* Each destination level takes the source level of the same size. */
+static void v_UpdateTexture(CPU* c) {
+    uint32_t src = ARG(1), dst = ARG(2);
+    if (!src || !dst || M32(src + 8) != O_TEXTURE || M32(dst + 8) != O_TEXTURE || M32(src + 20) != M32(dst + 20)) { RET(D3DERR_INVALIDCALL); return; }
+    for (uint32_t j = 0; j < M32(dst + 24); j++) {
+        uint32_t d = level(dst, j), s = 0;
+        for (uint32_t i = 0; i < M32(src + 24) && !s; i++) {
+            uint32_t l = level(src, i);
+            if (M32(l + 12) == M32(d + 12) && M32(l + 16) == M32(d + 16)) s = l;
+        }
+        if (!s) { RET(D3DERR_INVALIDCALL); return; }
+        copy_bytes(s, 0, 0, (int32_t)M32(s + 12), (int32_t)M32(s + 16), d, 0, 0);
+    }
+    M32(dst + 56) = 1;
+    RET(0);
+}
+static void v_GetRenderTargetData(CPU* c) {
+    uint32_t rt = ARG(1), dst = ARG(2);
+    if (rt != backbuffer || !is_surface(dst) || M32(dst + 12) != M32(rt + 12) || M32(dst + 16) != M32(rt + 16) ||
+        M32(dst + 20) != M32(rt + 20)) { RET(D3DERR_INVALIDCALL); return; }
+    r_read_back(rt);
+    copy_bytes(rt, 0, 0, (int32_t)M32(rt + 12), (int32_t)M32(rt + 16), dst, 0, 0);
+    M32(dst + 56) = 1;
+    RET(0);
+}
+/* The front buffer is the last presented frame, copied as A8R8G8B8 into the top-left of dst. */
+static uint32_t front_buffer(uint32_t dst) {
+    if (!is_surface(dst) || M32(dst + 20) != 21) return D3DERR_INVALIDCALL;
+    r_read_back(backbuffer);
+    uint32_t w = M32(dst + 12) < M32(backbuffer + 12) ? M32(dst + 12) : M32(backbuffer + 12);
+    uint32_t h = M32(dst + 16) < M32(backbuffer + 16) ? M32(dst + 16) : M32(backbuffer + 16);
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) pixel_store(dst, x, y, surface_pixel(backbuffer, x, y) | 0xff000000u);
+    M32(dst + 56) = 1;
+    return 0;
+}
+static void v_GetFrontBufferData(CPU* c) { RET(ARG(1) != 0 ? D3DERR_INVALIDCALL : front_buffer(ARG(2))); }
+
+static uint32_t lerp_pixel(uint32_t a, uint32_t b, float t) {
+    uint32_t out = 0;
+    for (int ch = 0; ch < 32; ch += 8) {
+        float v = (float)(a >> ch & 255) * (1 - t) + (float)(b >> ch & 255) * t;
+        out |= (uint32_t)(v + 0.5f) << ch;
+    }
+    return out;
+}
+/* Point or bilinear (D3DTEXF_LINEAR) resampling of one rectangle into another. */
+static void v_StretchRect(CPU* c) {
+    uint32_t src = ARG(1), dst = ARG(3), filter = ARG(5);
+    int32_t sr[4], dr[4];
+    if (!is_surface(src) || !is_surface(dst) || block_format(M32(src + 20)) || block_format(M32(dst + 20)) || filter > 2 ||
+        !read_rect(ARG(2), src, sr) || !read_rect(ARG(4), dst, dr)) { RET(D3DERR_INVALIDCALL); return; }
+    r_read_back(src);
+    if (dst != src) r_read_back(dst);
+    int32_t sw = sr[2] - sr[0], sh = sr[3] - sr[1], dw = dr[2] - dr[0], dh = dr[3] - dr[1];
+    uint32_t* px = malloc(4 * (size_t)sw * (size_t)sh);
+    for (int32_t y = 0; y < sh; y++)
+        for (int32_t x = 0; x < sw; x++) px[y * sw + x] = surface_pixel(src, (uint32_t)(sr[0] + x), (uint32_t)(sr[1] + y));
+    for (int32_t y = 0; y < dh; y++)
+        for (int32_t x = 0; x < dw; x++) {
+            float fx = ((float)x + 0.5f) * (float)sw / (float)dw - 0.5f, fy = ((float)y + 0.5f) * (float)sh / (float)dh - 0.5f;
+            uint32_t p;
+            if (filter == 2) {
+                int32_t x0 = fx < 0 ? 0 : (int32_t)fx, y0 = fy < 0 ? 0 : (int32_t)fy;
+                int32_t x1 = x0 + 1 < sw ? x0 + 1 : x0, y1 = y0 + 1 < sh ? y0 + 1 : y0;
+                float tx = fx - (float)x0, ty = fy - (float)y0;
+                tx = tx < 0 ? 0 : tx; ty = ty < 0 ? 0 : ty;
+                p = lerp_pixel(lerp_pixel(px[y0 * sw + x0], px[y0 * sw + x1], tx), lerp_pixel(px[y1 * sw + x0], px[y1 * sw + x1], tx), ty);
+            } else {
+                int32_t sx = (int32_t)((float)x * (float)sw / (float)dw + 0.5f * (float)sw / (float)dw);
+                int32_t sy = (int32_t)((float)y * (float)sh / (float)dh + 0.5f * (float)sh / (float)dh);
+                p = px[(sy < sh ? sy : sh - 1) * sw + (sx < sw ? sx : sw - 1)];
+            }
+            pixel_store(dst, (uint32_t)(dr[0] + x), (uint32_t)(dr[1] + y), p);
+        }
+    free(px);
+    touched(dst);
+    RET(0);
+}
+static void v_ColorFill(CPU* c) {
+    uint32_t s = ARG(1), color = ARG(3);
+    int32_t r[4];
+    if (!is_surface(s) || block_format(M32(s + 20)) || !read_rect(ARG(2), s, r)) { RET(D3DERR_INVALIDCALL); return; }
+    if (r_on_gpu(s)) { r_fill(color, r[0], r[1], r[2] - r[0], r[3] - r[1]); RET(0); return; }
+    for (int32_t y = r[1]; y < r[3]; y++)
+        for (int32_t x = r[0]; x < r[2]; x++) pixel_store(s, (uint32_t)x, (uint32_t)y, color);
+    touched(s);
+    RET(0);
+}
+
+/* ---- device lifetime, cursor, gamma ---- */
+
+/* Every texture stays resident in WebGL, so there is nothing to evict. */
+static void v_EvictManagedResources(CPU* c) { RET(0); }
+static void v_Reset(CPU* c) {
+    uint32_t pp = ARG(1);
+    if (!pp) { RET(D3DERR_INVALIDCALL); return; }
+    present_parameters(pp, dev.focus);
+    if (!backbuffer_format(M32(pp + 8)) || (M32(pp + 36) && !depth_format(M32(pp + 40)))) { RET(D3DERR_NOTAVAILABLE); return; }
+    r_reset(backbuffer);
+    r_set_depth(dev.depth != 0);
+    default_device_state();
+    in_scene = 0;
+    port_log("IDirect3DDevice9::Reset %ux%u format %u", M32(pp), M32(pp + 4), M32(pp + 8));
+    RET(0);
+}
+static void v_CreateAdditionalSwapChain(CPU* c) { if (ARG(2)) M32(ARG(2)) = 0; RET(D3DERR_NOTAVAILABLE); }   /* one canvas */
+
+/* The hardware cursor is shown as the page's cursor while ShowCursor(TRUE) is in effect. */
+static void cursor_update(void) {
+    uint32_t s = dev.cursor_surface;
+    if (!dev.cursor_shown || !s) { hle_cursor_restore(); return; }
+    uint32_t w = M32(s + 12), h = M32(s + 16);
+    uint8_t* rgba = malloc(4 * (size_t)w * h);
+    for (uint32_t y = 0; y < h; y++)
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t p = surface_pixel(s, x, y);
+            uint8_t* o = rgba + 4 * (y * w + x);
+            o[0] = (uint8_t)(p >> 16); o[1] = (uint8_t)(p >> 8); o[2] = (uint8_t)p; o[3] = (uint8_t)(p >> 24);
+        }
+    hle_cursor_override(rgba, (int)w, (int)h, (int)dev.cursor_hx, (int)dev.cursor_hy);
+    free(rgba);
+}
+static void v_SetCursorProperties(CPU* c) {
+    uint32_t s = ARG(3);
+    if (!is_surface(s) || M32(s + 20) != 21 || M32(s + 12) > 256 || M32(s + 16) > 256 ||
+        ARG(1) >= M32(s + 12) || ARG(2) >= M32(s + 16)) { RET(D3DERR_INVALIDCALL); return; }
+    addref(s);
+    dev.cursor_surface = s;
+    dev.cursor_hx = ARG(1);
+    dev.cursor_hy = ARG(2);
+    cursor_update();
+    RET(0);
+}
+/* The browser cannot move the pointer, so the position is only recorded. */
+static void v_SetCursorPosition(CPU* c) { dev.cursor_x = ARG(1); dev.cursor_y = ARG(2); }
+static void v_ShowCursor(CPU* c) {
+    int was = dev.cursor_shown;
+    dev.cursor_shown = ARG(1) != 0;
+    if (was != dev.cursor_shown) cursor_update();
+    RET(was);
+}
+static void v_SetDialogBoxMode(CPU* c) {
+    if (ARG(1) && !(dev.pp[11] & 1)) { RET(D3DERR_INVALIDCALL); return; }   /* needs D3DPRESENTFLAG_LOCKABLE_BACKBUFFER */
+    dev.dialog_mode = ARG(1) != 0;
+    RET(0);
+}
+/* A windowed device keeps the ramp without applying it, as Windows does. */
+static void v_SetGammaRamp(CPU* c) { if (ARG(3)) memcpy(dev.gamma, GPTR(ARG(3)), sizeof dev.gamma); }
+static void v_GetGammaRamp(CPU* c) { if (ARG(2)) memcpy(GPTR(ARG(2)), dev.gamma, sizeof dev.gamma); }
+
+/* ---- transforms, clipping, palettes, scissor ---- */
+
+static void v_MultiplyTransform(CPU* c) {
+    if (!ARG(2)) { RET(D3DERR_INVALIDCALL); return; }
+    uint32_t t = guest_alloc(64, 16);
+    r_get_transform(ARG(1), t);
+    mat_mul(t, t, ARG(2));
+    r_set_transform(ARG(1), t);
+    guest_free(t);
+    RET(0);
+}
+static void v_ClipPlane(CPU* c) { RET(D3DERR_INVALIDCALL); }   /* MaxUserClipPlanes is 0 */
+/* Vertex processing is hardware, which leaves the clip status as last set. */
+static void v_SetClipStatus(CPU* c) { if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; } memcpy(dev.clip_status, GPTR(ARG(1)), 8); RET(0); }
+static void v_GetClipStatus(CPU* c) { if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; } memcpy(GPTR(ARG(1)), dev.clip_status, 8); RET(0); }
+static void v_SetPaletteEntries(CPU* c) {
+    uint32_t n = ARG(1);
+    if (n > 0xFFFF || !ARG(2)) { RET(D3DERR_INVALIDCALL); return; }
+    if (!palettes[n]) palettes[n] = malloc(1024);
+    memcpy(palettes[n], GPTR(ARG(2)), 1024);
+    RET(0);
+}
+static void v_GetPaletteEntries(CPU* c) {
+    uint32_t n = ARG(1);
+    if (n > 0xFFFF || !palettes[n] || !ARG(2)) { RET(D3DERR_INVALIDCALL); return; }
+    memcpy(GPTR(ARG(2)), palettes[n], 1024);
+    RET(0);
+}
+static void v_SetCurrentTexturePalette(CPU* c) {
+    if (ARG(1) > 0xFFFF || !palettes[ARG(1)]) { RET(D3DERR_INVALIDCALL); return; }
+    dev.palette = ARG(1);
+    RET(0);
+}
+static void v_GetCurrentTexturePalette(CPU* c) { if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; } M32(ARG(1)) = dev.palette; RET(0); }
+static void v_SetScissorRect(CPU* c) { if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; } r_set_scissor(ARG(1)); RET(0); }
+static void v_GetScissorRect(CPU* c) { if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; } r_get_scissor(ARG(1)); RET(0); }
+
+/* ---- vertex processing ---- */
+
+/* Only a device created with D3DCREATE_MIXED_VERTEXPROCESSING may switch. */
+static void v_SetSoftwareVertexProcessing(CPU* c) {
+    if (!(dev.flags & 0x80)) { RET(D3DERR_INVALIDCALL); return; }
+    dev.sw_vp = ARG(1) != 0;
+    RET(0);
+}
+static void v_GetSoftwareVertexProcessing(CPU* c) { RET(dev.sw_vp); }
+/* The caps advertise no N-patches, so the mode is kept without tessellating. */
+static void v_SetNPatchMode(CPU* c) { ds.npatch = ARG(1); RET(0); }
+static void v_GetNPatchMode(CPU* c) { float f; memcpy(&f, &ds.npatch, 4); FPUSH((double)f); }
+static void v_Patch(CPU* c) { RET(D3DERR_INVALIDCALL); }   /* no RTPATCHES cap */
+
+static uint32_t fvf_stride(uint32_t fvf) {
+    uint32_t pos = fvf & 0xe, n = pos == 4 ? 16 : pos == 2 ? 12 : 12 + 4 * ((pos - 4) / 2);
+    if (fvf & 0x10) n += 12;
+    if (fvf & 0x20) n += 4;
+    if (fvf & 0x40) n += 4;
+    if (fvf & 0x80) n += 4;
+    for (uint32_t t = 0; t < ((fvf >> 8) & 15); t++) {
+        uint32_t size = (fvf >> (16 + 2 * t)) & 3;
+        n += 4 * (size == 0 ? 2 : size == 1 ? 3 : size == 2 ? 4 : 1);
+    }
+    return n;
+}
+static void v_ProcessVertices(CPU* c) {
+    uint32_t start = ARG(1), at = ARG(2), count = ARG(3), dst = ARG(4), decl = ARG(5);
+    uint32_t fvf = decl ? M32(decl + 20) : dst ? M32(dst + 20) : 0;
+    if (!dev.sw_vp || !dst || M32(dst + 8) != O_VB || (fvf & 0xe) != 4) { RET(D3DERR_INVALIDCALL); return; }
+    uint32_t stride = fvf_stride(fvf);
+    if ((at + count) * stride > M32(dst + 36)) { RET(D3DERR_INVALIDCALL); return; }
+    r_process_vertices(start, count, M32(dst + 28) + at * stride, fvf, stride);
+    RET(0);
+}
+
+/* ---- vertex declarations: drawn through the FVF they are equivalent to ---- */
+
+/* The FVF a D3DVERTEXELEMENT9 list matches (stream 0, packed in FVF order), or 0. */
+static uint32_t decl_fvf(uint32_t el, uint32_t n) {
+    uint32_t fvf = 0, off = 0, tex = 0;
+    int rank = -1;
+    for (uint32_t k = 0; k + 1 < n; k++) {
+        uint32_t e = el + 8 * k, type = M8(e + 4), usage = M8(e + 6), index = M8(e + 7), size;
+        int r;
+        if (M16(e) != 0 || M16(e + 2) != off || M8(e + 5) != 0) return 0;
+        if (usage == 0 && index == 0 && type == 2) { r = 0; fvf |= 0x2; size = 12; }
+        else if (usage == 9 && index == 0 && type == 3) { r = 0; fvf |= 0x4; size = 16; }
+        else if (usage == 3 && index == 0 && type == 2) { r = 1; fvf |= 0x10; size = 12; }
+        else if (usage == 4 && index == 0 && type == 0) { r = 2; fvf |= 0x20; size = 4; }
+        else if (usage == 10 && index < 2 && type == 4) { r = 3 + (int)index; fvf |= index ? 0x80 : 0x40; size = 4; }
+        else if (usage == 5 && index == tex && type <= 3 && tex < 8) {
+            r = 5 + (int)tex;
+            fvf |= (type == 0 ? 3u : type - 1) << (16 + 2 * tex);
+            tex++;
+            size = 4 * (type + 1);
+        } else return 0;
+        if (r <= rank) return 0;
+        rank = r;
+        off += size;
+    }
+    return rank < 0 || !(fvf & 6) ? 0 : fvf | tex << 8;
+}
+static void v_CreateVertexDeclaration(CPU* c) {
+    uint32_t el = ARG(1), out = ARG(2), n = 0;
+    if (!el || !out) { RET(D3DERR_INVALIDCALL); return; }
+    while (n < 65 && M16(el + 8 * n) != 0xFF) n++;
+    if (n == 65) { RET(D3DERR_INVALIDCALL); return; }
+    n++;
+    uint32_t d = make_obj(vt_vdecl, O_VDECL);
+    M32(d + 28) = guest_alloc(8 * n, 4);
+    memcpy(GPTR(M32(d + 28)), GPTR(el), 8 * n);
+    M32(d + 36) = n;
+    M32(d + 20) = decl_fvf(el, n);
+    M32(out) = d;
+    RET(0);
+}
+static void v_SetVertexDeclaration(CPU* c) {
+    uint32_t d = ARG(1);
+    if (d && M32(d + 8) != O_VDECL) { RET(D3DERR_INVALIDCALL); return; }
+    ds.vdecl = d;
+    if (d && M32(d + 20)) r_set_fvf(M32(d + 20));
+    else if (d) {
+        static int logged;
+        if (!logged++) port_log("vertex declaration %08x has no FVF equivalent; draws keep the previous layout", d);
+    }
+    RET(0);
+}
+static void v_GetVertexDeclaration(CPU* c) { if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; } addref(ds.vdecl); M32(ARG(1)) = ds.vdecl; RET(0); }
+static void v_GetFVF(CPU* c) { if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; } M32(ARG(1)) = r_get_fvf(); RET(0); }
+static void vd_GetDeclaration(CPU* c) {
+    if (!ARG(2)) { RET(D3DERR_INVALIDCALL); return; }
+    if (ARG(1)) memcpy(GPTR(ARG(1)), GPTR(M32(THIS + 28)), 8 * M32(THIS + 36));
+    M32(ARG(2)) = M32(THIS + 36);
+    RET(0);
+}
+
+/* ---- shaders: the caps report none, so none can be created; constants are still stored ---- */
+
+static void v_CreateShader(CPU* c) { if (ARG(2)) M32(ARG(2)) = 0; RET(D3DERR_INVALIDCALL); }
+static void v_SetShader(CPU* c) { RET(ARG(1) ? D3DERR_INVALIDCALL : 0); }
+static void v_GetShader(CPU* c) { if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; } M32(ARG(1)) = 0; RET(0); }
+static uint32_t constants(void* store, uint32_t limit, uint32_t width, uint32_t start, uint32_t data, uint32_t count, int set) {
+    if (!data || start > limit || count > limit - start) return D3DERR_INVALIDCALL;
+    uint8_t* at = (uint8_t*)store + 4 * width * start;
+    if (set) memcpy(at, GPTR(data), 4 * width * count);
+    else memcpy(GPTR(data), at, 4 * width * count);
+    return 0;
+}
+#define CONSTANTS(name, arr, limit, width, set) \
+    static void name(CPU* c) { RET(constants(ds.arr, limit, width, ARG(1), ARG(2), ARG(3), set)); }
+CONSTANTS(v_SetVSConstF, vs_f, 256, 4, 1)
+CONSTANTS(v_GetVSConstF, vs_f, 256, 4, 0)
+CONSTANTS(v_SetVSConstI, vs_i, 16, 4, 1)
+CONSTANTS(v_GetVSConstI, vs_i, 16, 4, 0)
+CONSTANTS(v_SetVSConstB, vs_b, 16, 1, 1)
+CONSTANTS(v_GetVSConstB, vs_b, 16, 1, 0)
+CONSTANTS(v_SetPSConstF, ps_f, 256, 4, 1)
+CONSTANTS(v_GetPSConstF, ps_f, 256, 4, 0)
+CONSTANTS(v_SetPSConstI, ps_i, 16, 4, 1)
+CONSTANTS(v_GetPSConstI, ps_i, 16, 4, 0)
+CONSTANTS(v_SetPSConstB, ps_b, 16, 1, 1)
+CONSTANTS(v_GetPSConstB, ps_b, 16, 1, 0)
+
+/* ---- streams ---- */
+
+static void v_GetStreamSource(CPU* c) {
+    if (ARG(1) != 0 || !ARG(2) || !ARG(3) || !ARG(4)) { RET(D3DERR_INVALIDCALL); return; }
+    uint32_t vb, off, stride;
+    r_get_stream(&vb, &off, &stride);
+    addref(vb);
+    M32(ARG(2)) = vb; M32(ARG(3)) = off; M32(ARG(4)) = stride;
+    RET(0);
+}
+/* Instancing needs vs_3_0, so the only frequency is the default 1. */
+static void v_SetStreamSourceFreq(CPU* c) { RET(ARG(1) != 0 || ARG(2) != 1 ? D3DERR_INVALIDCALL : 0); }
+static void v_GetStreamSourceFreq(CPU* c) {
+    if (ARG(1) != 0 || !ARG(2)) { RET(D3DERR_INVALIDCALL); return; }
+    M32(ARG(2)) = ds.stream_freq;
+    RET(0);
+}
+static void v_GetIndices(CPU* c) {
+    if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; }
+    M32(ARG(1)) = r_get_indices();
+    addref(M32(ARG(1)));
+    RET(0);
+}
+
+/* ---- state blocks: a snapshot of render.c's state and ds, with a mask of the bytes the block covers ---- */
+
+typedef struct { uint8_t *state, *mask; } Block;
+static Block blocks[256];
+static uint8_t* recording;
+
+static uint32_t state_size(void) { return r_state_size() + (uint32_t)sizeof ds; }
+static void state_save(uint8_t* out) { r_state_save(out); memcpy(out + r_state_size(), &ds, sizeof ds); }
+static void state_load(const uint8_t* in, const uint8_t* mask) {
+    r_state_load(in, mask);
+    uint8_t* d = (uint8_t*)&ds;
+    for (uint32_t k = 0; k < sizeof ds; k++)
+        if (mask[r_state_size() + k]) d[k] = in[r_state_size() + k];
+}
+static void ds_mask(int type, uint8_t* m) {
+    memset(m, type == 1, sizeof ds);
+#define DS_MARK(field) memset(m + offsetof(__typeof__(ds), field), 1, sizeof ds.field)
+    if (type == 3) { DS_MARK(vdecl); DS_MARK(stream_freq); DS_MARK(npatch); DS_MARK(vs_f); DS_MARK(vs_i); DS_MARK(vs_b); }
+    if (type == 2) { DS_MARK(ps_f); DS_MARK(ps_i); DS_MARK(ps_b); }
+#undef DS_MARK
+}
+static uint32_t new_block(void) {
+    for (uint32_t k = 0; k < 256; k++)
+        if (!blocks[k].state) {
+            blocks[k].state = malloc(state_size());
+            blocks[k].mask = calloc(1, state_size());
+            uint32_t o = make_obj(vt_stateblock, O_STATEBLOCK);
+            M32(o + 40) = k;
+            return o;
+        }
+    return 0;
+}
+static Block* block_of(uint32_t o) { return &blocks[M32(o + 40) & 255]; }
+static void v_CreateStateBlock(CPU* c) {
+    uint32_t type = ARG(1), out = ARG(2), o;
+    if (type < 1 || type > 3 || !out) { RET(D3DERR_INVALIDCALL); return; }
+    if (!(o = new_block())) { RET(0x8007000eu); return; }
+    Block* b = block_of(o);
+    r_state_mask((int)type, b->mask);
+    ds_mask((int)type, b->mask + r_state_size());
+    state_save(b->state);
+    M32(out) = o;
+    RET(0);
+}
+/* While recording, Set calls change only the block: EndStateBlock keeps what changed and restores the device. */
+static void v_BeginStateBlock(CPU* c) {
+    if (recording) { RET(D3DERR_INVALIDCALL); return; }
+    recording = malloc(state_size());
+    state_save(recording);
+    RET(0);
+}
+static void v_EndStateBlock(CPU* c) {
+    uint32_t out = ARG(1), o;
+    if (!recording || !out) { RET(D3DERR_INVALIDCALL); return; }
+    if (!(o = new_block())) { RET(0x8007000eu); return; }
+    Block* b = block_of(o);
+    state_save(b->state);
+    for (uint32_t k = 0; k < state_size(); k++) b->mask[k] = b->state[k] != recording[k];
+    uint8_t* all = malloc(state_size());
+    memset(all, 1, state_size());
+    state_load(recording, all);
+    free(all);
+    free(recording);
+    recording = 0;
+    M32(out) = o;
+    RET(0);
+}
+static void sb_Capture(CPU* c) {
+    Block* b = block_of(THIS);
+    uint8_t* now = malloc(state_size());
+    state_save(now);
+    for (uint32_t k = 0; k < state_size(); k++)
+        if (b->mask[k]) b->state[k] = now[k];
+    free(now);
+    RET(0);
+}
+static void sb_Apply(CPU* c) { Block* b = block_of(THIS); state_load(b->state, b->mask); RET(0); }
+static void sb_Release(CPU* c) {
+    uint32_t r = M32(THIS + 4);
+    if (r && !--M32(THIS + 4)) {
+        Block* b = block_of(THIS);
+        free(b->state);
+        free(b->mask);
+        b->state = b->mask = 0;
+    }
+    RET(r ? r - 1 : 0);
+}
+
+/* ---- queries: D3DQUERYTYPE_EVENT, signalled once the commands before it are submitted ---- */
+
+static void v_CreateQuery(CPU* c) {
+    if (ARG(1) != 8) { if (ARG(2)) M32(ARG(2)) = 0; RET(D3DERR_NOTAVAILABLE); return; }
+    if (!ARG(2)) { RET(0); return; }
+    uint32_t q = make_obj(vt_query, O_QUERY);
+    M32(q + 20) = ARG(1);
+    M32(ARG(2)) = q;
+    RET(0);
+}
+static void q_GetType(CPU* c) { RET(M32(THIS + 20)); }
+static void q_GetDataSize(CPU* c) { RET(4); }
+static void q_Issue(CPU* c) { if (ARG(1) & 1) M32(THIS + 24) = 1; RET(0); }   /* D3DISSUE_END */
+static void q_GetData(CPU* c) {
+    if (!M32(THIS + 24)) { RET(1); return; }   /* S_FALSE */
+    if (ARG(1) && ARG(2) >= 4) M32(ARG(1)) = 1;
+    RET(0);
+}
+
+/* ---- swap chain ---- */
+
+static void sc_Present(CPU* c) { present_frame(); RET(0); }
+static void sc_GetFrontBufferData(CPU* c) { RET(front_buffer(ARG(1))); }
+static void sc_GetBackBuffer(CPU* c) { RET(back_buffer(ARG(1), ARG(3))); }
+static void sc_GetRasterStatus(CPU* c) { RET(raster_status(ARG(1))); }
+static void sc_GetDisplayMode(CPU* c) { if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; } fill_mode(ARG(1)); RET(0); }
+static void sc_GetPresentParameters(CPU* c) {
+    if (!ARG(1)) { RET(D3DERR_INVALIDCALL); return; }
+    memcpy(GPTR(ARG(1)), dev.pp, sizeof dev.pp);
+    RET(0);
+}
+
+static const Method device_methods[] = {
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release},
+    {"TestCooperativeLevel", 1, v_TestCooperativeLevel}, {"GetAvailableTextureMem", 1, v_GetAvailableTextureMem},
+    {"EvictManagedResources", 1, v_EvictManagedResources}, {"GetDirect3D", 2, v_GetDirect3D}, {"GetDeviceCaps", 2, v_GetDeviceCaps},
+    {"GetDisplayMode", 3, v_GetDisplayMode}, {"GetCreationParameters", 2, v_GetCreationParameters},
+    {"SetCursorProperties", 4, v_SetCursorProperties}, {"SetCursorPosition", 4, v_SetCursorPosition}, {"ShowCursor", 2, v_ShowCursor},
+    {"CreateAdditionalSwapChain", 3, v_CreateAdditionalSwapChain}, {"GetSwapChain", 3, v_GetSwapChain},
+    {"GetNumberOfSwapChains", 1, v_GetNumberOfSwapChains}, {"Reset", 2, v_Reset}, {"Present", 5, v_Present},
+    {"GetBackBuffer", 5, v_GetBackBuffer}, {"GetRasterStatus", 3, v_GetRasterStatus}, {"SetDialogBoxMode", 2, v_SetDialogBoxMode},
+    {"SetGammaRamp", 4, v_SetGammaRamp}, {"GetGammaRamp", 3, v_GetGammaRamp}, {"CreateTexture", 9, v_CreateTexture},
+    {"CreateVolumeTexture", 10, v_CreateVolumeTexture}, {"CreateCubeTexture", 8, v_CreateCubeTexture},
+    {"CreateVertexBuffer", 7, v_CreateVertexBuffer}, {"CreateIndexBuffer", 7, v_CreateIndexBuffer},
+    {"CreateRenderTarget", 9, v_CreateRenderTarget}, {"CreateDepthStencilSurface", 9, v_CreateDepthStencilSurface},
+    {"UpdateSurface", 5, v_UpdateSurface}, {"UpdateTexture", 3, v_UpdateTexture}, {"GetRenderTargetData", 3, v_GetRenderTargetData},
+    {"GetFrontBufferData", 3, v_GetFrontBufferData}, {"StretchRect", 6, v_StretchRect}, {"ColorFill", 4, v_ColorFill},
+    {"CreateOffscreenPlainSurface", 7, v_CreateOffscreenPlainSurface}, {"SetRenderTarget", 3, v_SetRenderTarget},
+    {"GetRenderTarget", 3, v_GetRenderTarget}, {"SetDepthStencilSurface", 2, v_SetDepthStencilSurface},
+    {"GetDepthStencilSurface", 2, v_GetDepthStencilSurface}, {"BeginScene", 1, v_BeginScene}, {"EndScene", 1, v_EndScene},
+    {"Clear", 7, v_Clear}, {"SetTransform", 3, v_SetTransform}, {"GetTransform", 3, v_GetTransformR},
+    {"MultiplyTransform", 3, v_MultiplyTransform}, {"SetViewport", 2, v_SetViewport}, {"GetViewport", 2, v_GetViewport},
+    {"SetMaterial", 2, v_SetMaterial}, {"GetMaterial", 2, v_GetMaterialR}, {"SetLight", 3, v_SetLight}, {"GetLight", 3, v_GetLightR},
+    {"LightEnable", 3, v_LightEnable}, {"GetLightEnable", 3, v_GetLightEnableR}, {"SetClipPlane", 3, v_ClipPlane},
+    {"GetClipPlane", 3, v_ClipPlane}, {"SetRenderState", 3, v_SetRenderState}, {"GetRenderState", 3, v_GetRenderStateR},
+    {"CreateStateBlock", 3, v_CreateStateBlock}, {"BeginStateBlock", 1, v_BeginStateBlock}, {"EndStateBlock", 2, v_EndStateBlock},
+    {"SetClipStatus", 2, v_SetClipStatus}, {"GetClipStatus", 2, v_GetClipStatus}, {"GetTexture", 3, v_GetTextureR},
+    {"SetTexture", 3, v_SetTexture}, {"GetTextureStageState", 4, v_GetTextureStageStateR},
+    {"SetTextureStageState", 4, v_SetTextureStageState}, {"GetSamplerState", 4, v_GetSamplerStateR},
+    {"SetSamplerState", 4, v_SetSamplerState}, {"ValidateDevice", 2, v_ValidateDevice}, {"SetPaletteEntries", 3, v_SetPaletteEntries},
+    {"GetPaletteEntries", 3, v_GetPaletteEntries}, {"SetCurrentTexturePalette", 2, v_SetCurrentTexturePalette},
+    {"GetCurrentTexturePalette", 2, v_GetCurrentTexturePalette}, {"SetScissorRect", 2, v_SetScissorRect},
+    {"GetScissorRect", 2, v_GetScissorRect}, {"SetSoftwareVertexProcessing", 2, v_SetSoftwareVertexProcessing},
+    {"GetSoftwareVertexProcessing", 1, v_GetSoftwareVertexProcessing}, {"SetNPatchMode", 2, v_SetNPatchMode},
+    {"GetNPatchMode", 1, v_GetNPatchMode}, {"DrawPrimitive", 4, v_DrawPrimitive}, {"DrawIndexedPrimitive", 7, v_DrawIndexedPrimitive},
+    {"DrawPrimitiveUP", 5, v_DrawPrimitiveUP}, {"DrawIndexedPrimitiveUP", 9, v_DrawIndexedPrimitiveUP},
+    {"ProcessVertices", 7, v_ProcessVertices}, {"CreateVertexDeclaration", 3, v_CreateVertexDeclaration},
+    {"SetVertexDeclaration", 2, v_SetVertexDeclaration}, {"GetVertexDeclaration", 2, v_GetVertexDeclaration},
+    {"SetFVF", 2, v_SetFVF}, {"GetFVF", 2, v_GetFVF}, {"CreateVertexShader", 3, v_CreateShader},
+    {"SetVertexShader", 2, v_SetShader}, {"GetVertexShader", 2, v_GetShader},
+    {"SetVertexShaderConstantF", 4, v_SetVSConstF}, {"GetVertexShaderConstantF", 4, v_GetVSConstF},
+    {"SetVertexShaderConstantI", 4, v_SetVSConstI}, {"GetVertexShaderConstantI", 4, v_GetVSConstI},
+    {"SetVertexShaderConstantB", 4, v_SetVSConstB}, {"GetVertexShaderConstantB", 4, v_GetVSConstB},
+    {"SetStreamSource", 5, v_SetStreamSource}, {"GetStreamSource", 5, v_GetStreamSource},
+    {"SetStreamSourceFreq", 3, v_SetStreamSourceFreq}, {"GetStreamSourceFreq", 3, v_GetStreamSourceFreq},
+    {"SetIndices", 2, v_SetIndices}, {"GetIndices", 2, v_GetIndices}, {"CreatePixelShader", 3, v_CreateShader},
+    {"SetPixelShader", 2, v_SetShader}, {"GetPixelShader", 2, v_GetShader},
+    {"SetPixelShaderConstantF", 4, v_SetPSConstF}, {"GetPixelShaderConstantF", 4, v_GetPSConstF},
+    {"SetPixelShaderConstantI", 4, v_SetPSConstI}, {"GetPixelShaderConstantI", 4, v_GetPSConstI},
+    {"SetPixelShaderConstantB", 4, v_SetPSConstB}, {"GetPixelShaderConstantB", 4, v_GetPSConstB},
+    {"DrawRectPatch", 4, v_Patch}, {"DrawTriPatch", 4, v_Patch}, {"DeletePatch", 2, v_Patch},
+    {"CreateQuery", 3, v_CreateQuery},
+};
+static const Method stateblock_methods[] = {
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, sb_Release}, {"GetDevice", 2, r_GetDevice},
+    {"Capture", 1, sb_Capture}, {"Apply", 1, sb_Apply},
+};
+static const Method vdecl_methods[] = {
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"GetDevice", 2, r_GetDevice},
+    {"GetDeclaration", 3, vd_GetDeclaration},
+};
+static const Method query_methods[] = {
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"GetDevice", 2, r_GetDevice},
+    {"GetType", 1, q_GetType}, {"GetDataSize", 1, q_GetDataSize}, {"Issue", 2, q_Issue}, {"GetData", 4, q_GetData},
 };
 static const Method swapchain_methods[] = {
-    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Present", 6, 0},
-    {"GetFrontBufferData", 2, 0}, {"GetBackBuffer", 4, 0}, {"GetRasterStatus", 2, 0}, {"GetDisplayMode", 2, 0},
-    {"GetDevice", 2, r_GetDevice}, {"GetPresentParameters", 2, 0},
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"Present", 6, sc_Present},
+    {"GetFrontBufferData", 2, sc_GetFrontBufferData}, {"GetBackBuffer", 4, sc_GetBackBuffer},
+    {"GetRasterStatus", 2, sc_GetRasterStatus}, {"GetDisplayMode", 2, sc_GetDisplayMode},
+    {"GetDevice", 2, r_GetDevice}, {"GetPresentParameters", 2, sc_GetPresentParameters},
 };
 
 /* ---- D3DX: matrices are real, textures are null-device textures ---- */
@@ -922,7 +1580,9 @@ void hle_d3d9_register(void) {
     VT(vt_surface, "IDirect3DSurface9", surface_methods);
     VT(vt_vb, "IDirect3DVertexBuffer9", vb_methods);
     VT(vt_ib, "IDirect3DIndexBuffer9", ib_methods);
-    VT(vt_other, "ID3DObject", other_methods);
+    VT(vt_stateblock, "IDirect3DStateBlock9", stateblock_methods);
+    VT(vt_vdecl, "IDirect3DVertexDeclaration9", vdecl_methods);
+    VT(vt_query, "IDirect3DQuery9", query_methods);
     VT(vt_matstack, "ID3DXMatrixStack", matstack_methods);
     VT(vt_swapchain, "IDirect3DSwapChain9", swapchain_methods);
 }
