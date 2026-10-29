@@ -350,12 +350,18 @@ static void sh_PathCanonicalizeA(CPU* c) {
     RET(1);
 }
 
-/* ---- IME: the browser delivers composed text as WM_CHAR, so no IME composition is ever open here ---- */
+/* ---- IME ----
+   The emulated system is a Western one with IMM32 disabled (GetSystemMetrics reports SM_IMMENABLED and
+   SM_DBCSENABLED as 0), which is also what keeps the client's VCL from loading its IME support. With IMM32 disabled
+   there are no input contexts: every call answers as Windows does then, and the browser's own IME delivers composed
+   text as WM_CHAR. */
 
+static void imm_AssociateContext(CPU* c) { RET(0); }
 static void imm_GetOpenStatus(CPU* c) { RET(0); }
 static void imm_GetCompositionString(CPU* c) { RET(0); }
 static void imm_GetCandidateListW(CPU* c) { RET(0); }
-static void imm_SetCandidateWindow(CPU* c) { RET(1); }
+static void imm_SetCandidateWindow(CPU* c) { RET(0); }
+static void imm_NotifyIME(CPU* c) { RET(0); }
 
 /* ---- Gameforge / Steam wrapper ---- */
 
@@ -396,6 +402,8 @@ static const Hle sys[] = {
     {"imm32.dll", "ImmGetCompositionStringW", 4, imm_GetCompositionString},
     {"imm32.dll", "ImmGetCandidateListW", 4, imm_GetCandidateListW},
     {"imm32.dll", "ImmSetCandidateWindow", 2, imm_SetCandidateWindow},
+    {"imm32.dll", "ImmAssociateContext", 2, imm_AssociateContext},
+    {"imm32.dll", "ImmNotifyIME", 4, imm_NotifyIME},
     {"steam_wrapper.dll", "Steam_OpenOverlayToWebPage", CDECL_ARGS, st_OpenOverlayToWebPage},
     {"noscore_gf.dll", "Steam_OpenOverlayToWebPage", CDECL_ARGS, st_OpenOverlayToWebPage},
     {"steam_wrapper.dll", "Steam_CancelAuthSessionTicket", CDECL_ARGS, st_CancelAuthSessionTicket},
