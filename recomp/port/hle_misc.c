@@ -246,8 +246,6 @@ static void g_GetCurrentPositionEx(CPU* c) { if (ARG(1)) { M32(ARG(1)) = 0; M32(
 static void g_GetBitmapBits(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, ARG(1)); RET(ARG(1)); }
 static uint32_t gdi_misc_next = 0x00280000u;
 static void g_NewHandle(CPU* c) { RET(gdi_misc_next += 4); }
-static void i_ImmAssociateContext(CPU* c) { RET(0); }
-static void i_ImmNotifyIME(CPU* c) { RET(1); }
 static void w_timeGetDevCaps(CPU* c) { if (ARG(0)) { M32(ARG(0)) = 1; M32(ARG(0) + 4) = 1000000; } RET(0); }
 
 /* ---- Gameforge wrapper (noscore_gf.dll): same answers as NosCore.DeveloperTools.GfStub ----
@@ -679,8 +677,6 @@ static const Hle misc[] = {
     {"gdi32.dll", "GetBitmapBits", 3, g_GetBitmapBits},
     {"gdi32.dll", "CreatePenIndirect", 1, g_NewHandle},
     {"gdi32.dll", "CreateHalftonePalette", 1, g_NewHandle},
-    {"imm32.dll", "ImmAssociateContext", 2, i_ImmAssociateContext},
-    {"imm32.dll", "ImmNotifyIME", 4, i_ImmNotifyIME},
     {"winmm.dll", "timeGetDevCaps", 2, w_timeGetDevCaps},
     {"winmm.dll", "timeBeginPeriod", 1, r_zero},
     {"winmm.dll", "timeEndPeriod", 1, r_zero},
