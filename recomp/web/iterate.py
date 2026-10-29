@@ -2,7 +2,10 @@
 
 The browser counterpart of iterate.ps1, for machines without the native MSVC build. serve.py must be running.
 
-usage: iterate.py [--rounds 25] [--url http://127.0.0.1:8077/] [-- extra drive.mjs arguments]
+usage: iterate.py [--rounds 25] [--url http://127.0.0.1:8077/] [--before "<command>"] [-- extra drive.mjs arguments]
+
+--before runs a shell command ahead of each round, for instance restarting the NosCore servers so the world server
+does not still hold the previous round's session ("account name is currently in use").
 """
 import argparse
 import os
@@ -22,6 +25,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", type=int, default=25)
     ap.add_argument("--url", default="http://127.0.0.1:8077/")
+    ap.add_argument("--before")
     a = ap.parse_args(argv[:argv.index("--")] if "--" in argv else argv)
 
     gen = os.path.join(WORK, "recomp", "gen")
@@ -29,11 +33,15 @@ def main():
     out = os.path.join(WORK, "drive", "iterate")
     open(seeds, "a").close()
     for rnd in range(1, a.rounds + 1):
+        if a.before:
+            subprocess.run(a.before, shell=True, check=True)
         subprocess.run(["node", os.path.join(HERE, "drive.mjs"), "--url", a.url, "--out", out, *extra])
         with open(os.path.join(out, "full.log"), encoding="utf-8", errors="replace") as f:
-            m = MISSING.search(f.read())
+            log = f.read()
+        m = MISSING.search(log)
         if not m:
             print(f"round {rnd}: no missing-code stop")
+            print("\n".join(l for l in log.splitlines() if l.startswith("FATAL"))[:2000])
             return
         addr = m.group(1)
         print(f"round {rnd}: missing {addr}")

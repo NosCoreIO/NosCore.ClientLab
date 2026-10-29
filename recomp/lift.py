@@ -880,6 +880,9 @@ SANE = {"mov", "push", "pop", "add", "sub", "and", "or", "xor", "cmp", "test", "
         "fwait", "wait", "sete", "setne"} | set(JCC)
 
 
+PROLOGUE_REGS = {"ebp", "ebx", "esi", "edi"}
+
+
 def reloc_code_seeds(L, fns):
     """Relocated pointers into the code section that no function covers and that decode as plausible code
     (interface thunks, method pointers only referenced from data)."""
@@ -936,6 +939,14 @@ def reloc_code_seeds(L, fns):
     out = sorted(stored)
     for t in sorted(L.reloc_targets):
         if t in stored or covered(t) or not entry_shape(t):
+            continue
+        # An aligned pointer to a Delphi prologue is an entry however long the routine is before its ret.
+        head = L.disasm_range(t, t + 2)
+        if t % 4 == 0 and len(head) == 2 and head[0].mnemonic == "push" and head[0].op_str in PROLOGUE_REGS and (
+                head[1].mnemonic == "push" and head[1].op_str in PROLOGUE_REGS
+                or (head[1].mnemonic, head[1].op_str) == ("mov", "ebp, esp")
+                or head[1].mnemonic in ("add", "sub") and head[1].op_str.startswith("esp, ")):
+            out.append(t)
             continue
         pos, ok = t, False
         for _ in range(256):
