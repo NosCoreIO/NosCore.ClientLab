@@ -2066,8 +2066,8 @@ EM_JS(int, js_input_poll, (int* out), {
     if (!ring) return 0;
     const head = Atomics.load(ring, 0), tail = Atomics.load(ring, 1);
     if (head === tail) return 0;
-    const cap = (ring.length - 2) >> 2, at = 2 + (tail % cap) * 4;
-    for (let i = 0; i < 4; i++) HEAP32[(out >> 2) + i] = ring[at + i];
+    const cap = ((ring.length - 2) / 5) | 0, at = 2 + (tail % cap) * 5;
+    for (let i = 0; i < 5; i++) HEAP32[(out >> 2) + i] = ring[at + i];
     Atomics.store(ring, 1, tail + 1);
     return 1;
 });
@@ -2076,7 +2076,7 @@ EM_JS(int, js_input_peek_change, (void), {
     if (!ring) return 0;
     const head = Atomics.load(ring, 0), tail = Atomics.load(ring, 1);
     if (head === tail) return 0;
-    const type = ring[2 + (tail % ((ring.length - 2) >> 2)) * 4];
+    const type = ring[2 + (tail % (((ring.length - 2) / 5) | 0)) * 5];
     return type === 2 || type === 3 || type === 5 || type === 6 ? 1 : 0;
 });
 /* Blocks until the page writes an input event or the timeout passes; returns 0 when there is no ring to wait on. */
@@ -2112,7 +2112,7 @@ void hle_screen_to_page(int* x, int* y) {
 static struct { uint32_t hwnd, msg, time; int x, y; } last_click;
 
 /* Mouse input goes to the capture window or the one under the cursor, after the hit test and cursor messages. */
-static void mouse_event(CPU* c, int kind, int button, int sx, int sy, int wheel) {
+static void mouse_event(CPU* c, int kind, int button, int sx, int sy, int wheel, uint32_t time) {
     static const uint32_t vk[3] = {1, 4, 2}, down_msg[3] = {0x201, 0x207, 0x204};
     cursor_x = sx;
     cursor_y = sy;
@@ -2171,13 +2171,13 @@ static void mouse_event(CPU* c, int kind, int button, int sx, int sy, int wheel)
     if (hit == HTCLIENT) {
         int ox, oy;
         client_origin(t, &ox, &oy);
-        uint32_t now = (uint32_t)port_now_ms();
         if (kind == 2 && (t->cls->style & 8) && last_click.hwnd == target && last_click.msg == msg &&
-            now - last_click.time <= 500 && abs(sx - last_click.x) <= 2 && abs(sy - last_click.y) <= 2) {
+            time - last_click.time <= 500 && abs(sx - last_click.x) <= 2 && abs(sy - last_click.y) <= 2) {
             msg += 2;
             last_click.hwnd = 0;
+            if (getenv("PORT_LOG_INPUT")) port_log("double click -> %08x", target);
         } else if (kind == 2) {
-            last_click.hwnd = target; last_click.msg = msg; last_click.time = now; last_click.x = sx; last_click.y = sy;
+            last_click.hwnd = target; last_click.msg = msg; last_click.time = time; last_click.x = sx; last_click.y = sy;
         }
         post(target, msg, mouse_keys(), ((uint32_t)(sy - oy) & 0xffff) << 16 | ((uint32_t)(sx - ox) & 0xffff));
     } else if (hit != HTNOWHERE && hit != HTTRANSPARENT) {
@@ -2192,21 +2192,21 @@ enum { IN_MOVE = 1, IN_DOWN, IN_UP, IN_WHEEL, IN_KEYDOWN, IN_KEYUP, IN_CHAR, IN_
 static uint32_t last_change_frame = 0xffffffffu;
 
 static void pump_input(CPU* c) {
-    int e[4];
+    int e[5];
     while (display_hwnd) {
         int change = js_input_peek_change();
         if (change && last_change_frame == port_frames) break;
         if (!js_input_poll(e)) break;
         if (change) last_change_frame = port_frames;
         static int logged;
-        if (e[0] != IN_MOVE && e[0] != IN_CHAR && logged++ < 10) port_log("input %d %d (%d,%d) -> %08x", e[0], e[1], e[2], e[3], display_hwnd);
+        if (e[0] != IN_MOVE && e[0] != IN_CHAR && (logged++ < 10 || getenv("PORT_LOG_INPUT"))) port_log("input %d %d (%d,%d) -> %08x", e[0], e[1], e[2], e[3], display_hwnd);
         int sx, sy;
         page_to_screen(e[2], e[3], &sx, &sy);
         switch (e[0]) {
-        case IN_MOVE: case IN_UP: case IN_WHEEL: mouse_event(c, e[0], e[1], sx, sy, e[1]); break;
+        case IN_MOVE: case IN_UP: case IN_WHEEL: mouse_event(c, e[0], e[1], sx, sy, e[1], (uint32_t)e[4]); break;
         case IN_DOWN:
             if (getenv("PORT_TRACE_CLICK")) { port_trace_budget = 1500; port_fn_trace_start(c); }
-            mouse_event(c, e[0], e[1], sx, sy, 0);
+            mouse_event(c, e[0], e[1], sx, sy, 0, (uint32_t)e[4]);
             break;
         case IN_KEYDOWN: key_event(c, (uint32_t)e[1] & 0xff, 1, 0); break;
         case IN_KEYUP: key_event(c, (uint32_t)e[1] & 0xff, 0, 0); break;

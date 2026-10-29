@@ -442,7 +442,7 @@ static void ws_recv(CPU* c) {
         memmove(k->rx, k->rx + n, k->rx_len - n);
         k->rx_len -= n;
         static int logged;
-        if (logged++ < 20) {
+        if (logged++ < 20 || getenv("PORT_LOG_RECV")) {
             char hex[3 * 64 + 1] = {0};
             for (uint32_t i = 0; i < n && i < 64; i++) snprintf(hex + 3 * i, 4, "%02x ", M8(buf + i));
             port_log("recv %08x: %u bytes %s", ARG(0), n, hex);

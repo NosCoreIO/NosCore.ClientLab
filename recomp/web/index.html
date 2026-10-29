@@ -365,10 +365,10 @@
   let ring = null;
   function send(type, a, x = 0, y = 0) {
     if (!ring) return;
-    const head = Atomics.load(ring, 0), cap = (ring.length - 2) >> 2;
+    const head = Atomics.load(ring, 0), cap = ((ring.length - 2) / 5) | 0;
     if (head - Atomics.load(ring, 1) >= cap) return;
-    const at = 2 + (head % cap) * 4;
-    ring[at] = type; ring[at + 1] = a; ring[at + 2] = x; ring[at + 3] = y;
+    const at = 2 + (head % cap) * 5;
+    ring[at] = type; ring[at + 1] = a; ring[at + 2] = x; ring[at + 3] = y; ring[at + 4] = Math.round(performance.now());
     Atomics.store(ring, 0, head + 1);
     Atomics.notify(ring, 0);
   }
