@@ -951,7 +951,8 @@ def reloc_code_seeds(L, fns):
         pos, ok = t, False
         for _ in range(256):
             dec = L.disasm_range(pos, pos + 1)
-            if not dec or dec[0].mnemonic not in SANE:
+            # 'add byte ptr [eax], al' is two zero bytes: the walk has run into data (a VMT or RTTI field).
+            if not dec or dec[0].mnemonic not in SANE or dec[0].bytes[:2] == b"\0\0":
                 break
             if dec[0].mnemonic in ("jmp", "ret"):
                 ok = True
