@@ -954,6 +954,11 @@ def reloc_code_seeds(L, fns):
             # 'add byte ptr [eax], al' is two zero bytes: the walk has run into data (a VMT or RTTI field).
             if not dec or dec[0].mnemonic not in SANE or dec[0].bytes[:2] == b"\0\0":
                 break
+            # An aligned 'push ebp; mov ebp, esp' ahead is the next routine: the walk started in a string literal or
+            # other data Delphi places before a routine.
+            if any(a != t and a % 4 == 0 and L.code[a - L.code_lo: a - L.code_lo + 3] == b"\x55\x8b\xec"
+                   for a in range(pos, pos + dec[0].size)):
+                break
             if dec[0].mnemonic in ("jmp", "ret"):
                 ok = True
                 break
