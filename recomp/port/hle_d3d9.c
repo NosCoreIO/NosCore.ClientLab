@@ -246,9 +246,26 @@ static void d_GetAdapterIdentifier(CPU* c) {
     M32(p + 1056) = 0x10de;
     RET(0);
 }
-static void fill_mode(uint32_t p) { M32(p) = 1920; M32(p + 4) = 1080; M32(p + 8) = 60; M32(p + 12) = 22; }
-static void d_GetAdapterModeCount(CPU* c) { RET(1); }
-static void d_EnumAdapterModes(CPU* c) { fill_mode(ARG(4)); RET(0); }
+/* D3DDISPLAYMODE: width, height, refresh rate, format (X8R8G8B8, the desktop's 32 bits). */
+static void put_mode(uint32_t p, uint32_t w, uint32_t h) { M32(p) = w; M32(p + 4) = h; M32(p + 8) = 60; M32(p + 12) = 22; }
+static void fill_mode(uint32_t p) { put_mode(p, port_screen_w, port_screen_h); }
+static int mode_count(uint32_t format) {
+    uint32_t w, h;
+    int n = 0;
+    if (format != 22) return 0;
+    while (port_display_mode(n, &w, &h)) n++;
+    return n;
+}
+static void d_GetAdapterModeCount(CPU* c) { RET(ARG(0) ? 0 : mode_count(ARG(1))); }
+static void d_EnumAdapterModes(CPU* c) {
+    uint32_t w, h;
+    if (ARG(0) || (int)ARG(3) >= mode_count(ARG(1)) || !port_display_mode((int)ARG(3), &w, &h)) {
+        RET(D3DERR_INVALIDCALL);
+        return;
+    }
+    put_mode(ARG(4), w, h);
+    RET(0);
+}
 static void d_GetAdapterDisplayMode(CPU* c) { fill_mode(ARG(2)); RET(0); }
 static void d_GetDeviceCaps(CPU* c) { fill_caps(ARG(3)); RET(0); }
 static void d_GetAdapterMonitor(CPU* c) { RET(1); }

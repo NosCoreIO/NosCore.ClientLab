@@ -60,6 +60,10 @@ int port_file_fd(uint32_t handle);
 extern uint32_t port_frames;
 extern double port_prof_net;
 double port_now_ms(void);
+/* The emulated display: one monitor whose mode ChangeDisplaySettings picks from a fixed list. */
+extern uint32_t port_screen_w, port_screen_h;
+#define PORT_TASKBAR_H 40
+int port_display_mode(int k, uint32_t* w, uint32_t* h);
 void port_report_api_time(uint32_t frames);
 extern int port_trace_budget;
 extern int port_trace_methods;

@@ -180,9 +180,9 @@ typedef struct {
 #define MAX_WIN 1024
 #define HWND_BASE 0x00010000u
 #define HWND_DESKTOP 0x00000010u
-#define SCREEN_W 1920
-#define SCREEN_H 1080
-#define WORK_H 1040
+#define SCREEN_W port_screen_w
+#define SCREEN_H port_screen_h
+#define WORK_H (port_screen_h - PORT_TASKBAR_H)
 static Win wins[MAX_WIN];
 static int next_slot;
 static double z_top, z_bottom;
@@ -2489,7 +2489,19 @@ static void u_MessageBoxA(CPU* c) {
     RET(r);
 }
 
-static void u_MessageBeep(CPU* c) { RET(1); }
+#ifdef __EMSCRIPTEN__
+EM_JS(void, js_beep, (int kind), {
+    if (typeof postMessage === 'function') postMessage({ type: 'sound', op: 'beep', kind });
+});
+#else
+static void js_beep(int kind) { (void)kind; }
+#endif
+/* The page plays a short tone; each MB_ICON* type (and the plain 0xFFFFFFFF beep) has its own pitch. */
+static void u_MessageBeep(CPU* c) {
+    uint32_t t = ARG(0);
+    js_beep(t == 0xFFFFFFFFu ? 0 : (int)(t >> 4 & 0xF) + 1);
+    RET(1);
+}
 static void u_WinHelpA(CPU* c) {
     port_log("WinHelpA %s cmd=%u: no help viewer", ARG(1) ? GSTR(ARG(1)) : "", ARG(2));
     RET(0);
