@@ -46,7 +46,7 @@
 <script>
   const canvas = document.getElementById('screen');
   // The software renderer sends each frame's pixels; WebGL writes them into one of four shared slots and sends its index.
-  let ctx = null, slots = null, image = null;
+  let ctx = null, slots = null, owner = null, image = null;
   const status = document.getElementById('status');
   const log = document.getElementById('log');
   const worker = new Worker('/worker.js' + location.search);
@@ -72,10 +72,12 @@
   function showFrame() {
     const f = window.frameStats, slot = queued.shift();
     f.refreshes++;
-    if (slot !== undefined) {
+    // A slot the worker is writing is skipped: it posts that slot again once the newer frame is in it.
+    if (slot !== undefined && Atomics.compareExchange(owner, slot, 0, 1) === 0) {
       if (canvas.width !== image.width || canvas.height !== image.height) { canvas.width = image.width; canvas.height = image.height; }
       ctx = ctx || canvas.getContext('2d');
       image.data.set(slots[slot]);
+      Atomics.store(owner, slot, 0);
       ctx.putImageData(image, 0, 0);
       f.shown++;
       frames++;
@@ -97,6 +99,7 @@
       if (now - last > 1000) { status.textContent = `${m.w}x${m.h}, ${frames} frames/s shown`; frames = 0; last = now; }
     } else if (m.type === 'slots') {
       slots = m.slots.map((b) => new Uint8Array(b));
+      owner = m.owner;
       image = new ImageData(m.w, m.h);
       queued.length = 0;
     } else if (m.type === 'pixels') {

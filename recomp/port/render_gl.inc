@@ -457,6 +457,7 @@ EM_JS(void, js_gl_present, (void), {
     const size = G.w * G.h * 4;
     if (!G.slots || G.slotW !== G.w || G.slotH !== G.h) {
         G.slots = [0, 1, 2, 3].map(() => new Uint8Array(new SharedArrayBuffer(size)));
+        G.owner = new Int32Array(new SharedArrayBuffer(16));   /* per slot: 0 free, 1 the page copying it, 2 being written */
         G.slotW = G.w; G.slotH = G.h;
         if (!G.flip) { G.flip = gl.createFramebuffer(); G.flipRb = gl.createRenderbuffer(); G.pbo = [gl.createBuffer(), gl.createBuffer()]; }
         gl.bindRenderbuffer(gl.RENDERBUFFER, G.flipRb);
@@ -467,7 +468,7 @@ EM_JS(void, js_gl_present, (void), {
         for (const b of G.pbo) { gl.bindBuffer(gl.PIXEL_PACK_BUFFER, b); gl.bufferData(gl.PIXEL_PACK_BUFFER, size, gl.STREAM_READ); }
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
         G.pending = -1;
-        postMessage({ type: 'slots', slots: G.slots.map((v) => v.buffer), w: G.w, h: G.h });
+        postMessage({ type: 'slots', slots: G.slots.map((v) => v.buffer), owner: G.owner, w: G.w, h: G.h });
     }
     gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, G.kept);
@@ -483,9 +484,11 @@ EM_JS(void, js_gl_present, (void), {
     gl.enable(gl.SCISSOR_TEST);
     G.drawn = false;
     if (G.pending >= 0) {
-        const slot = (G.posted || 0) & 3;
+        let slot = (G.posted || 0) & 3;
+        while (Atomics.compareExchange(G.owner, slot, 0, 2) !== 0) slot = (slot + 1) & 3;
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, G.pbo[G.pending]);
         gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, G.slots[slot]);
+        Atomics.store(G.owner, slot, 0);
         postMessage({ type: 'pixels', slot });
         G.posted = (G.posted || 0) + 1;
     }
