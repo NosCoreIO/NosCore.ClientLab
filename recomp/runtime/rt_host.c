@@ -16,6 +16,7 @@
 #include <psapi.h>
 #include <share.h>
 #include <dbghelp.h>
+#include "rt_control.h"
 
 #define HOST_STACK_SIZE (64u << 20)
 #define GUEST_BASE 0x00400000u
@@ -43,6 +44,7 @@ void rt_log(const char* fmt, ...) {
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     if (log_file) { fprintf(log_file, "%s\n", buf); fflush(log_file); }
+    ctl_log(buf);
 }
 
 static volatile uint32_t last_fault_eip;
@@ -428,53 +430,81 @@ static void patch_slot(void* obj, int slot, void* fn, void** old) {
     VirtualProtect(&vt[slot], sizeof(void*), prot, &prot);
 }
 
-static void save_backbuffer(void* dev) {
-    typedef HRESULT(WINAPI* GetBackBufferFn)(void*, UINT, UINT, int, void**);
-    typedef HRESULT(WINAPI* GetDescFn)(void*, void*);
+typedef struct { int Format, Type; DWORD Usage; int Pool; int Multi; DWORD Quality; UINT Width, Height; } SurfaceDesc;
+typedef HRESULT(WINAPI* GetBackBufferFn)(void*, UINT, UINT, int, void**);
+typedef HRESULT(WINAPI* GetDescFn)(void*, SurfaceDesc*);
+typedef ULONG(WINAPI* ReleaseFn)(void*);
+
+int rt_backbuffer_size(void* dev, UINT* w, UINT* h) {
+    SurfaceDesc desc;
+    void* bb = 0;
+    if (FAILED(VCALL(dev, 18, GetBackBufferFn)(dev, 0, 0, 0, &bb))) return 0;
+    VCALL(bb, 12, GetDescFn)(bb, &desc);
+    VCALL(bb, 2, ReleaseFn)(bb);
+    *w = desc.Width;
+    *h = desc.Height;
+    return 1;
+}
+
+int rt_read_backbuffer(void* dev, void (*sink)(void* ctx, const uint8_t* bgra, UINT w, UINT h, int pitch), void* ctx) {
     typedef HRESULT(WINAPI* CreateOffscreenFn)(void*, UINT, UINT, int, int, void**, HANDLE*);
     typedef HRESULT(WINAPI* GetRtDataFn)(void*, void*, void*);
     typedef HRESULT(WINAPI* LockFn)(void*, void*, const RECT*, DWORD);
     typedef HRESULT(WINAPI* UnlockFn)(void*);
-    typedef ULONG(WINAPI* ReleaseFn)(void*);
-    struct { int Format, Type; DWORD Usage; int Pool; int Multi; DWORD Quality; UINT Width, Height; } desc;
+    SurfaceDesc desc;
     struct { INT Pitch; void* pBits; } lr;
     void *bb = 0, *sys = 0;
-    FILE* f;
-    if (FAILED(VCALL(dev, 18, GetBackBufferFn)(dev, 0, 0, 0, &bb))) return;
+    int ok = 0;
+    if (FAILED(VCALL(dev, 18, GetBackBufferFn)(dev, 0, 0, 0, &bb))) return 0;
     VCALL(bb, 12, GetDescFn)(bb, &desc);
     if (SUCCEEDED(VCALL(dev, 36, CreateOffscreenFn)(dev, desc.Width, desc.Height, desc.Format, 2, &sys, 0)) &&
         SUCCEEDED(VCALL(dev, 32, GetRtDataFn)(dev, bb, sys)) &&
-        SUCCEEDED(VCALL(sys, 13, LockFn)(sys, &lr, 0, 0x10)) && !fopen_s(&f, shot_out, "wb")) {
-        BITMAPFILEHEADER fh = {0x4D42};
-        BITMAPINFOHEADER ih = {sizeof ih};
-        ih.biWidth = (LONG)desc.Width;
-        ih.biHeight = -(LONG)desc.Height;
-        ih.biPlanes = 1;
-        ih.biBitCount = 32;
-        fh.bfOffBits = sizeof fh + sizeof ih;
-        fh.bfSize = fh.bfOffBits + desc.Width * desc.Height * 4;
-        fwrite(&fh, sizeof fh, 1, f);
-        fwrite(&ih, sizeof ih, 1, f);
-        for (UINT y = 0; y < desc.Height; y++) fwrite((uint8_t*)lr.pBits + y * lr.Pitch, 4, desc.Width, f);
-        fclose(f);
+        SUCCEEDED(VCALL(sys, 13, LockFn)(sys, &lr, 0, 0x10))) {
+        sink(ctx, (const uint8_t*)lr.pBits, desc.Width, desc.Height, lr.Pitch);
         VCALL(sys, 14, UnlockFn)(sys);
-        rt_log("frame captured %ux%u (format %d) to %s", desc.Width, desc.Height, desc.Format, shot_out);
+        ok = 1;
     }
     if (sys) VCALL(sys, 2, ReleaseFn)(sys);
     VCALL(bb, 2, ReleaseFn)(bb);
+    return ok;
+}
+
+static void bmp_sink(void* unused, const uint8_t* bgra, UINT w, UINT h, int pitch) {
+    FILE* f;
+    BITMAPFILEHEADER fh = {0x4D42};
+    BITMAPINFOHEADER ih = {sizeof ih};
+    (void)unused;
+    if (fopen_s(&f, shot_out, "wb")) return;
+    ih.biWidth = (LONG)w;
+    ih.biHeight = -(LONG)h;
+    ih.biPlanes = 1;
+    ih.biBitCount = 32;
+    fh.bfOffBits = sizeof fh + sizeof ih;
+    fh.bfSize = fh.bfOffBits + w * h * 4;
+    fwrite(&fh, sizeof fh, 1, f);
+    fwrite(&ih, sizeof ih, 1, f);
+    for (UINT y = 0; y < h; y++) fwrite(bgra + y * pitch, 4, w, f);
+    fclose(f);
+    rt_log("frame captured %ux%u to %s", w, h, shot_out);
 }
 
 static HRESULT WINAPI hook_present(void* dev, const RECT* a, const RECT* b, HWND w, const void* r) {
     if (GetFileAttributesA(shot_req) != INVALID_FILE_ATTRIBUTES) {
         DeleteFileA(shot_req);
-        save_backbuffer(dev);
+        rt_read_backbuffer(dev, bmp_sink, 0);
     }
+    ctl_present(dev);
     return real_present(dev, a, b, w, r);
 }
 
 static HRESULT WINAPI hook_create_device(void* d3d, UINT ad, DWORD type, HWND w, DWORD flags, void* params, void** out) {
     HRESULT hr = real_create_device(d3d, ad, type, w, flags, params, out);
-    if (SUCCEEDED(hr) && out && *out) patch_slot(*out, 17, (void*)hook_present, (void**)&real_present);
+    if (SUCCEEDED(hr) && out && *out) {
+        /* D3DPRESENT_PARAMETERS.hDeviceWindow (offset 28) wins over the focus window when set. */
+        HWND device_window = params ? *(HWND*)((uint8_t*)params + 28) : 0;
+        ctl_set_window(device_window ? device_window : w);
+        patch_slot(*out, 17, (void*)hook_present, (void**)&real_present);
+    }
     return hr;
 }
 
@@ -483,6 +513,42 @@ static void* WINAPI ov_Direct3DCreate9(UINT sdk) {
     void* d3d = ((CreateFn)GetProcAddress(GetModuleHandleA("d3d9.dll"), "Direct3DCreate9"))(sdk);
     if (d3d) patch_slot(d3d, 16, (void*)hook_create_device, (void**)&real_create_device);
     return d3d;
+}
+
+/* noscore_gf.dll (NosCore.DeveloperTools.GfStub) when the game folder has none, so a run needs no NativeAOT build:
+   the same cdecl answers, with the _NC_AUTH_CODE GUID handed over as ASCII text for NoS0577. */
+static int __cdecl gf_one(void) { return 1; }
+static int __cdecl gf_zero(void) { return 0; }
+static const char* __cdecl gf_persona(void) { return ""; }
+static const char* __cdecl gf_language(void) { return "english"; }
+static const char* __cdecl gf_branch(void) { return "live"; }
+
+static int __cdecl gf_ticket(char* buf, int size, uint32_t* psize) {
+    char code[128];
+    DWORD n = GetEnvironmentVariableA("_NC_AUTH_CODE", code, sizeof code);
+    if (!n || n >= sizeof code || !buf) {
+        rt_log("auth ticket requested but none is available");
+        if (psize) *psize = 0;
+        return 0;
+    }
+    if ((int)n > size) n = (DWORD)size;
+    memcpy(buf, code, n);
+    if (psize) *psize = n;
+    rt_log("auth ticket handed to the client (%lu chars)", n);
+    return 1;
+}
+
+static void* builtin_gf(const char* name) {
+    static const struct { const char* name; void* fn; } stubs[] = {
+        {"Steam_Init", (void*)gf_one}, {"Steam_IsLoggedIn", (void*)gf_one}, {"Steam_IsOverlayEnabled", (void*)gf_zero},
+        {"Steam_OnFrameTick", (void*)gf_zero}, {"Steam_SetOverlayActivateCallback", (void*)gf_zero},
+        {"Steam_OpenOverlayToWebPage", (void*)gf_zero}, {"Steam_CancelAuthSessionTicket", (void*)gf_zero},
+        {"Steam_GetAuthSessionTicket", (void*)gf_ticket}, {"Steam_GetPersonaName", (void*)gf_persona},
+        {"Steam_GetSteamLanguage", (void*)gf_language}, {"Steam_GetConnectedBetaBranch", (void*)gf_branch},
+    };
+    for (size_t k = 0; k < sizeof stubs / sizeof stubs[0]; k++)
+        if (!strcmp(stubs[k].name, name)) return stubs[k].fn;
+    return 0;
 }
 
 typedef struct { const char* dll; const char* name; void* fn; } Override;
@@ -499,6 +565,8 @@ static const Override overrides[] = {
 };
 
 static void* find_override(const char* dll, const char* name) {
+    void* ctl = ctl_override(dll, name);
+    if (ctl) return ctl;
     for (size_t k = 0; k < sizeof overrides / sizeof overrides[0]; k++)
         if (!_stricmp(overrides[k].dll, dll) && !strcmp(overrides[k].name, name)) return overrides[k].fn;
     return 0;
@@ -542,7 +610,9 @@ static void resolve_imports(uint8_t* base) {
         HMODULE h = LoadLibraryA(dll);
         uint32_t* names = (uint32_t*)(base + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
         uint32_t* iat = (uint32_t*)(base + d->FirstThunk);
-        if (!h) { rt_log("cannot load %s (error %lu)", dll, GetLastError()); missing++; }
+        int gf = !h && !_stricmp(dll, "noscore_gf.dll");
+        if (gf) rt_log("no %s in the game folder: using the built-in stubs", dll);
+        else if (!h) { rt_log("cannot load %s (error %lu)", dll, GetLastError()); missing++; }
         for (; *names; names++, iat++) {
             const char* name;
             void* fn;
@@ -555,6 +625,7 @@ static void resolve_imports(uint8_t* base) {
                 name = (const char*)(base + *names + 2);
                 fn = find_override(dll, name);
                 if (!fn && h) fn = (void*)GetProcAddress(h, name);
+                if (!fn && gf) fn = builtin_gf(name);
             }
             if (!fn) { rt_log("unresolved import %s!%s", dll, name); missing++; }
             if (fn && host_name_count < 2048) {
@@ -717,6 +788,7 @@ int main(int argc, char** argv) {
     no_cef = GetEnvironmentVariableA("NOSRECOMP_NO_CEF", logp_unused, sizeof logp_unused) > 0;
     sprintf_s(guest_cmdline, sizeof guest_cmdline, "\"%s\" %s", guest_path, rest);
     (void)k;
+    ctl_start();
 
     if (!VirtualFree((void*)(uintptr_t)GUEST_BASE, 0, MEM_RELEASE))
         rt_log("no guest address reservation to release (%lu)", GetLastError());
