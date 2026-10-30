@@ -49,7 +49,7 @@ python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user <accou
 **Open (2026-10-28):**
 1. Gameplay not exercised yet: combat and skills, NPC dialogs and shops, trading, every UI window. Extend `drive.mjs`; each new feature may hit a missing API or rendering feature (the per-setup logs and the F9 frame dump show which).
 2. Speed is fine for testing; the next step would be vertex transform and lighting in a vertex shader (7-8 ms CPU per busy frame).
-3. CEF (NosMall, the in-game browser) is not loaded. Its windows (`TCEFWindowParent`) still open with an empty body: the Game Guide on F11, which the client also opens when the first NPC dialogue ends.
+3. CEF (NosMall, the in-game browser) is not loaded. Its windows (`TCEFWindowParent`) still open with an empty body: the Game Guide on F11, and the tutorial's `web` steps (`tutorial.dat`, such as script 1 step 20 `t01_basicmove` right after the first NPC dialogue).
 4. Android: Chrome on Android should run it once memory is reserved lazily and `serve.py` is reachable over HTTPS.
 
 ### WebAssembly (portable host), as of 2026-10-27
