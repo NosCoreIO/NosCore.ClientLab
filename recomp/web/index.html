@@ -45,8 +45,8 @@
 </main>
 <script>
   const canvas = document.getElementById('screen');
-  // The software renderer sends pixels (2D context); WebGL sends bitmaps, which a bitmaprenderer takes without a copy.
-  let ctx = null, bitmaps = null;
+  // The software renderer sends each frame's pixels; WebGL writes them into one of four shared slots and sends its index.
+  let ctx = null, slots = null, image = null;
   const status = document.getElementById('status');
   const log = document.getElementById('log');
   const worker = new Worker('/worker.js' + location.search);
@@ -70,12 +70,13 @@
   const queued = [];
   let shownCount = null;
   function showFrame() {
-    const f = window.frameStats, bmp = queued.shift();
+    const f = window.frameStats, slot = queued.shift();
     f.refreshes++;
-    if (bmp) {
-      if (canvas.width !== bmp.width || canvas.height !== bmp.height) { canvas.width = bmp.width; canvas.height = bmp.height; }
-      bitmaps = bitmaps || canvas.getContext('bitmaprenderer');
-      bitmaps.transferFromImageBitmap(bmp);
+    if (slot !== undefined) {
+      if (canvas.width !== image.width || canvas.height !== image.height) { canvas.width = image.width; canvas.height = image.height; }
+      ctx = ctx || canvas.getContext('2d');
+      image.data.set(slots[slot]);
+      ctx.putImageData(image, 0, 0);
       f.shown++;
       frames++;
       Atomics.add(shownCount, 0, 1);
@@ -94,9 +95,13 @@
       frames++;
       const now = performance.now();
       if (now - last > 1000) { status.textContent = `${m.w}x${m.h}, ${frames} frames/s shown`; frames = 0; last = now; }
-    } else if (m.type === 'bitmap') {
-      queued.push(m.bmp);
-      while (queued.length > 2) { queued.shift().close(); window.frameStats.overwritten++; }
+    } else if (m.type === 'slots') {
+      slots = m.slots.map((b) => new Uint8Array(b));
+      image = new ImageData(m.w, m.h);
+      queued.length = 0;
+    } else if (m.type === 'pixels') {
+      queued.push(m.slot);
+      while (queued.length > 2) { queued.shift(); window.frameStats.overwritten++; }
     } else if (m.type === 'log') {
       pending.push(m.text);
       window.allLog.push(m.text);

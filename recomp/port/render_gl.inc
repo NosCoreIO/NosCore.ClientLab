@@ -20,7 +20,7 @@ EM_JS(int, js_gl_init, (int w, int h), {
         'out vec4 vCol; out vec4 vUV; out float vFog;\n' +
         'void main() { gl_Position = aPos; gl_PointSize = 1.0; vCol = aCol.bgra; vUV = aUV; vFog = aFog; }\n';
     // Fixed-function vertex processing for draws from a vertex buffer, the same arithmetic as render.c fetch(). The
-    // key (gl_buffer_draw) is baked in as constants; uC holds the matrices, viewport, fog, material and lights.
+    // key (gl_buffer_draw) is baked in as constants; the block C holds the matrices, viewport, fog, material and lights.
     const vsBuffer = (k) => '#version 300 es\n' +
         'precision highp float; precision highp int;\n' +
         'const bool LIT = ' + ((k & 1) !== 0) + ', DIFFUSE = ' + ((k >> 15 & 1) !== 0) + ', NORMAL = ' + ((k >> 16 & 1) !== 0) + ';\n' +
@@ -31,7 +31,7 @@ EM_JS(int, js_gl_init, (int w, int h), {
         'const bvec2 PROJ = bvec2(' + ((k >> 10 & 1) !== 0) + ', ' + ((k >> 14 & 1) !== 0) + ');\n' +
         'const ivec2 TN = ivec2(' + (k >> 25 & 7) + ', ' + (k >> 28 & 7) + ');\n' +
         'in vec3 aPos; in vec4 aCol; in vec4 aT0; in vec4 aT1; in vec3 aNrm;\n' +
-        'uniform vec4 uC[75];\n' +
+        'layout(std140) uniform C { vec4 uC[75]; };\n' +
         'out vec4 vCol; out vec4 vUV; out float vFog;\n' +
         'mat4 M(int i) { return mat4(uC[i], uC[i + 1], uC[i + 2], uC[i + 3]); }\n' +
         'vec4 coords(vec4 t, int n) {\n' +
@@ -174,7 +174,8 @@ EM_JS(int, js_gl_init, (int w, int h), {
         if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
         gl.useProgram(prog);
         p = { prog, u: {}, tex0: k[12] === 1, tex1: k[13] === 1, vkey: k[17] };
-        for (const n of ['uTex0', 'uTex1', 'uTFactor', 'uARef', 'uFog', 'uC']) p.u[n] = gl.getUniformLocation(prog, n);
+        for (const n of ['uTex0', 'uTex1', 'uTFactor', 'uARef', 'uFog']) p.u[n] = gl.getUniformLocation(prog, n);
+        if (k[17] !== STREAM) gl.uniformBlockBinding(prog, gl.getUniformBlockIndex(prog, 'C'), 0);
         gl.uniform1i(p.u.uTex0, 0);
         gl.uniform1i(p.u.uTex1, 1);
         programs.set(key, p);
@@ -190,7 +191,9 @@ EM_JS(int, js_gl_init, (int w, int h), {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.enable(gl.SCISSOR_TEST);
     const G = self.__gl = { canvas, gl, program, STREAM, vbo, cur: null, textures: new Map(), buffers: [new Map(), new Map()],
-                            vao: gl.createVertexArray(), w, h, last: 0 };
+                            vao: gl.createVertexArray(), ubo: gl.createBuffer(), w, h, last: 0 };
+    // Constant blocks sit 256 bytes apart (gl_buffer_draw); a GPU that needs a coarser offset keeps the CPU path.
+    if (gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT) > 256) return 1;
     // 2: a GPU, which takes the vertex work too; 1: a software rasteriser, where the CPU path is faster on small maps.
     return /SwiftShader|llvmpipe|lavapipe|Software|Basic Render/i.test(renderer) ? 1 : 2;
 });
@@ -211,11 +214,22 @@ EM_JS(void, js_gl_buffer, (uint32_t id, int index, const uint8_t* data, int size
 
 EM_JS(void, js_gl_texture, (uint32_t id, int w, int h, const uint8_t* rgba), {
     const G = self.__gl, gl = G.gl;
+    // Textures the client rewrites every frame (text, the minimap) keep their storage, so an upload never reallocates.
     let t = G.textures.get(id);
-    if (!t) { t = gl.createTexture(); G.textures.set(id, t); }
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, t);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, HEAPU8.subarray(rgba, rgba + w * h * 4));
+    if (!t || t.w !== w || t.h !== h) {
+        if (t) gl.deleteTexture(t);
+        t = gl.createTexture();
+        t.w = w;
+        t.h = h;
+        G.textures.set(id, t);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texStorage2D(gl.TEXTURE_2D, Math.floor(Math.log2(Math.max(w, h))) + 1, gl.RGBA8, w, h);
+    } else {
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, t);
+    }
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, HEAPU8.subarray(rgba, rgba + w * h * 4));
     gl.generateMipmap(gl.TEXTURE_2D);
     if (G.lods && G.lods.has(id)) gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, G.lods.get(id));
     if (G.prev) { G.prev[12] = -1; G.prev[13] = -1; }
@@ -240,7 +254,7 @@ EM_JS(void, js_gl_texture_lod, (uint32_t id, int lod), {
 /* Runs one recorded command list: the vertices of all its draws are uploaded at once, then each command (GL
    primitive, first vertex, count, 41 state words, then 16 words for a draw from a vertex buffer: see gl_buffer_draw)
    sets what changed and draws. */
-EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, int ncmds, const float* consts), {
+EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, int ncmds, const uint8_t* consts, int cbytes), {
     const G = self.__gl, gl = G.gl;
     const P = G.prev || (G.prev = new Int32Array(41).fill(-1));
     const A = G.attribs || (G.attribs = new Int32Array(11).fill(-1));
@@ -256,6 +270,13 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
     gl.bufferSubData(gl.ARRAY_BUFFER, G.ring, HEAPU8, verts, bytes);
     const first = G.ring / 40;
     G.ring += bytes;
+    // Every constant block of the run goes up in one upload; each draw then binds its range, instead of thousands of
+    // uniform calls that filled the GPU process's command buffer.
+    if (cbytes) {
+        gl.bindBuffer(gl.UNIFORM_BUFFER, G.ubo);
+        gl.bufferData(gl.UNIFORM_BUFFER, HEAPU8.subarray(consts, consts + cbytes), gl.STREAM_DRAW);
+    }
+    let block = -1;
     let base = 0;
     const S = (i) => HEAP32[base + i];
     const changed = (from, to) => {
@@ -335,12 +356,7 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
         }
         const vb = G.buffers[0].get(HEAP32[g + 1] >>> 0), ib = HEAP32[g + 2] ? G.buffers[1].get(HEAP32[g + 2] >>> 0) : null;
         if (!vb || (HEAP32[g + 2] && !ib)) continue;
-        // The constants block each program last received, so a program switch or a new block sets uC again.
-        const block = G.run * 65536 + HEAP32[g + 13];
-        if (G.cur.block !== block) {
-            gl.uniform4fv(u.uC, HEAPF32, (consts >> 2) + 300 * HEAP32[g + 13], 4 * HEAP32[g + 15]);
-            G.cur.block = block;
-        }
+        if (block !== HEAP32[g + 13]) { block = HEAP32[g + 13]; gl.bindBufferRange(gl.UNIFORM_BUFFER, 0, G.ubo, block, 1200); }
         if (!G.vaoOn) { gl.bindVertexArray(G.vao); G.vaoOn = true; A.fill(-1); }
         let same = true;
         for (let i = 0; i < 11; i++) if (A[i] !== HEAP32[g + 1 + i]) { A[i] = HEAP32[g + 1 + i]; same = false; }
@@ -434,15 +450,47 @@ EM_JS(void, js_gl_present, (void), {
         gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, G.keptRb);
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
+    // Frames go to the page as pixels in shared memory, four slots used in turn: an ImageBitmap per frame stays in GPU
+    // memory until the page collects garbage, which piled up gigabytes and stalled the GPU, and the worker never
+    // yields for a canvas transferred from the page to show anything. Each frame is read into one of two pixel buffers
+    // and fetched a frame later, by when the GPU has finished it, so the read does not wait for the frame just drawn.
+    const size = G.w * G.h * 4;
+    if (!G.slots || G.slotW !== G.w || G.slotH !== G.h) {
+        G.slots = [0, 1, 2, 3].map(() => new Uint8Array(new SharedArrayBuffer(size)));
+        G.slotW = G.w; G.slotH = G.h;
+        if (!G.flip) { G.flip = gl.createFramebuffer(); G.flipRb = gl.createRenderbuffer(); G.pbo = [gl.createBuffer(), gl.createBuffer()]; }
+        gl.bindRenderbuffer(gl.RENDERBUFFER, G.flipRb);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, G.w, G.h);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, G.flip);
+        gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, G.flipRb);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        for (const b of G.pbo) { gl.bindBuffer(gl.PIXEL_PACK_BUFFER, b); gl.bufferData(gl.PIXEL_PACK_BUFFER, size, gl.STREAM_READ); }
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        G.pending = -1;
+        postMessage({ type: 'slots', slots: G.slots.map((v) => v.buffer), w: G.w, h: G.h });
+    }
     gl.disable(gl.SCISSOR_TEST);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, G.kept);
     gl.blitFramebuffer(0, 0, G.w, G.h, 0, 0, G.w, G.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, G.flip);
+    gl.blitFramebuffer(0, 0, G.w, G.h, 0, G.h, G.w, 0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, G.flip);
+    const into = G.pending === 0 ? 1 : 0;
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, G.pbo[into]);
+    gl.readPixels(0, 0, G.w, G.h, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
     gl.enable(gl.SCISSOR_TEST);
     G.drawn = false;
-    const bmp = G.canvas.transferToImageBitmap();
-    postMessage({ type: 'bitmap', bmp }, [bmp]);
-    G.posted = (G.posted || 0) + 1;
+    if (G.pending >= 0) {
+        const slot = (G.posted || 0) & 3;
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, G.pbo[G.pending]);
+        gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, G.slots[slot]);
+        postMessage({ type: 'pixels', slot });
+        G.posted = (G.posted || 0) + 1;
+    }
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    G.pending = into;
 });
 
 /* The frame as 32-bit BGRA rows, top row first. Presenting hands the drawing buffer to the page and leaves it blank,
@@ -505,18 +553,21 @@ static uint32_t gl_texture(uint32_t tex) {
 typedef struct { int32_t prim, first, count, st[41], g[16]; } GlCmd;
 static GlCmd gl_cmds[MAX_CMDS];
 static uint32_t gl_ncmds, gl_nverts;
-/* Vertex-shader constants of buffer draws, GL_CONSTS vec4s per block; a draw whose constants match the previous
-   block's reuses it. */
+/* Vertex-shader constants of buffer draws: one block of up to GL_CONSTS vec4s per draw, each starting on a 256-byte
+   boundary so a draw can bind its own range, and followed by enough room for the full block the shader declares. A draw
+   whose constants match the previous block's reuses it. */
 #define GL_CONSTS 75
-static float gl_consts[MAX_CMDS][GL_CONSTS * 4];
-static uint32_t gl_nconsts;
+#define GL_CONST_SIZE (GL_CONSTS * 16)
+static float gl_consts[(MAX_CMDS * 1280 + GL_CONST_SIZE) / 4] __attribute__((aligned(16)));
+static uint32_t gl_cbytes, gl_clast, gl_clen;
 
 static void gl_flush(void) {
     if (!gl_ncmds) return;
     double t = prof_mark();
-    js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds, gl_consts[0]);
+    js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds, (const uint8_t*)gl_consts,
+              gl_cbytes ? (int)(gl_cbytes + GL_CONST_SIZE) : 0);
     prof_submit += prof_mark() - t;
-    gl_ncmds = gl_nverts = gl_nconsts = 0;
+    gl_ncmds = gl_nverts = gl_cbytes = gl_clen = 0;
 }
 
 /* The command a draw appends to: the current one when it is a triangle list with the same state, else a new one. */
@@ -645,7 +696,7 @@ static void put_color(float* c, uint32_t argb) {
 static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t base_vertex, int indexed) {
     if (!gl_gpu_vertices || R.target != gl_backbuffer || dump_state == 2 || LY.pos != 2 || prim < 1 || prim > 6) return 0;
     uint32_t vb = R.vb, ib = indexed ? R.ib : 0, stride = R.vb_stride;
-    if (M32(vb + 64) || (M32(vb + 48) & 0x200) || stride & 3) return 0;   /* locked, D3DUSAGE_DYNAMIC, unaligned */
+    if (!stride || M32(vb + 64) || (M32(vb + 48) & 0x200) || stride & 3) return 0;   /* GL reads stride 0 as packed */
     if (ib && (M32(ib + 64) || (M32(ib + 48) & 0x200))) return 0;
     int64_t vbase = (int64_t)R.vb_offset + (int64_t)base_vertex * stride;
     if (vbase < 0 || (vbase & 3)) return 0;
@@ -673,8 +724,8 @@ static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t bas
     gl_state(st);
     if (gl_ncmds == MAX_CMDS) gl_flush();
 
-    float* c = gl_consts[gl_nconsts];
-    memset(c, 0, sizeof gl_consts[0]);
+    float* c = gl_consts + gl_cbytes / 4;
+    memset(c, 0, GL_CONST_SIZE);
     put_mat(c, &wvp); put_mat(c + 16, &wv); put_mat(c + 32, &R.world); put_mat(c + 48, &R.tex[0]); put_mat(c + 64, &R.tex[1]);
     c[80] = LY.vx; c[81] = LY.vy; c[82] = LY.vw; c[83] = LY.vh;
     c[84] = (float)SW(R.target); c[85] = (float)SH(R.target);
@@ -689,9 +740,12 @@ static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t bas
         memcpy(d + 4, L + 1, 12); memcpy(d + 8, L + 9, 12); memcpy(d + 12, L + 13, 12); memcpy(d + 16, L + 16, 12);
         memcpy(d + 20, L + 21, 12);
     }
-    uint32_t block = gl_nconsts;
-    if (block && !memcmp(c, gl_consts[block - 1], sizeof gl_consts[0])) block--;
-    else gl_nconsts++;
+    uint32_t len = (27u + 6u * (uint32_t)nlights) * 16u, block = gl_clast;
+    if (len != gl_clen || memcmp(c, gl_consts + gl_clast / 4, len)) {
+        block = gl_clast = gl_cbytes;
+        gl_clen = len;
+        gl_cbytes += (len + 255) & ~255u;
+    }
 
     GlCmd* cmd = &gl_cmds[gl_ncmds++];
     static const int32_t gl_prim[7] = {0, 0, 1, 3, 4, 5, 6};   /* POINTS LINES LINE_STRIP TRIANGLES _STRIP _FAN */
@@ -705,7 +759,7 @@ static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t bas
     g[7] = LY.has_diffuse ? (int32_t)LY.diffuse_at : -1;
     g[8] = at[0]; g[9] = tn[0]; g[10] = at[1]; g[11] = tn[1];
     g[12] = (int32_t)(first * (idx32 ? 4u : 2u));
-    g[13] = (int32_t)block; g[14] = key; g[15] = 27 + 6 * nlights;
+    g[13] = (int32_t)block; g[14] = key;
     S.draws++;
     prof_fetch += prof_mark() - fetch_t0;
     return 1;
