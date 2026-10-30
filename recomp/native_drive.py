@@ -96,7 +96,9 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
-    env = dict(os.environ, NOSRECOMP_CONTROL=str(a.port), _NC_AUTH_CODE=fetch_auth_code(a.auth_url, a.user, a.password))
+    # Without libcef.dll, as in the browser build: CEF's helper processes fail to start a GPU process under the
+    # recompiled client and take it down.
+    env = dict(os.environ, NOSRECOMP_CONTROL=str(a.port), NOSRECOMP_NO_CEF="1", _NC_AUTH_CODE=fetch_auth_code(a.auth_url, a.user, a.password))
     client = subprocess.Popen([a.exe, os.path.join(a.game, "NosCore.exe"), "gf", "0"], env=env)
     started = time.time()
     step = lambda name: print(f"[{time.strftime('%H:%M:%S')}] {name}", flush=True)

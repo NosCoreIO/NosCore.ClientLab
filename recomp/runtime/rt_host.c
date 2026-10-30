@@ -499,6 +499,10 @@ static HRESULT WINAPI hook_present(void* dev, const RECT* a, const RECT* b, HWND
 
 static HRESULT WINAPI hook_create_device(void* d3d, UINT ad, DWORD type, HWND w, DWORD flags, void* params, void** out) {
     HRESULT hr = real_create_device(d3d, ad, type, w, flags, params, out);
+    if (FAILED(hr))
+        rt_log("CreateDevice(adapter %u, type %lu, flags %08lx) -> %08lx%s", ad, type, flags, hr,
+               GetSystemMetrics(SM_REMOTESESSION) ? " (Remote Desktop session: Direct3D 9 needs the GPU enabled for "
+               "remote sessions, or the console session)" : "");
     if (SUCCEEDED(hr) && out && *out) {
         /* D3DPRESENT_PARAMETERS.hDeviceWindow (offset 28) wins over the focus window when set. */
         HWND device_window = params ? *(HWND*)((uint8_t*)params + 28) : 0;
