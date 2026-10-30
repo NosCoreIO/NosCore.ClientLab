@@ -1,5 +1,7 @@
-/* WebGL2 backend, included at the end of render.c (it needs R, Vtx and texel). In the browser worker the vertices
-   are still transformed by fetch(); the GPU rasterises, shades the two texture stages, blends and depth-tests. */
+/* WebGL2 backend, included at the end of render.c (it needs R, Vtx and texel). On a GPU, draws from vertex buffers
+   are transformed, lit and fogged by the vertex shader (gl_buffer_draw); everything else, and every draw under a
+   software rasteriser, is transformed by fetch(). The GPU rasterises, shades the two texture stages, blends and
+   depth-tests. */
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -10,11 +12,79 @@ EM_JS(int, js_gl_init, (int w, int h), {
     const canvas = new OffscreenCanvas(w, h);
     const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, preserveDrawingBuffer: false, depth: true });
     if (!gl) return 0;
-    postMessage({ type: 'log', text: 'WebGL renderer: ' + report(gl) });
-    const vs = '#version 300 es\n' +
+    const renderer = report(gl);
+    postMessage({ type: 'log', text: 'WebGL renderer: ' + renderer });
+    const STREAM = 1 << 24;
+    const vsStream = '#version 300 es\n' +
         'in vec4 aPos; in vec4 aCol; in vec4 aUV; in float aFog;\n' +
         'out vec4 vCol; out vec4 vUV; out float vFog;\n' +
         'void main() { gl_Position = aPos; gl_PointSize = 1.0; vCol = aCol.bgra; vUV = aUV; vFog = aFog; }\n';
+    // Fixed-function vertex processing for draws from a vertex buffer, the same arithmetic as render.c fetch(). The
+    // key (gl_buffer_draw) is baked in as constants; uC holds the matrices, viewport, fog, material and lights.
+    const vsBuffer = (k) => '#version 300 es\n' +
+        'precision highp float; precision highp int;\n' +
+        'const bool LIT = ' + ((k & 1) !== 0) + ', DIFFUSE = ' + ((k >> 15 & 1) !== 0) + ', NORMAL = ' + ((k >> 16 & 1) !== 0) + ';\n' +
+        'const bool DVC = ' + ((k >> 17 & 1) !== 0) + ', AVC = ' + ((k >> 18 & 1) !== 0) + ', EVC = ' + ((k >> 19 & 1) !== 0) + ';\n' +
+        'const int FOG = ' + (k >> 1 & 3) + ', LIGHTS = ' + (k >> 20 & 15) + ';\n' +
+        'const ivec2 GEN = ivec2(' + (k >> 3 & 3) + ', ' + (k >> 5 & 3) + ');\n' +
+        'const ivec2 TT = ivec2(' + (k >> 7 & 7) + ', ' + (k >> 11 & 7) + ');\n' +
+        'const bvec2 PROJ = bvec2(' + ((k >> 10 & 1) !== 0) + ', ' + ((k >> 14 & 1) !== 0) + ');\n' +
+        'const ivec2 TN = ivec2(' + (k >> 25 & 7) + ', ' + (k >> 28 & 7) + ');\n' +
+        'in vec3 aPos; in vec4 aCol; in vec4 aT0; in vec4 aT1; in vec3 aNrm;\n' +
+        'uniform vec4 uC[75];\n' +
+        'out vec4 vCol; out vec4 vUV; out float vFog;\n' +
+        'mat4 M(int i) { return mat4(uC[i], uC[i + 1], uC[i + 2], uC[i + 3]); }\n' +
+        'vec4 coords(vec4 t, int n) {\n' +
+        '  return n == 1 ? vec4(t.x, 0.0, 1.0, 0.0) : n == 2 ? vec4(t.xy, 1.0, 0.0) : n == 3 ? vec4(t.xyz, 1.0) : n == 4 ? t : vec4(0.0, 0.0, 1.0, 0.0);\n' +
+        '}\n' +
+        'vec2 stageUV(int st, vec4 t, vec4 cam, vec4 camN) {\n' +
+        '  vec4 tc = GEN[st] == 2 ? cam : GEN[st] == 1 ? camN : coords(t, TN[st]);\n' +
+        '  if (TT[st] == 0) return tc.xy;\n' +
+        '  vec4 r = M(12 + 4 * st) * tc;\n' +
+        '  float q = PROJ[st] ? r[TT[st] - 1] : 1.0;\n' +
+        '  return r.xy / q;\n' +
+        '}\n' +
+        'vec4 light(vec4 p, vec4 vc) {\n' +
+        '  vec3 n = mat3(M(8)) * aNrm;\n' +
+        '  float len = length(n);\n' +
+        '  if (len > 0.0) n /= len;\n' +
+        '  vec3 wp = (M(8) * p).xyz;\n' +
+        '  vec4 dsrc = DVC ? vc : uC[23], asrc = AVC ? vc : uC[24], esrc = EVC ? vc : uC[25];\n' +
+        '  vec3 o = esrc.rgb + uC[26].rgb * asrc.rgb;\n' +
+        '  for (int i = 0; i < LIGHTS; i++) {\n' +
+        '    int b = 27 + 6 * i;\n' +
+        '    vec3 dir; float atten = 1.0;\n' +
+        '    if (uC[b].x == 3.0) dir = -uC[b + 4].xyz;\n' +
+        '    else {\n' +
+        '      dir = uC[b + 3].xyz - wp;\n' +
+        '      float d = length(dir);\n' +
+        '      if (uC[b].y > 0.0 && d > uC[b].y) continue;\n' +
+        '      float a = uC[b + 5].x + uC[b + 5].y * d + uC[b + 5].z * d * d;\n' +
+        '      atten = a > 0.0 ? 1.0 / a : 1.0;\n' +
+        '    }\n' +
+        '    float dl = length(dir);\n' +
+        '    float ndotl = dl > 0.0 ? max(dot(n, dir) / dl, 0.0) : 0.0;\n' +
+        '    o += atten * (uC[b + 2].rgb * asrc.rgb + ndotl * uC[b + 1].rgb * dsrc.rgb);\n' +
+        '  }\n' +
+        '  return vec4(clamp(o, 0.0, 1.0), clamp(dsrc.a, 0.0, 1.0));\n' +
+        '}\n' +
+        'void main() {\n' +
+        '  vec4 p = vec4(aPos, 1.0);\n' +
+        '  vec4 cam = M(4) * p, camN = NORMAL ? M(4) * vec4(aNrm, 0.0) : vec4(0.0);\n' +
+        '  vec4 vc = DIFFUSE ? aCol.bgra : vec4(1.0);\n' +
+        '  vCol = LIT ? light(p, vc) : vc;\n' +
+        '  float d = abs(cam.z), f = 1.0;\n' +
+        '  if (FOG == 3) f = uC[22].y != uC[22].x ? (uC[22].y - d) / (uC[22].y - uC[22].x) : 1.0;\n' +
+        '  else if (FOG == 1) f = exp(-uC[22].z * d);\n' +
+        '  else if (FOG == 2) f = exp(-(uC[22].z * d) * (uC[22].z * d));\n' +
+        '  vFog = clamp(f, 0.0, 1.0);\n' +
+        '  vUV = vec4(stageUV(0, aT0, cam, camN), stageUV(1, aT1, cam, camN));\n' +
+        '  vec4 t = M(0) * p;\n' +
+        '  float w = t.w != 0.0 ? t.w : 1.0;\n' +
+        '  vec2 s = vec2(uC[20].x + (t.x / w + 1.0) * 0.5 * uC[20].z, uC[20].y + (1.0 - t.y / w) * 0.5 * uC[20].w);\n' +
+        '  gl_Position = vec4(((s.x + 0.5) / uC[21].x * 2.0 - 1.0) * w, (1.0 - (s.y + 0.5) / uC[21].y * 2.0) * w, (t.z / w * 2.0 - 1.0) * w, w);\n' +
+        '  gl_PointSize = 1.0;\n' +
+        '}\n';
     // The texture stage, alpha test and fog setup are constants of each program, one program per distinct setup:
     // a software rasteriser runs every branch of a shader that reads them from uniforms, several times slower.
     const fsHead = (k) => '#version 300 es\n' +
@@ -80,24 +150,31 @@ EM_JS(int, js_gl_init, (int w, int h), {
         if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
         return s;
     };
-    const vsShader = sh(gl.VERTEX_SHADER, vs);
+    const vertexShaders = new Map();
+    const vertexShader = (k) => {
+        let v = vertexShaders.get(k);
+        if (!v) vertexShaders.set(k, v = sh(gl.VERTEX_SHADER, k === STREAM ? vsStream : vsBuffer(k)));
+        return v;
+    };
+    // k: the fragment setup (17 values), then the vertex key (STREAM for recorded vertices).
     const programs = new Map();
     const program = (k) => {
         const key = k.join(',');
         let p = programs.get(key);
         if (p) return p;
         const prog = gl.createProgram();
-        gl.attachShader(prog, vsShader);
+        gl.attachShader(prog, vertexShader(k[17]));
         gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fsHead(k) + fsBody));
         gl.bindAttribLocation(prog, 0, 'aPos');
         gl.bindAttribLocation(prog, 1, 'aCol');
-        gl.bindAttribLocation(prog, 2, 'aUV');
-        gl.bindAttribLocation(prog, 3, 'aFog');
+        gl.bindAttribLocation(prog, 2, k[17] === STREAM ? 'aUV' : 'aT0');
+        gl.bindAttribLocation(prog, 3, k[17] === STREAM ? 'aFog' : 'aT1');
+        gl.bindAttribLocation(prog, 4, 'aNrm');
         gl.linkProgram(prog);
         if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
         gl.useProgram(prog);
-        p = { prog, u: {}, tex0: k[12] === 1, tex1: k[13] === 1 };
-        for (const n of ['uTex0', 'uTex1', 'uTFactor', 'uARef', 'uFog']) p.u[n] = gl.getUniformLocation(prog, n);
+        p = { prog, u: {}, tex0: k[12] === 1, tex1: k[13] === 1, vkey: k[17] };
+        for (const n of ['uTex0', 'uTex1', 'uTFactor', 'uARef', 'uFog', 'uC']) p.u[n] = gl.getUniformLocation(prog, n);
         gl.uniform1i(p.u.uTex0, 0);
         gl.uniform1i(p.u.uTex1, 1);
         programs.set(key, p);
@@ -112,8 +189,24 @@ EM_JS(int, js_gl_init, (int w, int h), {
     gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 40, 36);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.enable(gl.SCISSOR_TEST);
-    const G = self.__gl = { canvas, gl, program, cur: null, textures: new Map(), w, h, last: 0 };
-    return 1;
+    const G = self.__gl = { canvas, gl, program, STREAM, vbo, cur: null, textures: new Map(), buffers: [new Map(), new Map()],
+                            vao: gl.createVertexArray(), w, h, last: 0 };
+    // 2: a GPU, which takes the vertex work too; 1: a software rasteriser, where the CPU path is faster on small maps.
+    return /SwiftShader|llvmpipe|lavapipe|Software|Basic Render/i.test(renderer) ? 1 : 2;
+});
+
+/* A vertex (index 0) or index (1) buffer's contents, keyed by its object. */
+EM_JS(void, js_gl_buffer, (uint32_t id, int index, const uint8_t* data, int size), {
+    const G = self.__gl, gl = G.gl, map = G.buffers[index];
+    let b = map.get(id);
+    if (!b) { b = gl.createBuffer(); map.set(id, b); }
+    const target = index ? gl.ELEMENT_ARRAY_BUFFER : gl.ARRAY_BUFFER;
+    if (index) gl.bindVertexArray(G.vao);
+    gl.bindBuffer(target, b);
+    gl.bufferData(target, HEAPU8.subarray(data, data + size), gl.STATIC_DRAW);
+    if (index) gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, G.vbo);
+    G.vaoOn = false;
 });
 
 EM_JS(void, js_gl_texture, (uint32_t id, int w, int h, const uint8_t* rgba), {
@@ -145,11 +238,17 @@ EM_JS(void, js_gl_texture_lod, (uint32_t id, int lod), {
    24 z func, 25..28 scissor x y w h, 29..33 stage 0 sampler (mag min mip addressu addressv), 34..38 stage 1,
    38 fog colour, 39 fog on, 40 cull mode */
 /* Runs one recorded command list: the vertices of all its draws are uploaded at once, then each command (GL
-   primitive, first vertex, count, then 40 state words) sets what changed and draws. */
-EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, int ncmds), {
+   primitive, first vertex, count, 41 state words, then 16 words for a draw from a vertex buffer: see gl_buffer_draw)
+   sets what changed and draws. */
+EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, int ncmds, const float* consts), {
     const G = self.__gl, gl = G.gl;
     const P = G.prev || (G.prev = new Int32Array(41).fill(-1));
+    const A = G.attribs || (G.attribs = new Int32Array(11).fill(-1));
     G.drawn = true;
+    G.run = (G.run || 0) + 1;
+    gl.bindVertexArray(null);
+    gl.bindBuffer(gl.ARRAY_BUFFER, G.vbo);
+    G.vaoOn = false;
     // One large buffer takes every list; when it fills up it is orphaned, so the GPU never waits on a range still
     // being read.
     const RING = 1 << 24, bytes = nverts * 40;
@@ -169,14 +268,15 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
                gl.DST_ALPHA, gl.ONE_MINUS_DST_ALPHA, gl.DST_COLOR, gl.ONE_MINUS_DST_COLOR, gl.SRC_ALPHA_SATURATE];
     const eq = [gl.FUNC_ADD, gl.FUNC_ADD, gl.FUNC_SUBTRACT, gl.FUNC_REVERSE_SUBTRACT, gl.MIN, gl.MAX];
     for (let k = 0; k < ncmds; k++) {
-        const cmd = (cmds >> 2) + 44 * k;
+        const cmd = (cmds >> 2) + 60 * k, g = cmd + 44, buffered = HEAP32[g] !== 0;
+        const vkey = buffered ? HEAP32[g + 14] : G.STREAM;
         base = cmd + 3;
         // Groups are tested one by one (no short-circuit) so the cache stays in step with GL.
         const s0 = changed(0, 6), s1 = changed(6, 12), at = changed(15, 17), fogOn = changed(39, 40);
         let switched = false;
-        if (s0 || s1 || at || fogOn || !G.cur || (S(12) !== 0) !== G.cur.tex0 || (S(13) !== 0) !== G.cur.tex1) {
+        if (s0 || s1 || at || fogOn || !G.cur || vkey !== G.cur.vkey || (S(12) !== 0) !== G.cur.tex0 || (S(13) !== 0) !== G.cur.tex1) {
             const setup = [S(0), S(1), S(2), S(3), S(4), S(5), S(6), S(7), S(8), S(9), S(10), S(11),
-                           S(12) ? 1 : 0, S(13) ? 1 : 0, S(15), S(16), S(39) ? 1 : 0];
+                           S(12) ? 1 : 0, S(13) ? 1 : 0, S(15), S(16), S(39) ? 1 : 0, vkey];
             const p = G.program(setup);
             if (p !== G.cur) {
                 gl.useProgram(p.prog);
@@ -228,8 +328,41 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
             if (S(40) === 2 || S(40) === 3) { gl.enable(gl.CULL_FACE); gl.cullFace(S(40) === 2 ? gl.BACK : gl.FRONT); }
             else gl.disable(gl.CULL_FACE);
         }
-        gl.drawArrays(HEAP32[cmd], first + HEAP32[cmd + 1], HEAP32[cmd + 2]);
+        if (!buffered) {
+            if (G.vaoOn) { gl.bindVertexArray(null); gl.bindBuffer(gl.ARRAY_BUFFER, G.vbo); G.vaoOn = false; }
+            gl.drawArrays(HEAP32[cmd], first + HEAP32[cmd + 1], HEAP32[cmd + 2]);
+            continue;
+        }
+        const vb = G.buffers[0].get(HEAP32[g + 1] >>> 0), ib = HEAP32[g + 2] ? G.buffers[1].get(HEAP32[g + 2] >>> 0) : null;
+        if (!vb || (HEAP32[g + 2] && !ib)) continue;
+        // The constants block each program last received, so a program switch or a new block sets uC again.
+        const block = G.run * 65536 + HEAP32[g + 13];
+        if (G.cur.block !== block) {
+            gl.uniform4fv(u.uC, HEAPF32, (consts >> 2) + 300 * HEAP32[g + 13], 4 * HEAP32[g + 15]);
+            G.cur.block = block;
+        }
+        if (!G.vaoOn) { gl.bindVertexArray(G.vao); G.vaoOn = true; A.fill(-1); }
+        let same = true;
+        for (let i = 0; i < 11; i++) if (A[i] !== HEAP32[g + 1 + i]) { A[i] = HEAP32[g + 1 + i]; same = false; }
+        if (!same) {
+            const at = HEAP32[g + 4], stride = HEAP32[g + 5];
+            gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, at);
+            const attr = (loc, off, size, type, norm, x, y, z, w) => {
+                if (off >= 0) { gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, type, norm, stride, at + off); }
+                else { gl.disableVertexAttribArray(loc); gl.vertexAttrib4f(loc, x, y, z, w); }
+            };
+            attr(1, HEAP32[g + 7], 4, gl.UNSIGNED_BYTE, true, 1, 1, 1, 1);
+            attr(2, HEAP32[g + 8], HEAP32[g + 9], gl.FLOAT, false, 0, 0, 1, 0);
+            attr(3, HEAP32[g + 10], HEAP32[g + 11], gl.FLOAT, false, 0, 0, 1, 0);
+            attr(4, HEAP32[g + 6], 3, gl.FLOAT, false, 0, 0, 0, 0);
+            if (ib) gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+        }
+        if (ib) gl.drawElements(HEAP32[cmd], HEAP32[cmd + 2], HEAP32[g + 3] ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT, HEAP32[g + 12]);
+        else gl.drawArrays(HEAP32[cmd], HEAP32[cmd + 1], HEAP32[cmd + 2]);
     }
+    if (G.vaoOn) { gl.bindVertexArray(null); gl.bindBuffer(gl.ARRAY_BUFFER, G.vbo); G.vaoOn = false; }
 });
 
 EM_JS(void, js_gl_clear, (int flags, uint32_t color, float z, int x, int y, int w, int h), {
@@ -332,12 +465,16 @@ static uint8_t* gl_verts;
 static uint8_t* gl_rgba;
 static uint32_t gl_rgba_size;
 
+static int gl_gpu_vertices;
+
 static void gl_start(uint32_t backbuffer) {
     gl_backbuffer = backbuffer;
-    gl_on = js_gl_init((int)SW(backbuffer), (int)SH(backbuffer));
+    int r = js_gl_init((int)SW(backbuffer), (int)SH(backbuffer));
+    gl_on = r != 0;
+    gl_gpu_vertices = r == 2;
     if (gl_on) {
         gl_verts = malloc(FRAME_VERTS * 40);
-        port_log("render: WebGL2");
+        port_log("render: WebGL2, vertices on the %s", gl_gpu_vertices ? "GPU" : "CPU");
     }
 }
 
@@ -364,28 +501,35 @@ static uint32_t gl_texture(uint32_t tex) {
    identical state share one command. Anything that must see the drawing so far (a texture upload, a clear, a
    readback, present) runs the list first. */
 #define MAX_CMDS 8192
-typedef struct { int32_t prim, first, count, st[41]; } GlCmd;
+/* g: a draw straight from a vertex buffer (gl_buffer_draw), all zero for one from the recorded vertices. */
+typedef struct { int32_t prim, first, count, st[41], g[16]; } GlCmd;
 static GlCmd gl_cmds[MAX_CMDS];
 static uint32_t gl_ncmds, gl_nverts;
+/* Vertex-shader constants of buffer draws, GL_CONSTS vec4s per block; a draw whose constants match the previous
+   block's reuses it. */
+#define GL_CONSTS 75
+static float gl_consts[MAX_CMDS][GL_CONSTS * 4];
+static uint32_t gl_nconsts;
 
 static void gl_flush(void) {
     if (!gl_ncmds) return;
     double t = prof_mark();
-    js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds);
+    js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds, gl_consts[0]);
     prof_submit += prof_mark() - t;
-    gl_ncmds = gl_nverts = 0;
+    gl_ncmds = gl_nverts = gl_nconsts = 0;
 }
 
 /* The command a draw appends to: the current one when it is a triangle list with the same state, else a new one. */
 static GlCmd* gl_command(int32_t prim, const int32_t* st, uint32_t verts) {
     if (gl_nverts + verts > FRAME_VERTS || gl_ncmds == MAX_CMDS) gl_flush();
     GlCmd* last = gl_ncmds ? &gl_cmds[gl_ncmds - 1] : 0;
-    if (last && prim == 4 && last->prim == 4 && !memcmp(last->st, st, sizeof last->st)) return last;
+    if (last && prim == 4 && last->prim == 4 && !last->g[0] && !memcmp(last->st, st, sizeof last->st)) return last;
     GlCmd* c = &gl_cmds[gl_ncmds++];
     c->prim = prim;
     c->first = (int32_t)gl_nverts;
     c->count = 0;
     memcpy(c->st, st, sizeof c->st);
+    memset(c->g, 0, sizeof c->g);
     return c;
 }
 
@@ -480,6 +624,93 @@ static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
     }
 }
 
+/* A vertex or index buffer's copy on the GPU, uploaded again after a Lock that could write it: +56 is 2 while current. */
+static void gl_buffer(uint32_t b, int index) {
+    if (M32(b + 56) == 2) return;
+    gl_flush();
+    double t0 = prof_mark();
+    js_gl_buffer(b, index, GPTR(M32(b + 28)), (int)M32(b + 36));
+    M32(b + 56) = 2;
+    prof_upload += prof_mark() - t0;
+}
+
+static void put_mat(float* c, const Mat* m) { memcpy(c, m->m, sizeof m->m); }
+static void put_color(float* c, uint32_t argb) {
+    c[0] = ((argb >> 16) & 255) / 255.0f; c[1] = ((argb >> 8) & 255) / 255.0f; c[2] = (argb & 255) / 255.0f; c[3] = (argb >> 24) / 255.0f;
+}
+
+/* Draws from the bound vertex (and index) buffer with the transform, lighting, fog and texture coordinates done by
+   the vertex shader, so static geometry is uploaded once instead of transformed on the CPU every frame. Returns 0 for
+   a draw this path does not cover, which then goes through fetch(). */
+static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t base_vertex, int indexed) {
+    if (!gl_gpu_vertices || R.target != gl_backbuffer || dump_state == 2 || LY.pos != 2 || prim < 1 || prim > 6) return 0;
+    uint32_t vb = R.vb, ib = indexed ? R.ib : 0, stride = R.vb_stride;
+    if (M32(vb + 64) || (M32(vb + 48) & 0x200) || stride & 3) return 0;   /* locked, D3DUSAGE_DYNAMIC, unaligned */
+    if (ib && (M32(ib + 64) || (M32(ib + 48) & 0x200))) return 0;
+    int64_t vbase = (int64_t)R.vb_offset + (int64_t)base_vertex * stride;
+    if (vbase < 0 || (vbase & 3)) return 0;
+    if (LY.fog_mode > 3) return 0;
+    int idx32 = ib && M32(ib + 20) == 102;
+    int32_t key = LY.lit | LY.fog_mode << 1;
+    int32_t at[2] = {-1, -1}, tn[2] = {0, 0};
+    for (int st = 0; st < STAGES; st++) {
+        if (LY.stage_gen[st] > 2) return 0;
+        uint32_t ttff = LY.ttff[st], count = ttff & 7, set = (uint32_t)LY.stage_set[st];
+        if (count > 4) return 0;
+        key |= LY.stage_gen[st] << (3 + 2 * st) | (int32_t)(count | (ttff & 256 ? 8 : 0)) << (7 + 4 * st);
+        if (!LY.stage_gen[st] && LY.tex_n[set]) { at[st] = (int32_t)LY.tex_at[set]; tn[st] = (int32_t)LY.tex_n[set]; }
+        key |= tn[st] << (25 + 3 * st);
+    }
+    int colorvertex = R.rs[141] && LY.has_diffuse;
+    int nlights = 0;
+    for (int i = 0; i < 8; i++) nlights += LY.lit && R.light_on[i];
+    key |= LY.has_diffuse << 15 | ((R.fvf & 0x10) != 0) << 16 | (colorvertex && R.rs[145] == 1) << 17 |
+           (colorvertex && R.rs[147] == 1) << 18 | (colorvertex && R.rs[148] == 1) << 19 | nlights << 20;
+
+    gl_buffer(vb, 0);
+    if (ib) gl_buffer(ib, 1);
+    int32_t st[41];
+    gl_state(st);
+    if (gl_ncmds == MAX_CMDS) gl_flush();
+
+    float* c = gl_consts[gl_nconsts];
+    memset(c, 0, sizeof gl_consts[0]);
+    put_mat(c, &wvp); put_mat(c + 16, &wv); put_mat(c + 32, &R.world); put_mat(c + 48, &R.tex[0]); put_mat(c + 64, &R.tex[1]);
+    c[80] = LY.vx; c[81] = LY.vy; c[82] = LY.vw; c[83] = LY.vh;
+    c[84] = (float)SW(R.target); c[85] = (float)SH(R.target);
+    c[88] = LY.fog_start; c[89] = LY.fog_end; c[90] = LY.fog_density;
+    memcpy(c + 92, R.material + 0, 16); memcpy(c + 96, R.material + 4, 16); memcpy(c + 100, R.material + 12, 16);
+    put_color(c + 104, R.rs[139]);
+    for (int i = 0, k = 0; i < 8 && LY.lit; i++) {
+        if (!R.light_on[i]) continue;
+        const float* L = R.light[i];
+        float* d = c + 108 + 24 * k++;
+        d[0] = L[0]; d[1] = L[19];
+        memcpy(d + 4, L + 1, 12); memcpy(d + 8, L + 9, 12); memcpy(d + 12, L + 13, 12); memcpy(d + 16, L + 16, 12);
+        memcpy(d + 20, L + 21, 12);
+    }
+    uint32_t block = gl_nconsts;
+    if (block && !memcmp(c, gl_consts[block - 1], sizeof gl_consts[0])) block--;
+    else gl_nconsts++;
+
+    GlCmd* cmd = &gl_cmds[gl_ncmds++];
+    static const int32_t gl_prim[7] = {0, 0, 1, 3, 4, 5, 6};   /* POINTS LINES LINE_STRIP TRIANGLES _STRIP _FAN */
+    cmd->prim = gl_prim[prim];
+    cmd->first = (int32_t)first;
+    cmd->count = (int32_t)n;
+    memcpy(cmd->st, st, sizeof cmd->st);
+    int32_t* g = cmd->g;
+    g[0] = 1; g[1] = (int32_t)vb; g[2] = (int32_t)ib; g[3] = idx32; g[4] = (int32_t)vbase; g[5] = (int32_t)stride;
+    g[6] = R.fvf & 0x10 ? (int32_t)LY.normal_at : -1;
+    g[7] = LY.has_diffuse ? (int32_t)LY.diffuse_at : -1;
+    g[8] = at[0]; g[9] = tn[0]; g[10] = at[1]; g[11] = tn[1];
+    g[12] = (int32_t)(first * (idx32 ? 4u : 2u));
+    g[13] = (int32_t)block; g[14] = key; g[15] = 27 + 6 * nlights;
+    S.draws++;
+    prof_fetch += prof_mark() - fetch_t0;
+    return 1;
+}
+
 static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h) {
     gl_flush();
     js_gl_clear(flags, color, z, x, y, w, h);
@@ -532,6 +763,10 @@ void r_write_back(uint32_t surface) { (void)surface; }
 int r_on_gpu(uint32_t surface) { (void)surface; return 0; }
 void r_fill(uint32_t color, int x, int y, int w, int h) { (void)color; (void)x; (void)y; (void)w; (void)h; }
 static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) { (void)prim; (void)v; (void)n; }
+static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t base_vertex, int indexed) {
+    (void)prim; (void)n; (void)first; (void)base_vertex; (void)indexed;
+    return 0;
+}
 static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h) {
     (void)flags; (void)color; (void)z; (void)x; (void)y; (void)w; (void)h;
 }

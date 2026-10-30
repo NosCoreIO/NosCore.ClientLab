@@ -653,6 +653,7 @@ static void b_Lock(CPU* c) {
     if (!out || off > M32(THIS + 36) || (size && off + size > M32(THIS + 36))) { RET(D3DERR_INVALIDCALL); return; }
     M32(out) = M32(THIS + 28) + off;
     M32(THIS + 64)++;   /* buffer locks nest */
+    if (!(ARG(4) & 0x10)) M32(THIS + 56) = 1;   /* not D3DLOCK_READONLY: the GPU copy is stale */
     RET(0);
 }
 static void b_Unlock(CPU* c) {
