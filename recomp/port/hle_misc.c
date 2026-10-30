@@ -168,11 +168,12 @@ static void u_PtInRect(CPU* c) {
 static const uint16_t modes[][2] = {{640, 480},   {800, 600},   {1024, 768},  {1280, 720},  {1280, 1024},
                                     {1366, 768},  {1440, 900},  {1600, 900},  {1680, 1050}, {1920, 1080}};
 #define MODES (int)(sizeof modes / sizeof modes[0])
-#define DEFAULT_W 1920
-#define DEFAULT_H 1080
 #define DISPLAY_BPP 32
 #define DISPLAY_HZ 60
-uint32_t port_screen_w = DEFAULT_W, port_screen_h = DEFAULT_H;
+/* The desktop the client starts on. It goes full screen at the desktop size, so PORT_SCREEN=WxH (a listed mode) sets
+   the size it renders at; a software rasteriser draws a small screen several times faster. */
+static uint32_t default_w = 1920, default_h = 1080;
+uint32_t port_screen_w = 1920, port_screen_h = 1080;
 
 int port_display_mode(int k, uint32_t* w, uint32_t* h) {
     if (k < 0 || k >= MODES) return 0;
@@ -194,7 +195,7 @@ enum { CDS_TEST = 2, DISP_CHANGE_BADMODE = -2, WM_DISPLAYCHANGE = 0x7E };
 static void u_EnumDisplaySettingsA(CPU* c) {
     uint32_t dm = ARG(2), n = ARG(1), w, h;
     if (n == 0xFFFFFFFFu) { w = port_screen_w; h = port_screen_h; }
-    else if (n == 0xFFFFFFFEu) { w = DEFAULT_W; h = DEFAULT_H; }
+    else if (n == 0xFFFFFFFEu) { w = default_w; h = default_h; }
     else if (!port_display_mode((int)n, &w, &h)) { RET(0); return; }
     memset(GPTR(dm + 36), 0, 120);
     M16(dm + 36) = 156;
@@ -205,7 +206,7 @@ static void u_EnumDisplaySettingsA(CPU* c) {
 /* Only the listed modes at 32 bits and 60 Hz exist; a null mode returns to the default one. Top-level windows hear
    of the change through WM_DISPLAYCHANGE, as on Windows. */
 static void u_ChangeDisplaySettingsA(CPU* c) {
-    uint32_t dm = ARG(0), w = DEFAULT_W, h = DEFAULT_H;
+    uint32_t dm = ARG(0), w = default_w, h = default_h;
     if (dm) {
         uint32_t fields = M32(dm + 40);
         w = fields & DM_PELSWIDTH ? M32(dm + 108) : port_screen_w;
@@ -708,4 +709,12 @@ static const Hle misc[] = {
     {"wsock32.dll", "closesocket", 1, ws_closesocket},
 };
 
-void hle_misc_register(void) { hle_register(misc, sizeof misc / sizeof misc[0]); }
+void hle_misc_register(void) {
+    const char* screen = getenv("PORT_SCREEN");
+    uint32_t w, h;
+    if (screen && sscanf(screen, "%ux%u", &w, &h) == 2 && mode_listed(w, h)) {
+        default_w = port_screen_w = w;
+        default_h = port_screen_h = h;
+    }
+    hle_register(misc, sizeof misc / sizeof misc[0]);
+}

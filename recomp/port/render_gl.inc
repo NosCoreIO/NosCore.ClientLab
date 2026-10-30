@@ -15,17 +15,21 @@ EM_JS(int, js_gl_init, (int w, int h), {
         'in vec4 aPos; in vec4 aCol; in vec4 aUV; in float aFog;\n' +
         'out vec4 vCol; out vec4 vUV; out float vFog;\n' +
         'void main() { gl_Position = aPos; gl_PointSize = 1.0; vCol = aCol.bgra; vUV = aUV; vFog = aFog; }\n';
-    const fs = '#version 300 es\n' +
+    // The texture stage, alpha test and fog setup are constants of each program, one program per distinct setup:
+    // a software rasteriser runs every branch of a shader that reads them from uniforms, several times slower.
+    const fsHead = (k) => '#version 300 es\n' +
         'precision highp float; precision highp int;\n' +
         'in vec4 vCol; in vec4 vUV; in float vFog;\n' +
         'uniform sampler2D uTex0, uTex1;\n' +
-        'uniform ivec4 uS0, uS1;\n' +
-        'uniform ivec4 uA0, uA1;\n' +
+        'const ivec4 uS0 = ivec4(' + k.slice(0, 4) + '), uS1 = ivec4(' + k.slice(6, 10) + ');\n' +
+        'const ivec4 uA0 = ivec4(' + [k[4], k[5], k[12], 0] + '), uA1 = ivec4(' + [k[10], k[11], k[13], 0] + ');\n' +
+        'const ivec2 uATest = ivec2(' + k.slice(14, 16) + ');\n' +
+        'const bool uFogOn = ' + (k[16] ? 'true' : 'false') + ';\n' +
         'uniform vec4 uTFactor;\n' +
-        'uniform ivec2 uATest;\n' +
         'uniform float uARef;\n' +
-        'uniform vec4 uFog;\n' +
-        'out vec4 outColor;\n' +
+        'uniform vec3 uFog;\n' +
+        'out vec4 outColor;\n';
+    const fsBody =
         'vec4 arg(int a, vec4 tex, vec4 diff, vec4 cur) {\n' +
         '  int s = a & 15; vec4 v = s == 0 ? diff : s == 1 ? cur : s == 2 ? tex : s == 3 ? uTFactor : vec4(1.0);\n' +
         '  if ((a & 16) != 0) v = 1.0 - v;\n' +
@@ -66,7 +70,7 @@ EM_JS(int, js_gl_init, (int w, int h), {
         '                f == 5 ? a > uARef : f == 6 ? a != uARef : f == 7 ? a >= uARef : true;\n' +
         '    if (!pass) discard;\n' +
         '  }\n' +
-        '  if (uFog.a > 0.5) cur.rgb = mix(uFog.rgb, cur.rgb, clamp(vFog, 0.0, 1.0));\n' +
+        '  if (uFogOn) cur.rgb = mix(uFog, cur.rgb, clamp(vFog, 0.0, 1.0));\n' +
         '  outColor = cur;\n' +
         '}\n';
     const sh = (type, src) => {
@@ -76,20 +80,30 @@ EM_JS(int, js_gl_init, (int w, int h), {
         if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
         return s;
     };
-    const prog = gl.createProgram();
-    gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
-    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
-    gl.bindAttribLocation(prog, 0, 'aPos');
-    gl.bindAttribLocation(prog, 1, 'aCol');
-    gl.bindAttribLocation(prog, 2, 'aUV');
-    gl.bindAttribLocation(prog, 3, 'aFog');
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
-    gl.useProgram(prog);
-    const u = {};
-    for (const n of ['uTex0', 'uTex1', 'uS0', 'uS1', 'uA0', 'uA1', 'uTFactor', 'uATest', 'uARef', 'uFog']) u[n] = gl.getUniformLocation(prog, n);
-    gl.uniform1i(u.uTex0, 0);
-    gl.uniform1i(u.uTex1, 1);
+    const vsShader = sh(gl.VERTEX_SHADER, vs);
+    const programs = new Map();
+    const program = (k) => {
+        const key = k.join(',');
+        let p = programs.get(key);
+        if (p) return p;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vsShader);
+        gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fsHead(k) + fsBody));
+        gl.bindAttribLocation(prog, 0, 'aPos');
+        gl.bindAttribLocation(prog, 1, 'aCol');
+        gl.bindAttribLocation(prog, 2, 'aUV');
+        gl.bindAttribLocation(prog, 3, 'aFog');
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+        gl.useProgram(prog);
+        p = { prog, u: {}, tex0: k[12] === 1, tex1: k[13] === 1 };
+        for (const n of ['uTex0', 'uTex1', 'uTFactor', 'uARef', 'uFog']) p.u[n] = gl.getUniformLocation(prog, n);
+        gl.uniform1i(p.u.uTex0, 0);
+        gl.uniform1i(p.u.uTex1, 1);
+        programs.set(key, p);
+        if (G.cur) gl.useProgram(G.cur.prog);
+        return p;
+    };
     const vbo = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 40, 0);
@@ -98,7 +112,7 @@ EM_JS(int, js_gl_init, (int w, int h), {
     gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 40, 36);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.enable(gl.SCISSOR_TEST);
-    self.__gl = { canvas, gl, u, textures: new Map(), w, h, last: 0 };
+    const G = self.__gl = { canvas, gl, program, cur: null, textures: new Map(), w, h, last: 0 };
     return 1;
 });
 
@@ -133,7 +147,7 @@ EM_JS(void, js_gl_texture_lod, (uint32_t id, int lod), {
 /* Runs one recorded command list: the vertices of all its draws are uploaded at once, then each command (GL
    primitive, first vertex, count, then 40 state words) sets what changed and draws. */
 EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, int ncmds), {
-    const G = self.__gl, gl = G.gl, u = G.u;
+    const G = self.__gl, gl = G.gl;
     const P = G.prev || (G.prev = new Int32Array(41).fill(-1));
     G.drawn = true;
     // One large buffer takes every list; when it fills up it is orphaned, so the GPU never waits on a range still
@@ -158,14 +172,25 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
         const cmd = (cmds >> 2) + 44 * k;
         base = cmd + 3;
         // Groups are tested one by one (no short-circuit) so the cache stays in step with GL.
-        const s0 = changed(0, 6), t0 = P[12] !== S(12), s1 = changed(6, 12), t1 = P[13] !== S(13);
-        if (s0 || t0) { gl.uniform4i(u.uS0, S(0), S(1), S(2), S(3)); gl.uniform4i(u.uA0, S(4), S(5), S(12) ? 1 : 0, 0); }
-        if (s1 || t1) { gl.uniform4i(u.uS1, S(6), S(7), S(8), S(9)); gl.uniform4i(u.uA1, S(10), S(11), S(13) ? 1 : 0, 0); }
-        if (changed(14, 15)) {
+        const s0 = changed(0, 6), s1 = changed(6, 12), at = changed(15, 17), fogOn = changed(39, 40);
+        let switched = false;
+        if (s0 || s1 || at || fogOn || !G.cur || (S(12) !== 0) !== G.cur.tex0 || (S(13) !== 0) !== G.cur.tex1) {
+            const setup = [S(0), S(1), S(2), S(3), S(4), S(5), S(6), S(7), S(8), S(9), S(10), S(11),
+                           S(12) ? 1 : 0, S(13) ? 1 : 0, S(15), S(16), S(39) ? 1 : 0];
+            const p = G.program(setup);
+            if (p !== G.cur) {
+                gl.useProgram(p.prog);
+                G.cur = p;
+                switched = true;
+            }
+        }
+        const u = G.cur.u;
+        // A program keeps its own uniforms, so a switch sets them all again.
+        if (changed(14, 15) || switched) {
             const tf = S(14) >>> 0;
             gl.uniform4f(u.uTFactor, ((tf >>> 16) & 255) / 255, ((tf >>> 8) & 255) / 255, (tf & 255) / 255, (tf >>> 24) / 255);
         }
-        if (changed(15, 18)) { gl.uniform2i(u.uATest, S(15), S(16)); gl.uniform1f(u.uARef, S(17) & 255); }
+        if (changed(17, 18) || switched) gl.uniform1f(u.uARef, S(17) & 255);
         for (let j = 0; j < 2; j++) {
             const b = 29 + 5 * j, texChanged = P[12 + j] !== S(12 + j), samplerChanged = changed(b, b + 5);
             P[12 + j] = S(12 + j);
@@ -194,9 +219,9 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
             } else gl.disable(gl.DEPTH_TEST);
         }
         if (changed(25, 29)) gl.scissor(S(25), G.h - S(26) - S(28), S(27), S(28));
-        if (changed(38, 40)) {
+        if (changed(38, 39) || switched) {
             const fc = S(38) >>> 0;
-            gl.uniform4f(u.uFog, ((fc >>> 16) & 255) / 255, ((fc >>> 8) & 255) / 255, (fc & 255) / 255, S(39) ? 1 : 0);
+            gl.uniform3f(u.uFog, ((fc >>> 16) & 255) / 255, ((fc >>> 8) & 255) / 255, (fc & 255) / 255);
         }
         // Screen-clockwise (y down) stays clockwise in clip space (y up): a GL back face.
         if (changed(40, 41)) {
