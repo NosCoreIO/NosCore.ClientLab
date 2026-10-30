@@ -1,5 +1,6 @@
 """Extract the receive-packet handler table (header -> handler address) from the decompiled registration function."""
 import argparse
+import os
 import re
 
 import pefile
@@ -18,7 +19,8 @@ def read_cstring(pe, va):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("exe")
-    p.add_argument("--dir", default=r"C:\tools\re\work\decomp")
+    work = os.environ.get("NOSRECOMP_WORK", r"C:\tools\re\work" if os.name == "nt" else os.path.expanduser("~/re/work"))
+    p.add_argument("--dir", default=os.path.join(work, "decomp"))
     p.add_argument("--registrar", default="FUN_0055a628")
     a = p.parse_args()
 

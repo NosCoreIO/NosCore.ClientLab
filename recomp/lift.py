@@ -880,6 +880,9 @@ SANE = {"mov", "push", "pop", "add", "sub", "and", "or", "xor", "cmp", "test", "
         "fwait", "wait", "sete", "setne"} | set(JCC)
 
 
+PROLOGUE_REGS = {"ebp", "ebx", "esi", "edi"}
+
+
 def reloc_code_seeds(L, fns):
     """Relocated pointers into the code section that no function covers and that decode as plausible code
     (interface thunks, method pointers only referenced from data)."""
@@ -937,10 +940,24 @@ def reloc_code_seeds(L, fns):
     for t in sorted(L.reloc_targets):
         if t in stored or covered(t) or not entry_shape(t):
             continue
+        # An aligned pointer to a Delphi prologue is an entry however long the routine is before its ret.
+        head = L.disasm_range(t, t + 2)
+        if t % 4 == 0 and len(head) == 2 and head[0].mnemonic == "push" and head[0].op_str in PROLOGUE_REGS and (
+                head[1].mnemonic == "push" and head[1].op_str in PROLOGUE_REGS
+                or (head[1].mnemonic, head[1].op_str) == ("mov", "ebp, esp")
+                or head[1].mnemonic in ("add", "sub") and head[1].op_str.startswith("esp, ")):
+            out.append(t)
+            continue
         pos, ok = t, False
-        for _ in range(24):
+        for _ in range(256):
             dec = L.disasm_range(pos, pos + 1)
-            if not dec or dec[0].mnemonic not in SANE:
+            # 'add byte ptr [eax], al' is two zero bytes: the walk has run into data (a VMT or RTTI field).
+            if not dec or dec[0].mnemonic not in SANE or dec[0].bytes[:2] == b"\0\0":
+                break
+            # An aligned 'push ebp; mov ebp, esp' ahead is the next routine: the walk started in a string literal or
+            # other data Delphi places before a routine.
+            if any(a != t and a % 4 == 0 and L.code[a - L.code_lo: a - L.code_lo + 3] == b"\x55\x8b\xec"
+                   for a in range(pos, pos + dec[0].size)):
                 break
             if dec[0].mnemonic in ("jmp", "ret"):
                 ok = True
@@ -950,6 +967,29 @@ def reloc_code_seeds(L, fns):
             out.append(t)
     print(f"{len(out)} relocation targets look like uncovered code")
     return out
+
+
+def init_table_seeds(L):
+    """Unit initialization and finalization routines, listed in the PackageInfo the entry point hands to @InitExe
+    ('mov eax, PackageInfo; call @InitExe'). They are only reached through that table, and a long one never reaches
+    the ret that reloc_code_seeds' sanity walk looks for."""
+    entry = L.base + L.pe.OPTIONAL_HEADER.AddressOfEntryPoint
+    dec = L.disasm_range(entry, entry + 128)
+    for a, b in zip(dec, dec[1:]):
+        if b.mnemonic != "call":
+            continue
+        if a.mnemonic == "mov" and a.op_str.startswith("eax, 0x") and a.operands[1].type == X.X86_OP_IMM:
+            info = a.operands[1].imm & 0xFFFFFFFF
+            count, table = (struct.unpack("<I", L.pe.get_data(info - L.base + k, 4))[0] for k in (0, 4))
+            out = set()
+            for k in range(min(count, 65536) * 2):
+                v = struct.unpack("<I", L.pe.get_data(table - L.base + 4 * k, 4))[0]
+                if L.code_lo <= v < L.code_hi:
+                    out.add(v)
+            print(f"{len(out)} unit init/finalization routines in the init table")
+            return sorted(out)
+        break
+    return []
 
 
 def call_targets(L, fns):
@@ -1140,6 +1180,7 @@ def main():
         if rs and L.code_lo <= e < L.code_hi:
             fns.append((e, name, rs))
     fns = extend_functions(L, fns)
+    fns.extend(discover(L, fns, init_table_seeds(L)))
     fns.extend(discover(L, fns, reloc_code_seeds(L, fns)))
     if a.seeds and os.path.exists(a.seeds):
         fns.extend(discover(L, fns, [int(x.split()[0], 16) for x in open(a.seeds) if x.strip() and not x.startswith("#")]))

@@ -257,7 +257,8 @@ def make_handler(game, build, relay, auth):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--game", required=True)
-    ap.add_argument("--build", default=r"C:\tools\re\work\wasm\web")
+    work = os.environ.get("NOSRECOMP_WORK", r"C:\tools\re\work" if os.name == "nt" else os.path.expanduser("~/re/work"))
+    ap.add_argument("--build", default=os.path.join(work, "wasm", "web"))
     ap.add_argument("--port", type=int, default=8077)
     ap.add_argument("--auth-url", default="https://127.0.0.1:7001")
     ap.add_argument("--user", help="local NosCore account used to mint _NC_AUTH_CODE (dev only)")

@@ -67,6 +67,24 @@ python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user <accou
 `serve.py` mints the launcher's auth code from the NosCore WebApi for that account, or you can pass one with
 `?auth=<code>`.
 
+### Linux
+
+The same pipeline runs on Linux (Python 3 with `capstone` and `pefile`, Emscripten's `emcc` on `PATH`, Ghidra 12 with
+its JDK, Node with Playwright). Generated code and builds go to `$NOSRECOMP_WORK` (default `~/re/work`).
+
+```bash
+GHIDRA_HOME=/opt/ghidra tools/decompile.sh ~/Nostale/NosCore.exe        # Ghidra only: IDR needs Windows
+W=${NOSRECOMP_WORK:-~/re/work}
+python3 recomp/lift.py $W/input/NosCore.exe $W/functions.txt $W/recomp/gen --seeds $W/recomp/seeds.txt
+python3 recomp/wasm/compile_all.py --web
+python3 recomp/web/serve.py --game ~/Nostale --user <account> --password <password>
+python3 recomp/web/iterate.py      # seeds each function the client stops on, re-lifts and rebuilds
+```
+
+Without IDR's seeds the function list is shorter; the lifter takes unit initialization and finalization routines
+from the client's init table, and `iterate.py` is the browser counterpart of `iterate.ps1` for whatever is still
+only reached indirectly.
+
 ### Scripted runs
 
 `node recomp/web/drive.mjs [--maps 2,20,145] [--trace] [--dump-frame]` (Playwright with the installed Chrome) logs in,
