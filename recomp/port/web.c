@@ -46,7 +46,7 @@ EM_ASYNC_JS(void, js_frame_wait, (int uncapped), {
     const now = performance.now(), F = self.__frames || (self.__frames = { n: 0, since: now });
     F.n++;
     if (now - F.since >= 1000) {
-        postMessage({ type: 'shown', frames: F.n, w: self.pageCanvas.width, h: self.pageCanvas.height });
+        postMessage({ type: 'shown', frames: F.n, w: self.pageCanvas.width, h: self.pageCanvas.height, uncapped });
         F.n = 0; F.since = now;
     }
 });
