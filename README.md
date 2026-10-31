@@ -10,13 +10,15 @@ server streams your game files to your own browser only.
 
 ## What works
 
-Against a local NosCore stack, in Chromium:
+Against a local NosCore stack, in Chromium (Chrome or Edge 137 or later): the browser build needs WebAssembly
+JavaScript Promise Integration (`-sJSPI` in `recomp/wasm/compile_all.py`), which is how the game yields to the browser
+once per frame. Browsers without it, such as Safari 26 and earlier, cannot start it.
 
 - login, server and channel selection, character selection, entering the world;
 - walking, chat, the game windows (inventory, skills, ...), GM teleports between maps;
 - Direct3D 9 rendering on WebGL2 (fixed-function texture stages, lighting, fog, texture-coordinate generation),
   GDI text through the browser's font engine, Miles audio through WebAudio;
-- about 50-60 frames per second in town.
+- about 60 frames per second in town at 1080p on an integrated GPU.
 
 Every one of the client's 19,436 functions is recompiled (90.4% of the code section's bytes; the rest is data the
 compiler keeps there: VMTs, RTTI, jump tables, strings). What is still open is listed in
@@ -38,7 +40,7 @@ NosCore.exe ──IDR + Ghidra──▶ function list + names (symbols/<md5>/)
   semantics.
 - **Portable host** (`recomp/port`): the Windows the client expects, implemented on browser primitives: WebGL2 for
   Direct3D 9, OffscreenCanvas for GDI text, WebAudio for Miles, SharedArrayBuffer rings for input and sockets (the
-  game loop never yields to the browser).
+  game loop yields to the browser only at Present, once per frame, when it draws straight into the page's canvas).
 - **Native host** (`recomp/runtime`, MSVC): the same generated C as a Windows executable, useful for debugging.
 
 The full story, every gotcha found so far, and how to continue are in [docs/STATUS.md](docs/STATUS.md).

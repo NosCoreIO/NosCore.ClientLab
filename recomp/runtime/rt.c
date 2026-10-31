@@ -246,9 +246,6 @@ static void cmp_flags(CPU* c, uint32_t a, uint32_t b, uint32_t bits) {
     c->of = (((a ^ b) & (a ^ r)) & msb) != 0; c->pf = PARITY((uint8_t)r);
 }
 
-void rt_str_movsb(CPU* c) { M8(c->edi) = M8(c->esi); c->esi += STEP(1); c->edi += STEP(1); }
-void rt_str_movsw(CPU* c) { M16(c->edi) = M16(c->esi); c->esi += STEP(2); c->edi += STEP(2); }
-void rt_str_movsd(CPU* c) { M32(c->edi) = M32(c->esi); c->esi += STEP(4); c->edi += STEP(4); }
 
 void rt_str_rep_movsb(CPU* c) {
     if (!c->df && c->ecx) { memmove((void*)(uintptr_t)c->edi, (void*)(uintptr_t)c->esi, c->ecx); c->esi += c->ecx; c->edi += c->ecx; c->ecx = 0; return; }
@@ -260,9 +257,6 @@ void rt_str_rep_movsd(CPU* c) {
     while (c->ecx) { rt_str_movsd(c); c->ecx--; }
 }
 
-void rt_str_stosb(CPU* c) { M8(c->edi) = R8L(0); c->edi += STEP(1); }
-void rt_str_stosw(CPU* c) { M16(c->edi) = R16(0); c->edi += STEP(2); }
-void rt_str_stosd(CPU* c) { M32(c->edi) = c->eax; c->edi += STEP(4); }
 void rt_str_rep_stosb(CPU* c) {
     if (!c->df && c->ecx) { memset((void*)(uintptr_t)c->edi, R8L(0), c->ecx); c->edi += c->ecx; c->ecx = 0; return; }
     while (c->ecx) { rt_str_stosb(c); c->ecx--; }
@@ -270,9 +264,6 @@ void rt_str_rep_stosb(CPU* c) {
 void rt_str_rep_stosw(CPU* c) { while (c->ecx) { rt_str_stosw(c); c->ecx--; } }
 void rt_str_rep_stosd(CPU* c) { while (c->ecx) { rt_str_stosd(c); c->ecx--; } }
 
-void rt_str_lodsb(CPU* c) { R8L(0) = M8(c->esi); c->esi += STEP(1); }
-void rt_str_lodsw(CPU* c) { R16(0) = M16(c->esi); c->esi += STEP(2); }
-void rt_str_lodsd(CPU* c) { c->eax = M32(c->esi); c->esi += STEP(4); }
 
 void rt_str_scasb(CPU* c) { cmp_flags(c, R8L(0), M8(c->edi), 8); c->edi += STEP(1); }
 void rt_str_cmpsb(CPU* c) { cmp_flags(c, M8(c->esi), M8(c->edi), 8); c->esi += STEP(1); c->edi += STEP(1); }

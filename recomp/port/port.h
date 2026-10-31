@@ -125,3 +125,4 @@ void hle_d3d9_register(void);
 void hle_cursor_override(const uint8_t* rgba, int w, int h, int hx, int hy);
 void hle_cursor_restore(void);
 void web_present(uint32_t surface);
+void web_frame_wait(void);

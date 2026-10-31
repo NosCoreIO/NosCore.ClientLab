@@ -382,7 +382,10 @@ static void present_frame(void) {
     }
     r_prof_frame();
     if (++frames % 300 == 1) port_log("Present frame %u", frames);
-    if (!r_gl_present()) web_present(backbuffer);
+    if (!r_gl_present()) {
+        web_present(backbuffer);
+        web_frame_wait();
+    }
     if (shot_dir && (frames == 1 || frames % 600 == 0)) {
         char path[400];
         snprintf(path, sizeof path, "%s/frame_%06u.bmp", shot_dir, frames);
@@ -653,6 +656,7 @@ static void b_Lock(CPU* c) {
     if (!out || off > M32(THIS + 36) || (size && off + size > M32(THIS + 36))) { RET(D3DERR_INVALIDCALL); return; }
     M32(out) = M32(THIS + 28) + off;
     M32(THIS + 64)++;   /* buffer locks nest */
+    if (!(ARG(4) & 0x10)) M32(THIS + 56) = 1;   /* not D3DLOCK_READONLY: the GPU copy is stale */
     RET(0);
 }
 static void b_Unlock(CPU* c) {

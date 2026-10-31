@@ -11,9 +11,11 @@ $obj = Join-Path $Out 'obj'
 New-Item -ItemType Directory -Force $obj | Out-Null
 $vcvars = 'C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars32.bat'
 
+# Generated code inlines helpers from the runtime header, so a newer header makes every object stale.
+$header = (Get-Item (Join-Path $runtime 'rt.h')).LastWriteTime
 $stale = Get-ChildItem $Gen -Filter *.c | Where-Object {
     $o = Join-Path $obj ($_.BaseName + '.obj')
-    $Full -or -not (Test-Path $o) -or (Get-Item $o).LastWriteTime -lt $_.LastWriteTime
+    $Full -or -not (Test-Path $o) -or (Get-Item $o).LastWriteTime -lt $_.LastWriteTime -or (Get-Item $o).LastWriteTime -lt $header
 }
 $list = Join-Path $Out 'stale.rsp'
 $stale | ForEach-Object { '"' + $_.FullName + '"' } | Set-Content -Encoding ascii $list

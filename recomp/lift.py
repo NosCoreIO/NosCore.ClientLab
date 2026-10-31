@@ -881,6 +881,7 @@ SANE = {"mov", "push", "pop", "add", "sub", "and", "or", "xor", "cmp", "test", "
 
 
 PROLOGUE_REGS = {"ebp", "ebx", "esi", "edi"}
+SELF_SAVES = {f"{d}, {r}" for d in ("ebx", "esi", "edi") for r in ("eax", "edx", "ecx")}
 
 
 def reloc_code_seeds(L, fns):
@@ -940,11 +941,13 @@ def reloc_code_seeds(L, fns):
     for t in sorted(L.reloc_targets):
         if t in stored or covered(t) or not entry_shape(t):
             continue
-        # An aligned pointer to a Delphi prologue is an entry however long the routine is before its ret.
+        # An aligned pointer to a Delphi prologue is an entry however long the routine is before its ret. A method
+        # that keeps Self opens with 'push ebx; mov ebx, eax'.
         head = L.disasm_range(t, t + 2)
         if t % 4 == 0 and len(head) == 2 and head[0].mnemonic == "push" and head[0].op_str in PROLOGUE_REGS and (
                 head[1].mnemonic == "push" and head[1].op_str in PROLOGUE_REGS
                 or (head[1].mnemonic, head[1].op_str) == ("mov", "ebp, esp")
+                or head[1].mnemonic == "mov" and head[1].op_str in SELF_SAVES
                 or head[1].mnemonic in ("add", "sub") and head[1].op_str.startswith("esp, ")):
             out.append(t)
             continue
@@ -1093,6 +1096,20 @@ JUNK_OPS = {"in", "out", "insb", "insd", "outsb", "outsd", "hlt", "arpl", "das",
             "lds", "into", "sldt", "lcall", "ljmp", "retf", "iretd", "int1", "salc", "aam", "aad"}
 
 
+def skip_padding(L, start, end):
+    """Past the alignment filler after a function: single nop, int3 or zero bytes and whole 'mov eax, eax' (8B C0).
+    Skipping a lone 8B would start decoding inside the next function's first 'mov eax, [eax + n]'."""
+    while start < end:
+        b = L.code[start - L.code_lo]
+        if b in (0x00, 0x90, 0xCC):
+            start += 1
+        elif b == 0x8B and start + 1 < end and L.code[start + 1 - L.code_lo] == 0xC0:
+            start += 2
+        else:
+            break
+    return start
+
+
 def absorb_gaps(L, fns):
     """Unowned runs between functions that decode as clean code (no junk opcodes, ending in ret or jmp) are code
     only reached in ways static analysis misses. Each joins the function before it, with a label at its start."""
@@ -1102,8 +1119,7 @@ def absorb_gaps(L, fns):
     added = []
     for (lo1, hi1, k1), (lo2, _, _) in zip(spans, spans[1:]):
         start, end = hi1, lo2
-        while start < end and L.code[start - L.code_lo] in (0x00, 0x90, 0xCC, 0x8B, 0xC0):
-            start += 1
+        start = skip_padding(L, start, end)
         if end - start < 4:
             continue
         if sum(1 for a in range(start, end - 3) if a in L.reloc_slots) * 4 >= (end - start) // 2:

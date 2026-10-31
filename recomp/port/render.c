@@ -730,6 +730,7 @@ static void log_state_combo(void) {
 }
 
 static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n);
+static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t base_vertex, int indexed);
 
 /* Frame dump (F9 in the page): every draw of the next frame with its state, to debug a scene that renders wrong. */
 static int dump_state;   /* 1: armed, dump from the next Present; 2: dumping this frame */
@@ -787,7 +788,8 @@ static int reserve(Vtx** buf, uint32_t* cap, uint32_t n) {
 static void draw_impl_draw(uint32_t prim, uint32_t start, uint32_t count) {
     layout_begin();
     uint32_t n = vertex_count(prim, count);
-    if (!R.vb || !n || !R.vb_stride || !reserve(&vbuf, &vbuf_cap, n)) return;
+    if (!R.vb || !n || !R.vb_stride) return;
+    if (gl_buffer_draw(prim, n, start, 0, 0) || !reserve(&vbuf, &vbuf_cap, n)) return;
     uint32_t base = M32(R.vb + 28) + R.vb_offset;
     for (uint32_t k = 0; k < n; k++) fetch(base + (start + k) * R.vb_stride, &vbuf[k]);
     draw_list(prim, count, vbuf, n);
@@ -824,7 +826,8 @@ static void draw_indexed_cached(uint32_t prim, uint32_t count, uint32_t n, uint3
 static void draw_impl_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t start_index, uint32_t count) {
     layout_begin();
     uint32_t n = vertex_count(prim, count);
-    if (!R.vb || !R.ib || !n || !reserve(&vbuf, &vbuf_cap, n)) return;
+    if (!R.vb || !R.ib || !n) return;
+    if (gl_buffer_draw(prim, n, start_index, base_vertex, 1) || !reserve(&vbuf, &vbuf_cap, n)) return;
     int idx32 = M32(R.ib + 20) == 102;
     uint32_t ib = M32(R.ib + 28) + start_index * (idx32 ? 4 : 2);
     draw_indexed_cached(prim, count, n, M32(R.vb + 28) + R.vb_offset, R.vb_stride, ib, idx32, base_vertex);
