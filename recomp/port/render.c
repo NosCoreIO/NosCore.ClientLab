@@ -177,7 +177,8 @@ void r_set_render_target(uint32_t surface) {
 }
 void r_set_transform(uint32_t type, uint32_t addr) {
     Mat* m = type == 256 ? &R.world : type == 2 ? &R.view : type == 3 ? &R.proj : (type >= 16 && type < 24) ? &R.tex[type - 16] : 0;
-    if (m) memcpy(m->m, GPTR(addr), 64);
+    if (!m || !memcmp(m->m, GPTR(addr), 64)) return;
+    memcpy(m->m, GPTR(addr), 64);
     if (type == 256 || type == 2 || type == 3) wvp_dirty = 1;
 }
 void r_get_transform(uint32_t type, uint32_t addr) {
