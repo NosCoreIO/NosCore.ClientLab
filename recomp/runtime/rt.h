@@ -35,6 +35,13 @@ typedef void (*RtFn)(CPU*, uint32_t, uint32_t);
 #define RT_RESTRICT __restrict__
 #endif
 
+/* Small leaf functions are inlined into callers in the same file (the definition stays external for the table). */
+#ifdef __clang__
+#define RT_LEAF __attribute__((always_inline))
+#else
+#define RT_LEAF
+#endif
+
 #ifdef RT_PORTABLE
 /* No longjmp in the portable host: every frame between a Delphi except handler and its try block is ours, so a
    pending non-local jump just propagates outward by returning (see guest_call and rt_call_host_raw). */
@@ -156,13 +163,35 @@ uint32_t rt_shrd(CPU* c, uint32_t d, uint32_t s, uint32_t n);
 
 double rt_f80_load(uint32_t addr);
 void rt_f80_store(uint32_t addr, double v);
-int16_t rt_fist16(CPU* c, double v);
-int32_t rt_fist32(CPU* c, double v);
 int64_t rt_fist64(CPU* c, double v);
 double rt_frndint(CPU* c, double v);
 void rt_fbstp(CPU* c, uint32_t addr, double v);
-void rt_fcom(CPU* c, double a, double b);
-uint16_t rt_fsw(CPU* c);
+
+/* Compares, status-word reads and integer stores, inlined: Delphi's Round and Trunc and every float comparison use
+   them. */
+static inline double rt_fround(CPU* c, double v) {
+    switch ((c->fcw >> 10) & 3) {
+    case 0: return nearbyint(v);
+    case 1: return floor(v);
+    case 2: return ceil(v);
+    default: return trunc(v);
+    }
+}
+static inline int16_t rt_fist16(CPU* c, double v) {
+    double r = rt_fround(c, v);
+    return (r >= -32768.0 && r <= 32767.0) ? (int16_t)r : (int16_t)0x8000;
+}
+static inline int32_t rt_fist32(CPU* c, double v) {
+    double r = rt_fround(c, v);
+    return (r >= -2147483648.0 && r <= 2147483647.0) ? (int32_t)r : (int32_t)0x80000000;
+}
+static inline void rt_fcom(CPU* c, double a, double b) {
+    c->fsw &= ~0x4500u;
+    if (a != a || b != b) c->fsw |= 0x4500u;
+    else if (a < b) c->fsw |= 0x0100u;
+    else if (a == b) c->fsw |= 0x4000u;
+}
+static inline uint16_t rt_fsw(CPU* c) { return (uint16_t)((c->fsw & ~0x3800u) | ((c->ftop & 7) << 11)); }
 void rt_fninit(CPU* c);
 void rt_fxch(CPU* c, uint32_t k);
 void rt_fcopy(CPU* c, uint32_t dst, uint32_t src);

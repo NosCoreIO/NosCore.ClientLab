@@ -32,11 +32,17 @@ void web_present(uint32_t surface) {
 }
 
 /* With the page's canvas handed to the worker, what was drawn only reaches the screen when the worker yields, so
-   Present waits here for the next display frame; the page is told how many frames it showed each second. */
-EM_ASYNC_JS(void, js_frame_wait, (void), {
+   Present waits here for the next display frame; the page is told how many frames it showed each second.
+   PORT_UNCAPPED=1 yields without waiting for the display, to measure how fast the client could go. */
+EM_ASYNC_JS(void, js_frame_wait, (int uncapped), {
     if (!self.pageCanvas) return;
-    // A hidden tab stops animation frames; the timer keeps the game (and its connection) running meanwhile.
-    await new Promise((r) => { requestAnimationFrame(r); setTimeout(r, 100); });
+    if (uncapped) {
+        const ch = self.__yield || (self.__yield = new MessageChannel());
+        await new Promise((r) => { ch.port1.onmessage = r; ch.port2.postMessage(0); });
+    } else {
+        // A hidden tab stops animation frames; the timer keeps the game (and its connection) running meanwhile.
+        await new Promise((r) => { requestAnimationFrame(r); setTimeout(r, 100); });
+    }
     const now = performance.now(), F = self.__frames || (self.__frames = { n: 0, since: now });
     F.n++;
     if (now - F.since >= 1000) {
@@ -44,7 +50,11 @@ EM_ASYNC_JS(void, js_frame_wait, (void), {
         F.n = 0; F.since = now;
     }
 });
-void web_frame_wait(void) { js_frame_wait(); }
+void web_frame_wait(void) {
+    static int uncapped = -1;
+    if (uncapped < 0) uncapped = getenv("PORT_UNCAPPED") != 0;
+    js_frame_wait(uncapped);
+}
 #else
 void web_present(uint32_t surface) { (void)surface; }
 void web_frame_wait(void) {}
