@@ -37,7 +37,9 @@ NosCore.exe ──IDR + Ghidra──▶ function list + names (symbols/<md5>/)
 - **Lifter** (`recomp/lift.py`): recursive descent from the Ghidra function list, extended where Ghidra stops early
   (unresolved `case` dispatches, try/finally handlers, VMT-only methods). Direct calls become plain C calls; indirect
   ones go through a flat label table. A Unicorn-based differential tester (`recomp/difftest`) checks instruction
-  semantics.
+  semantics. A few hot client functions (the height ray and the path search) have hand-written versions in
+  `recomp/runtime/rt_game.c`, used only for the client build they were written against and checked against their lifted
+  bodies by `recomp/difftest/overrides.c`.
 - **Portable host** (`recomp/port`): the Windows the client expects, implemented on browser primitives: WebGL2 for
   Direct3D 9, OffscreenCanvas for GDI text, WebAudio for Miles, SharedArrayBuffer rings for input and sockets (the
   game loop yields to the browser only at Present, once per frame, when it draws straight into the page's canvas).
@@ -102,7 +104,7 @@ client log to `C:\tools\re\work\drive\`. It is the starting point for NosCore en
 | `recomp/port/` | portable Windows host (HLE of the client's DLLs) and the WebGL renderer |
 | `recomp/web/` | page, worker, dev server with socket relay, `drive.mjs` |
 | `recomp/wasm/` | Emscripten build scripts |
-| `recomp/difftest/` | differential tester against Unicorn |
+| `recomp/difftest/` | differential testers: lifted instructions against Unicorn, hand-written functions against their lifted bodies |
 | `tools/` | decompilation pipeline (IDR, Ghidra scripts, cross-reference queries) |
 | `symbols/<md5>/` | names, packet handler tables and recompilation seeds for one client build |
 | `docs/STATUS.md` | current state, lessons learned, how to continue |

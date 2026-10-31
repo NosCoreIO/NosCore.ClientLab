@@ -26,6 +26,8 @@ LINK = ["-O2", "-sGLOBAL_BASE=536870912", "-sINITIAL_MEMORY=1024MB", "-sALLOW_ME
 def compile_one(src):
     obj = os.path.join(OUT, "obj", os.path.basename(src)[:-2] + ".o")
     deps = [src, os.path.join(RT, "rt.h")] + ([] if src.startswith(GEN) else [os.path.join(PORT, "port.h")] + glob.glob(os.path.join(PORT, "*.inc")))
+    if os.path.basename(src) == "overrides.c":
+        deps.append(os.path.join(RT, "rt_game.c"))
     if os.path.exists(obj) and os.path.getmtime(obj) > max(os.path.getmtime(d) for d in deps):
         return src, 0, ""
     flags = FLAGS if src.startswith(GEN) else [f for f in FLAGS if f != "-w"] + ["-Wunused-function"]
