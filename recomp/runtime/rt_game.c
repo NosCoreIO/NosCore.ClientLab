@@ -173,11 +173,22 @@ static int height_node(CPU* RT_RESTRICT c, uint32_t node, uint32_t from, uint32_
     guest_call(c, f_0045ba60, 0x0045ba60u, 0x00489b58u, diff, dir_n, c->ecx);
     Vec3 orig = vload(from_t), dir = vload(dir_n);
     uint32_t verts = M32(model + 0x10) + 2, out = M32(frame + 8);
+    int vertical = dir.x == 0 && dir.z == 0;
     for (uint32_t g = 0; g < count; g++) {
         uint32_t idx = list_at(lists, (int16_t)M16(groups + 2 + 7 * g + 5));
         for (int32_t k = 0; k < (int32_t)M16(idx); k += 3) {
             uint32_t tri = idx + 2 + 2 * (uint32_t)k;
             float t;
+            /* The ray is straight up in practice, and then ray_triangle's u is the 2D cross product of the origin and
+               the second vertex around the first: the same value bit for bit (but the sign of a zero) whenever u is
+               not NaN, so rejecting here on u < 0 or NaN rejects exactly what it would. */
+            if (vertical) {
+                uint32_t p0 = verts + 12 * M16(tri), pa = verts + 12 * M16(tri + 4);
+                float sx = (float)((double)orig.x - MF32(p0)), sz = (float)((double)orig.z - MF32(p0 + 8));
+                float px = (float)((double)dir.y * (float)((double)MF32(pa + 8) - MF32(p0 + 8)));
+                float pz = (float)-((double)dir.y * (float)((double)MF32(pa) - MF32(p0)));
+                if (!((float)((double)sx * px + (double)sz * pz) >= 0.0)) continue;
+            }
             if (!ray_triangle(orig, dir, vload(verts + 12 * M16(tri)), vload(verts + 12 * M16(tri + 4)),
                               vload(verts + 12 * M16(tri + 2)), &t))
                 continue;

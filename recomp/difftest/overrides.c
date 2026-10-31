@@ -89,13 +89,13 @@ static long test_ray(int cases) {
 /* ---- height ray over a model's node tree ---- */
 
 static uint32_t height_root, height_from, height_to, height_frame;
-static int index_lists;
+static int index_lists, upright, grid;
 
 static uint32_t make_node(int depth) {
     uint32_t node = alloc(0x40), move = alloc(12), turn = alloc(8);
-    for (int k = 0; k < 3; k++) MF32(move + 4 * k) = rnd(depth ? 4 : 0.5f);
+    for (int k = 0; k < 3; k++) MF32(move + 4 * k) = grid ? rand() % 3 - 1 : rnd(depth ? 4 : 0.5f);
     for (int k = 0; k < 4; k++) M16(turn + 2 * k) = (uint16_t)((rand() % 65536 - 32768) / (rand() % 4 + 1));
-    if (rand() % 3 == 0) { M16(turn) = 0; M16(turn + 2) = 0; M16(turn + 4) = 0; M16(turn + 6) = 32767; }
+    if (upright || rand() % 3 == 0) { M16(turn) = 0; M16(turn + 2) = 0; M16(turn + 4) = 0; M16(turn + 6) = 32767; }
     int groups = rand() % 4;
     uint32_t g = alloc(2 + 7 * groups);
     M16(g) = (uint16_t)groups;
@@ -121,9 +121,11 @@ static long test_height(int cases) {
         bump = HEAP + 0x1000;
         uint32_t model = alloc(0x40);
         int verts = 3 + rand() % 40;
+        grid = n % 8 >= 6;
+        upright = n % 4 >= 2;
         uint32_t vb = alloc(2 + 12 * verts);
         for (int k = 0; k < verts; k++)
-            for (int j = 0; j < 3; j++) MF32(vb + 2 + 12 * k + 4 * j) = rnd(j == 1 ? 1 : 6);
+            for (int j = 0; j < 3; j++) MF32(vb + 2 + 12 * k + 4 * j) = grid ? rand() % 5 - 2 : rnd(j == 1 ? 1 : 6);
         index_lists = 1 + rand() % 4;
         uint32_t lists = make_list(index_lists);
         for (int i = 0; i < index_lists; i++) {
@@ -143,6 +145,8 @@ static long test_height(int cases) {
         MF32(height_to) = MF32(height_from) + rnd(n % 2 ? 4 : 0.4f);
         MF32(height_to + 4) = MF32(height_from + 4) - 1 + (n % 2 ? rnd(4) : 0);
         MF32(height_to + 8) = MF32(height_from + 8) + rnd(0.4f);
+        if (grid) { MF32(height_from) = rand() % 5 - 2; MF32(height_from + 8) = rand() % 5 - 2; }
+        if (upright) { MF32(height_to) = MF32(height_from); MF32(height_to + 8) = MF32(height_from + 8); }
         M8(FDIV_CHECKED) = (n & 7) ? 1 : 0;
         bad += !same(height_setup, f_00489ad0, f_00489ad0_lifted, 0x00489ad0u, 0x00489ce3u, 0);
     }

@@ -197,8 +197,8 @@ EM_JS(int, js_gl_init, (int w, int h), {
     const G = self.__gl = { canvas, gl, program, STREAM, vbo, cur: null, textures: new Map(), buffers: [new Map(), new Map()],
                             vao: gl.createVertexArray(), consts: gl.createTexture(), kring: 0, w, h, last: 0,
                             direct: canvas === self.pageCanvas };
-    // Draw constants: 27 blocks of 75 texels per row, and room for two frames' worth so a run never rewrites rows the
-    // GPU may still be reading.
+    // Draw constants: rows of 2025 texels, and room for two frames' worth so a run never rewrites rows the GPU may
+    // still be reading.
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, G.consts);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 27 * 75, 608);
@@ -285,13 +285,13 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
     // names its block. A uniform buffer bound per draw cost the D3D11 backend a constant-buffer copy each time.
     let kbase = 0;
     if (nconsts) {
-        const rows = Math.ceil(nconsts / 27);
+        const W = 2025, rows = Math.ceil(nconsts / W);
         if (G.kring + rows > 608) G.kring = 0;
-        kbase = G.kring * 27;
+        kbase = G.kring;
         gl.activeTexture(gl.TEXTURE2);
-        const full = Math.floor(nconsts / 27), rest = nconsts - full * 27;
-        if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.kring, 27 * 75, full, gl.RGBA, gl.FLOAT, HEAPF32, consts >> 2);
-        if (rest) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.kring + full, rest * 75, 1, gl.RGBA, gl.FLOAT, HEAPF32, (consts >> 2) + full * 27 * 300);
+        const full = Math.floor(nconsts / W), rest = nconsts - full * W;
+        if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.kring, W, full, gl.RGBA, gl.FLOAT, HEAPF32, consts >> 2);
+        if (rest) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.kring + full, rest, 1, gl.RGBA, gl.FLOAT, HEAPF32, (consts >> 2) + full * W * 4);
         gl.activeTexture(gl.TEXTURE0);
         G.kring += rows;
     }
@@ -374,8 +374,8 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
         }
         const vb = G.buffers[0].get(HEAP32[g + 1] >>> 0), ib = HEAP32[g + 2] ? G.buffers[1].get(HEAP32[g + 2] >>> 0) : null;
         if (!vb || (HEAP32[g + 2] && !ib)) continue;
-        const block = kbase + HEAP32[g + 13];
-        if (G.cur.block !== block) { G.cur.block = block; gl.uniform2i(u.uB, (block % 27) * 75, Math.floor(block / 27)); }
+        const block = HEAP32[g + 13], row = kbase + Math.floor(block / 2025), col = block % 2025;
+        if (G.cur.block !== block || G.cur.row !== row) { G.cur.block = block; G.cur.row = row; gl.uniform2i(u.uB, col, row); }
         if (!G.vaoOn) { gl.bindVertexArray(G.vao); G.vaoOn = true; A.fill(-1); }
         let same = true;
         for (let i = 0; i < 11; i++) if (A[i] !== HEAP32[g + 1 + i]) { A[i] = HEAP32[g + 1 + i]; same = false; }
@@ -595,18 +595,20 @@ static uint32_t gl_texture(uint32_t tex) {
 typedef struct { int32_t prim, first, count, st[41], g[16]; } GlCmd;
 static GlCmd gl_cmds[MAX_CMDS];
 static uint32_t gl_ncmds, gl_nverts;
-/* Vertex-shader constants of buffer draws, GL_CONSTS vec4s per block; a draw whose constants match the previous
-   block's reuses it. */
-#define GL_CONSTS 75
-static float gl_consts[MAX_CMDS][GL_CONSTS * 4];
-static uint32_t gl_nconsts;
+/* Vertex-shader constants of buffer draws, packed as vec4s into rows of GL_KROW (the constant texture's width); a
+   block holds 27 vec4s plus 6 per light and never straddles a row. A draw whose constants match the previous block's
+   reuses it. */
+#define GL_KROW 2025
+#define GL_KROWS 300
+static float gl_consts[GL_KROWS * GL_KROW * 4];
+static uint32_t gl_nconsts, gl_klast, gl_klast_size;
 
 static void gl_flush(void) {
     if (!gl_ncmds) return;
     double t = prof_mark();
-    js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds, gl_consts[0], (int)gl_nconsts);
+    js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds, gl_consts, (int)gl_nconsts);
     prof_submit += prof_mark() - t;
-    gl_ncmds = gl_nverts = gl_nconsts = 0;
+    gl_ncmds = gl_nverts = gl_nconsts = gl_klast_size = 0;
 }
 
 /* The command a draw appends to: the current one when it is a triangle list with the same state, else a new one. */
@@ -642,7 +644,9 @@ static void log_stage_setup(void) {
     static int nseen;
     uint32_t key[10] = {R.tss[0][1], R.tss[0][2] << 8 | R.tss[0][3], R.tss[0][4], R.tss[0][11], R.tss[0][24],
                         R.tss[1][1], R.tss[1][2] << 8 | R.tss[1][3], R.tss[1][4], R.tss[1][11], R.tss[1][24]};
-    for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) return;
+    static int last;
+    if (nseen && !memcmp(seen[last], key, sizeof key)) return;
+    for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) { last = k; return; }
     if (nseen >= 48) return;
     memcpy(seen[nseen++], key, sizeof key);
     port_log("stage setup: s0 op %u args %04x aop %u tci %x ttff %x | s1 op %u args %04x aop %u tci %x ttff %x | fvf %x",
@@ -656,7 +660,9 @@ static void log_raster_setup(void) {
     uint32_t tex = R.tex_obj[0], s = tex && M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
     uint32_t key[6] = {R.rs[27] << 16 | R.rs[19] << 8 | R.rs[20], R.rs[15] << 16 | R.rs[25] << 8 | (R.rs[24] & 255),
                        R.rs[7] << 16 | R.rs[14] << 8 | R.rs[23], s ? SFMT(s) : 0, R.rs[28], R.rs[22]};
-    for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) return;
+    static int last;
+    if (nseen && !memcmp(seen[last], key, sizeof key)) return;
+    for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) { last = k; return; }
     if (nseen >= 64) return;
     memcpy(seen[nseen++], key, sizeof key);
     port_log("raster setup: blend %u %u->%u | alpha test %u func %u ref %u | z %u write %u func %u | tex fmt %u | fog %u cull %u",
@@ -761,10 +767,12 @@ static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t bas
     if (ib) gl_buffer(ib, 1);
     int32_t st[41];
     gl_state(st);
-    if (gl_ncmds == MAX_CMDS) gl_flush();
+    uint32_t size = 27 + 6 * (uint32_t)nlights, at4 = gl_nconsts;
+    if (at4 % GL_KROW + size > GL_KROW) at4 += GL_KROW - at4 % GL_KROW;
+    if (gl_ncmds == MAX_CMDS || at4 + size > GL_KROWS * GL_KROW) { gl_flush(); at4 = 0; }
 
-    float* c = gl_consts[gl_nconsts];
-    memset(c, 0, sizeof gl_consts[0]);
+    float* c = gl_consts + 4 * at4;
+    memset(c, 0, 16 * size);
     put_mat(c, &wvp); put_mat(c + 16, &wv); put_mat(c + 32, &R.world); put_mat(c + 48, &R.tex[0]); put_mat(c + 64, &R.tex[1]);
     c[80] = LY.vx; c[81] = LY.vy; c[82] = LY.vw; c[83] = LY.vh;
     c[84] = (float)SW(R.target); c[85] = (float)SH(R.target);
@@ -779,9 +787,9 @@ static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t bas
         memcpy(d + 4, L + 1, 12); memcpy(d + 8, L + 9, 12); memcpy(d + 12, L + 13, 12); memcpy(d + 16, L + 16, 12);
         memcpy(d + 20, L + 21, 12);
     }
-    uint32_t block = gl_nconsts;
-    if (block && !memcmp(c, gl_consts[block - 1], sizeof gl_consts[0])) block--;
-    else gl_nconsts++;
+    uint32_t block = at4;
+    if (gl_klast_size == size && !memcmp(c, gl_consts + 4 * gl_klast, 16 * size)) block = gl_klast;
+    else { gl_klast = at4; gl_klast_size = size; gl_nconsts = at4 + size; }
 
     GlCmd* cmd = &gl_cmds[gl_ncmds++];
     static const int32_t gl_prim[7] = {0, 0, 1, 3, 4, 5, 6};   /* POINTS LINES LINE_STRIP TRIANGLES _STRIP _FAN */
