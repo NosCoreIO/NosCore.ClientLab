@@ -35,7 +35,8 @@ void web_present(uint32_t surface) {
    Present waits here for the next display frame; the page is told how many frames it showed each second. */
 EM_ASYNC_JS(void, js_frame_wait, (void), {
     if (!self.pageCanvas) return;
-    await new Promise((r) => requestAnimationFrame(r));
+    // A hidden tab stops animation frames; the timer keeps the game (and its connection) running meanwhile.
+    await new Promise((r) => { requestAnimationFrame(r); setTimeout(r, 100); });
     const now = performance.now(), F = self.__frames || (self.__frames = { n: 0, since: now });
     F.n++;
     if (now - F.since >= 1000) {
