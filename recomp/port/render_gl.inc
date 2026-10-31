@@ -194,7 +194,7 @@ EM_JS(int, js_gl_init, (int w, int h), {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.enable(gl.SCISSOR_TEST);
     const G = self.__gl = { canvas, gl, program, STREAM, vbo, cur: null, textures: new Map(), buffers: [new Map(), new Map()],
-                            vao: gl.createVertexArray(), consts: gl.createTexture(), ring: 0, w, h, last: 0 };
+                            vao: gl.createVertexArray(), consts: gl.createTexture(), kring: 0, w, h, last: 0 };
     // Draw constants: 27 blocks of 75 texels per row, and room for two frames' worth so a run never rewrites rows the
     // GPU may still be reading.
     gl.activeTexture(gl.TEXTURE2);
@@ -284,14 +284,14 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
     let kbase = 0;
     if (nconsts) {
         const rows = Math.ceil(nconsts / 27);
-        if (G.ring + rows > 608) G.ring = 0;
-        kbase = G.ring * 27;
+        if (G.kring + rows > 608) G.kring = 0;
+        kbase = G.kring * 27;
         gl.activeTexture(gl.TEXTURE2);
         const full = Math.floor(nconsts / 27), rest = nconsts - full * 27;
-        if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.ring, 27 * 75, full, gl.RGBA, gl.FLOAT, HEAPF32, consts >> 2);
-        if (rest) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.ring + full, rest * 75, 1, gl.RGBA, gl.FLOAT, HEAPF32, (consts >> 2) + full * 27 * 300);
+        if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.kring, 27 * 75, full, gl.RGBA, gl.FLOAT, HEAPF32, consts >> 2);
+        if (rest) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.kring + full, rest * 75, 1, gl.RGBA, gl.FLOAT, HEAPF32, (consts >> 2) + full * 27 * 300);
         gl.activeTexture(gl.TEXTURE0);
-        G.ring += rows;
+        G.kring += rows;
     }
     let base = 0;
     const S = (i) => HEAP32[base + i];
@@ -469,14 +469,14 @@ EM_JS(void, js_gl_present, (void), {
     }
     // Frames go to the page as pixels in shared memory, four slots used in turn: an ImageBitmap per frame stays in GPU
     // memory until the page collects garbage, which piled up gigabytes and stalled the GPU, and the worker never
-    // yields for a canvas transferred from the page to show anything. Each frame is read into one of two pixel buffers
-    // and fetched a frame later, by when the GPU has finished it, so the read does not wait for the frame just drawn.
+    // yields for a canvas transferred from the page to show anything. Each frame is read into one of three pixel buffers
+    // and fetched two frames later: fetching the previous frame still waited on the GPU for several milliseconds.
     const size = G.w * G.h * 4;
     if (!G.slots || G.slotW !== G.w || G.slotH !== G.h) {
         G.slots = [0, 1, 2, 3].map(() => new Uint8Array(new SharedArrayBuffer(size)));
         G.owner = new Int32Array(new SharedArrayBuffer(16));   /* per slot: 0 free, 1 the page copying it, 2 being written */
         G.slotW = G.w; G.slotH = G.h;
-        if (!G.flip) { G.flip = gl.createFramebuffer(); G.flipRb = gl.createRenderbuffer(); G.pbo = [gl.createBuffer(), gl.createBuffer()]; }
+        if (!G.flip) { G.flip = gl.createFramebuffer(); G.flipRb = gl.createRenderbuffer(); G.pbo = [gl.createBuffer(), gl.createBuffer(), gl.createBuffer()]; }
         gl.bindRenderbuffer(gl.RENDERBUFFER, G.flipRb);
         gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, G.w, G.h);
         gl.bindFramebuffer(gl.FRAMEBUFFER, G.flip);
@@ -484,7 +484,7 @@ EM_JS(void, js_gl_present, (void), {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         for (const b of G.pbo) { gl.bindBuffer(gl.PIXEL_PACK_BUFFER, b); gl.bufferData(gl.PIXEL_PACK_BUFFER, size, gl.STREAM_READ); }
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-        G.pending = -1;
+        G.queue = []; G.frame = 0;
         postMessage({ type: 'slots', slots: G.slots.map((v) => v.buffer), owner: G.owner, w: G.w, h: G.h });
     }
     gl.disable(gl.SCISSOR_TEST);
@@ -494,23 +494,23 @@ EM_JS(void, js_gl_present, (void), {
     gl.blitFramebuffer(0, 0, G.w, G.h, 0, G.h, G.w, 0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, G.flip);
-    const into = G.pending === 0 ? 1 : 0;
+    const into = G.frame++ % G.pbo.length;
+    G.queue.push(into);
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, G.pbo[into]);
     gl.readPixels(0, 0, G.w, G.h, gl.RGBA, gl.UNSIGNED_BYTE, 0);
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
     gl.enable(gl.SCISSOR_TEST);
     G.drawn = false;
-    if (G.pending >= 0) {
+    if (G.queue.length === G.pbo.length) {
         let slot = (G.posted || 0) & 3;
         while (Atomics.compareExchange(G.owner, slot, 0, 2) !== 0) slot = (slot + 1) & 3;
-        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, G.pbo[G.pending]);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, G.pbo[G.queue.shift()]);
         gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, G.slots[slot]);
         Atomics.store(G.owner, slot, 0);
         postMessage({ type: 'pixels', slot });
         G.posted = (G.posted || 0) + 1;
     }
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-    G.pending = into;
 });
 
 /* The frame as 32-bit BGRA rows, top row first. Presenting hands the drawing buffer to the page and leaves it blank,

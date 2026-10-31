@@ -168,21 +168,23 @@ void rt_fxch(CPU* c, uint32_t k);
 void rt_fcopy(CPU* c, uint32_t dst, uint32_t src);
 void rt_fld_st(CPU* c, uint32_t k);
 
-void rt_str_movsb(CPU* c);
-void rt_str_movsw(CPU* c);
-void rt_str_movsd(CPU* c);
+/* Single string moves, inlined: the client copies small structs with runs of movsd. */
+#define RT_STEP(sz) (c->df ? -(int32_t)(sz) : (int32_t)(sz))
+static inline void rt_str_movsb(CPU* c) { M8(c->edi) = M8(c->esi); c->esi += RT_STEP(1); c->edi += RT_STEP(1); }
+static inline void rt_str_movsw(CPU* c) { M16(c->edi) = M16(c->esi); c->esi += RT_STEP(2); c->edi += RT_STEP(2); }
+static inline void rt_str_movsd(CPU* c) { M32(c->edi) = M32(c->esi); c->esi += RT_STEP(4); c->edi += RT_STEP(4); }
+static inline void rt_str_stosb(CPU* c) { M8(c->edi) = R8L(0); c->edi += RT_STEP(1); }
+static inline void rt_str_stosw(CPU* c) { M16(c->edi) = R16(0); c->edi += RT_STEP(2); }
+static inline void rt_str_stosd(CPU* c) { M32(c->edi) = c->eax; c->edi += RT_STEP(4); }
+static inline void rt_str_lodsb(CPU* c) { R8L(0) = M8(c->esi); c->esi += RT_STEP(1); }
+static inline void rt_str_lodsw(CPU* c) { R16(0) = M16(c->esi); c->esi += RT_STEP(2); }
+static inline void rt_str_lodsd(CPU* c) { c->eax = M32(c->esi); c->esi += RT_STEP(4); }
 void rt_str_rep_movsb(CPU* c);
 void rt_str_rep_movsw(CPU* c);
 void rt_str_rep_movsd(CPU* c);
-void rt_str_stosb(CPU* c);
-void rt_str_stosw(CPU* c);
-void rt_str_stosd(CPU* c);
 void rt_str_rep_stosb(CPU* c);
 void rt_str_rep_stosw(CPU* c);
 void rt_str_rep_stosd(CPU* c);
-void rt_str_lodsb(CPU* c);
-void rt_str_lodsw(CPU* c);
-void rt_str_lodsd(CPU* c);
 void rt_str_scasb(CPU* c);
 void rt_str_cmpsb(CPU* c);
 void rt_str_repne_scasb(CPU* c);
