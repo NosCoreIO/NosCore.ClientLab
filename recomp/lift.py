@@ -5,6 +5,7 @@ Generated code is derived from the user's own client and is written outside the 
 import argparse
 import bisect
 import io
+import math
 import os
 import struct
 from collections import defaultdict
@@ -168,6 +169,11 @@ class FnGen:
         self.ins.sort(key=lambda i: i.address)
         self.out = []
         self.uses_seh = any(self._writes_fs_esp(i) for i in self.ins)
+        # Values pushed on the x87 stack within a block live in locals F0..F7 (fd of them); the stack in the CPU struct
+        # is brought up to date at every label and before anything that leaves the block.
+        self.fcache = not self.uses_seh and any(i.mnemonic.startswith("f") for i in self.ins)
+        self.fd = 0
+        self.in_fpu = False
         self.call_owner = {}
         self.callees = set()
 
@@ -396,7 +402,51 @@ class FnGen:
 
     # ---- emit helpers ----
     def e(self, s):
+        if self.in_fpu and self.fcache:
+            s = self.frewrite(s)
         self.out.append("  " + s)
+
+    def fflush(self):
+        """Writes the cached x87 values back to the CPU struct and moves its top over them."""
+        d = self.fd
+        if not self.fcache or not d:
+            return
+        self.fd = 0
+        parts = [f"uint32_t _t = (c->ftop - {d}u) & 7;"]
+        for k in range(d):
+            parts.append(f"c->st[(_t + {d - 1 - k}u) & 7] = F{k}; c->st_exact[(_t + {d - 1 - k}u) & 7] = 0;")
+        parts.append("c->ftop = _t;")
+        self.out.append("  { " + " ".join(parts) + " }")
+
+    def fst(self, i):
+        return f"F{self.fd - 1 - i}" if i < self.fd else f"c->st[(c->ftop + {i - self.fd}u) & 7]"
+
+    def frewrite(self, s):
+        """Rewrites ST(i), FPUSH(v), FPOP() and rt_fsw(c) left to right against the cached depth."""
+        out, k = [], 0
+        while k < len(s):
+            if s.startswith("ST(", k) and (k == 0 or not (s[k - 1].isalnum() or s[k - 1] == "_")):
+                j = s.index(")", k)
+                out.append(self.fst(int(s[k + 3:j]))); k = j + 1
+            elif s.startswith("FPUSH(", k):
+                depth, j = 1, k + 6
+                while depth:
+                    depth += {"(": 1, ")": -1}.get(s[j], 0); j += 1
+                inner = self.frewrite(s[k + 6:j - 1])
+                if self.fd == 8:
+                    raise NotImplementedError("x87 stack overflow")
+                out.append(f"F{self.fd} = ({inner})"); self.fd += 1; k = j
+            elif s.startswith("FPOP()", k):
+                if self.fd:
+                    out.append("(void)0"); self.fd -= 1
+                else:
+                    out.append("(c->ftop = (c->ftop + 1) & 7)")
+                k += 6
+            elif s.startswith("rt_fsw(c)", k):
+                out.append(f"(uint16_t)((c->fsw & ~0x3800u) | (((c->ftop - {self.fd}u) & 7) << 11))"); k += 9
+            else:
+                out.append(s[k]); k += 1
+        return "".join(out)
 
     def flags_res(self, live, r, size):
         ut = UTYPE[size]
@@ -419,9 +469,11 @@ class FnGen:
         fn = f"f_{self.entry:08x}"
         o = self.out
         o.append(f"/* {self.name} */")
-        o.append(f"void {fn}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{")
+        o.append(f"{'RT_LEAF ' if self.is_small_leaf() else ''}void {fn}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{")
         o.append("  uint32_t tgt = entry, t, a, b, r; uint64_t q; int ind = 0; (void)t; (void)a; (void)b; (void)r; (void)q;")
         o.append("  RT_TRACE(c, entry, ret);")
+        if self.fcache:
+            o.append("  double F0, F1, F2, F3, F4, F5, F6, F7; (void)F0; (void)F1; (void)F2; (void)F3; (void)F4; (void)F5; (void)F6; (void)F7;")
         if self.uses_seh:
             o.append("  RtAct act; act.fn = " + fn + "; act.guest_esp = c->esp; act.host_esp = c->host_esp;")
             o.append("  if (rt_setjmp(act.jb)) { tgt = c->lj_target; ind = 0; rt_act_push(c, &act); goto dispatch; }")
@@ -440,18 +492,48 @@ class FnGen:
             if prev_end is not None and prev_end != i.address and i.address not in labels:
                 pass
             if i.address in labels:
+                self.fflush()
                 o.append(f"L_{i.address:08x}:")
+            if not i.mnemonic.startswith("f") and i.mnemonic not in ("wait", "fwait", "sahf", "mov", "lea", "push", "pop",
+                                                                     "add", "sub", "and", "or", "xor", "cmp", "test", "movzx", "movsx",
+                                                                     "inc", "dec", "shl", "shr", "sar", "imul", "neg", "not", "cdq"):
+                self.fflush()
             try:
-                self.lift(i, live_after.get(i.address, ALL_FLAGS))
+                self.in_fpu = i.mnemonic.startswith("f")
+                saved, saved_fd = len(self.out), self.fd
+                try:
+                    self.lift(i, live_after.get(i.address, ALL_FLAGS))
+                except NotImplementedError:
+                    del self.out[saved:]; self.fd = saved_fd
+                    self.in_fpu = False
+                    self.fflush()
+                    raise
+                finally:
+                    self.in_fpu = False
             except NotImplementedError as ex:
                 self.e(f"rt_unimpl(c, 0x{i.address:08x}u, \"{i.mnemonic} {i.op_str}\"); /* {ex} */")
             prev_end = i.address + i.size
             nxt = idx + 1 < len(self.ins) and self.ins[idx + 1].address
             if nxt != prev_end and i.mnemonic not in ("jmp", "ret") :
+                self.fflush()
                 self.e(f"{{ rt_jump(c, 0x{prev_end:08x}u, ret); EXIT; }}")
         o.append("#undef EXIT")
         o.append("}")
         return "\n".join(o)
+
+    def is_small_leaf(self):
+        """A short function that calls nothing and leaves only by ret: callers in the same file get it inlined, which
+        drops the call, the dispatch and the return-address check (the client's vector helpers are like this)."""
+        if self.uses_seh or len(self.ins) > 24:
+            return False
+        for i in self.ins:
+            m = i.mnemonic
+            if m in ("call", "int", "int3", "hlt", "iretd") or m.startswith("rep"):
+                return False
+            if (m == "jmp" or m.startswith("j")) and (not i.operands or i.operands[0].type != X.X86_OP_IMM
+                                                       or not self.inside(i.operands[0].imm)):
+                return False
+        return True
 
     # ---- instruction lifting ----
     def lift(self, i, live):
@@ -763,12 +845,62 @@ class FnGen:
             n = self.L.md.reg_name(op.reg)
             return int(n[3]) if n.startswith("st(") else 0
 
+        def const_float(op):
+            """A float the client keeps next to its code, which never changes, as a C literal."""
+            mm = op.mem
+            at = mm.disp & 0xFFFFFFFF
+            if mm.base or mm.index or op.size not in (4, 8, 10) or not (self.L.code_lo <= at and at + op.size <= self.L.code_hi):
+                return None
+            raw = self.L.code[at - self.L.code_lo: at - self.L.code_lo + op.size]
+            if op.size == 4:
+                v = struct.unpack("<f", raw)[0]
+            elif op.size == 8:
+                v = struct.unpack("<d", raw)[0]
+            else:
+                mant, se = struct.unpack("<QH", raw)
+                ex = se & 0x7FFF
+                if ex == 0 and mant == 0:
+                    v = -0.0 if se >> 15 else 0.0
+                elif ex == 0 or ex == 0x7FFF or not mant >> 63:
+                    return None
+                else:
+                    try:
+                        v = math.ldexp(float(mant), ex - 16383 - 63)
+                    except OverflowError:
+                        return None
+                    if se >> 15:
+                        v = -v
+            if not math.isfinite(v) or (v != 0 and abs(v) < 2.2250738585072014e-308):
+                return None
+            return f"({v.hex()} /* {v!r} */)"
+
         def memval(op):
             a = self.addr(op)
+            if not m.startswith("fi"):
+                lit = const_float(op)
+                if lit:
+                    return lit
             if m.startswith("fi"):
                 return {2: f"(double)(int16_t)M16({a})", 4: f"(double)(int32_t)M32({a})", 8: f"(double)(int64_t)M64({a})"}[op.size]
             return {4: f"(double)MF32({a})", 8: f"MF64({a})", 10: f"rt_f80_load({a})"}[op.size]
 
+        if self.fcache:
+            k = max((st_index(o) for o in ops if o.type == X.X86_OP_REG), default=1)
+            cached = k < self.fd
+            if m == "fld" and ops[0].type == X.X86_OP_REG and cached and self.fd < 8:
+                self.e(f"FPUSH(ST({k}));"); return
+            if m in ("fst", "fstp") and ops[0].type == X.X86_OP_REG and cached:
+                self.e(f"ST({k}) = ST(0);")
+                if m == "fstp":
+                    self.e("FPOP();")
+                return
+            if m == "fxch" and cached:
+                self.e(f"{{ double _x = ST(0); ST(0) = ST({k}); ST({k}) = _x; }}"); return
+            if (ops and ops[0].type == X.X86_OP_REG and m in ("fld", "fst", "fstp", "fxch")) or m in ("fxch", "fninit", "finit", "fbstp") \
+                    or (m in ("fild", "fist", "fistp") and ops and ops[0].size == 8):
+                self.in_fpu = False
+                self.fflush()
+                self.in_fpu = True
         if m in ("fld", "fild"):
             if ops[0].type == X.X86_OP_REG:
                 self.e(f"rt_fld_st(c, {st_index(ops[0])});")

@@ -409,7 +409,14 @@ static void sleep_ms(CPU* c, uint32_t ms) {
 }
 static void k_Sleep(CPU* c) { sleep_ms(c, ARG(0)); }
 /* No asynchronous procedure call is ever queued, so an alertable sleep only ends on its timeout. */
-static void k_SleepEx(CPU* c) { sleep_ms(c, ARG(0)); RET(0); }
+/* The client's main loop sleeps out the rest of a 16 ms frame with an alertable SleepEx; PORT_UNCAPPED=1 skips that
+   wait so the frame rate shows what the machine can do. */
+static void k_SleepEx(CPU* c) {
+    static int uncapped = -1;
+    if (uncapped < 0) uncapped = getenv("PORT_UNCAPPED") != 0;
+    if (!(uncapped && ARG(1))) sleep_ms(c, ARG(0));
+    RET(0);
+}
 /* The client's only thread is a TCkThread: every 10 minutes it raises an event (method pointer at +0x40/+0x44,
    arguments at +0x54/+0x58), through Synchronize, i.e. on the main thread. Threads cannot run here, so the message
    pump raises that event on the same schedule. */

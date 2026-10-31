@@ -168,29 +168,10 @@ void rt_f80_store(uint32_t addr, double v) {
     M16(addr + 8) = se;
 }
 
-static double fround(CPU* c, double v) {
-    switch ((c->fcw >> 10) & 3) {
-    case 0: return nearbyint(v);
-    case 1: return floor(v);
-    case 2: return ceil(v);
-    default: return trunc(v);
-    }
-}
-
-double rt_frndint(CPU* c, double v) { return fround(c, v); }
-
-int16_t rt_fist16(CPU* c, double v) {
-    double r = fround(c, v);
-    return (r >= -32768.0 && r <= 32767.0) ? (int16_t)r : (int16_t)0x8000;
-}
-
-int32_t rt_fist32(CPU* c, double v) {
-    double r = fround(c, v);
-    return (r >= -2147483648.0 && r <= 2147483647.0) ? (int32_t)r : (int32_t)0x80000000;
-}
+double rt_frndint(CPU* c, double v) { return rt_fround(c, v); }
 
 int64_t rt_fist64(CPU* c, double v) {
-    double r = fround(c, v);
+    double r = rt_fround(c, v);
     return (r >= -9223372036854775808.0 && r < 9223372036854775808.0) ? (int64_t)r : (int64_t)0x8000000000000000ull;
 }
 
@@ -206,14 +187,6 @@ void rt_fbstp(CPU* c, uint32_t addr, double v) {
     M8(addr + 9) = neg ? 0x80 : 0;
 }
 
-void rt_fcom(CPU* c, double a, double b) {
-    c->fsw &= ~0x4500u;
-    if (a != a || b != b) c->fsw |= 0x4500u;
-    else if (a < b) c->fsw |= 0x0100u;
-    else if (a == b) c->fsw |= 0x4000u;
-}
-
-uint16_t rt_fsw(CPU* c) { return (uint16_t)((c->fsw & ~0x3800u) | ((c->ftop & 7) << 11)); }
 
 void rt_fninit(CPU* c) { c->fcw = 0x37f; c->fsw = 0; c->ftop = 0; }
 
@@ -261,8 +234,23 @@ void rt_str_rep_stosb(CPU* c) {
     if (!c->df && c->ecx) { memset((void*)(uintptr_t)c->edi, R8L(0), c->ecx); c->edi += c->ecx; c->ecx = 0; return; }
     while (c->ecx) { rt_str_stosb(c); c->ecx--; }
 }
-void rt_str_rep_stosw(CPU* c) { while (c->ecx) { rt_str_stosw(c); c->ecx--; } }
-void rt_str_rep_stosd(CPU* c) { while (c->ecx) { rt_str_stosd(c); c->ecx--; } }
+void rt_str_rep_stosw(CPU* c) {
+    if (!c->df && c->ecx) {
+        uint8_t* d = (uint8_t*)(uintptr_t)c->edi; uint16_t v = R16(0);
+        for (uint32_t i = 0; i < c->ecx; i++) memcpy(d + 2 * i, &v, 2);
+        c->edi += c->ecx * 2; c->ecx = 0; return;
+    }
+    while (c->ecx) { rt_str_stosw(c); c->ecx--; }
+}
+void rt_str_rep_stosd(CPU* c) {
+    if (!c->df && c->ecx) {
+        uint8_t* d = (uint8_t*)(uintptr_t)c->edi; uint32_t v = c->eax;
+        if ((v & 0xFFu) * 0x01010101u == v) memset(d, (int)(v & 0xFFu), (size_t)c->ecx * 4);
+        else for (uint32_t i = 0; i < c->ecx; i++) memcpy(d + 4 * i, &v, 4);
+        c->edi += c->ecx * 4; c->ecx = 0; return;
+    }
+    while (c->ecx) { rt_str_stosd(c); c->ecx--; }
+}
 
 
 void rt_str_scasb(CPU* c) { cmp_flags(c, R8L(0), M8(c->edi), 8); c->edi += STEP(1); }
