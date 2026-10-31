@@ -11,6 +11,8 @@ self.audioDone = new Int32Array(new SharedArrayBuffer(128 * 4));
 self.pasteBuf = new Int32Array(new SharedArrayBuffer(8 + 2 * 65536));
 // The page counts the frames it has shown here (one per display refresh at most); Present stays two frames ahead.
 self.vsync = new Int32Array(new SharedArrayBuffer(4));
+// The page's canvas, when it could hand it over: WebGL draws into it directly and Present yields to show each frame.
+self.onmessage = (e) => { if (e.data.type === 'canvas') self.pageCanvas = e.data.canvas; };
 postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone, paste: self.pasteBuf, vsync: self.vsync });
 
 // Game files are fetched on demand in 256 KB chunks with synchronous range requests (the worker never yields, so it
@@ -132,7 +134,8 @@ self.Module = {
   onRuntimeInitialized() {
     mountGame(Module.FS);
     try {
-      Module.callMain([`C:/Nostale/${params.get('exe') || 'NosCore.exe'}`, 'gf', params.get('region') || '0']);
+      Promise.resolve(Module.callMain([`C:/Nostale/${params.get('exe') || 'NosCore.exe'}`, 'gf', params.get('region') || '0']))
+        .catch((e) => postMessage({ type: 'log', text: `exited: ${e}` }));
     } catch (e) {
       postMessage({ type: 'log', text: `exited: ${e}` });
     }

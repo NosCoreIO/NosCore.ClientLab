@@ -45,11 +45,19 @@
 </main>
 <script>
   const canvas = document.getElementById('screen');
-  // The software renderer sends each frame's pixels; WebGL writes them into one of four shared slots and sends its index.
+  // The worker draws straight into this canvas when the browser can hand it over (it yields once per frame for that).
+  // Otherwise the software renderer sends each frame's pixels, and WebGL writes them into one of four shared slots and
+  // sends its index.
   let ctx = null, slots = null, owner = null, image = null;
+  // The game's screen size: a canvas handed to the worker no longer reports its own.
+  let screenW = canvas.width, screenH = canvas.height;
   const status = document.getElementById('status');
   const log = document.getElementById('log');
   const worker = new Worker('/worker.js' + location.search);
+  if (canvas.transferControlToOffscreen) {
+    const offscreen = canvas.transferControlToOffscreen();
+    worker.postMessage({ type: 'canvas', canvas: offscreen }, [offscreen]);
+  }
   let frames = 0, last = performance.now();
   // Appending to textContent per line is quadratic; lines are batched per frame and the pane keeps the last 1000.
   const LOG_LINES = 1000;
@@ -74,7 +82,7 @@
     f.refreshes++;
     // A slot the worker is writing is skipped: it posts that slot again once the newer frame is in it.
     if (slot !== undefined && Atomics.compareExchange(owner, slot, 0, 1) === 0) {
-      if (canvas.width !== image.width || canvas.height !== image.height) { canvas.width = image.width; canvas.height = image.height; }
+      if (canvas.width !== image.width || canvas.height !== image.height) { canvas.width = screenW = image.width; canvas.height = screenH = image.height; }
       ctx = ctx || canvas.getContext('2d');
       image.data.set(slots[slot]);
       Atomics.store(owner, slot, 0);
@@ -91,12 +99,16 @@
   worker.onmessage = (e) => {
     const m = e.data;
     if (m.type === 'frame') {
-      if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = m.w; canvas.height = m.h; }
+      if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = screenW = m.w; canvas.height = screenH = m.h; }
       ctx = ctx || canvas.getContext('2d');
       ctx.putImageData(new ImageData(new Uint8ClampedArray(m.data.buffer), m.w, m.h), 0, 0);
       frames++;
       const now = performance.now();
       if (now - last > 1000) { status.textContent = `${m.w}x${m.h}, ${frames} frames/s shown`; frames = 0; last = now; }
+    } else if (m.type === 'shown') {
+      screenW = m.w; screenH = m.h;
+      window.frameStats.shown += m.frames;
+      status.textContent = `${m.w}x${m.h}, ${m.frames} frames/s shown (WebGL, direct)`;
     } else if (m.type === 'slots') {
       slots = m.slots.map((b) => new Uint8Array(b));
       owner = m.owner;
@@ -319,7 +331,7 @@
   }
   function popupMenu(d, done) {
     if (autoDismiss) { window.allLog.push('popup menu dismissed'); done(0); return; }
-    const scale = stage.getBoundingClientRect().width / canvas.width;
+    const scale = stage.getBoundingClientRect().width / screenW;
     const open = [];
     const close = (v) => { for (const ul of open) ul.remove(); document.removeEventListener('mousedown', outside, true); done(v); };
     const outside = (e) => { if (!open.some((ul) => ul.contains(e.target))) close(0); };
@@ -382,7 +394,7 @@
   }
   function pos(e) {
     const r = canvas.getBoundingClientRect();
-    return [Math.round((e.clientX - r.left) * canvas.width / r.width), Math.round((e.clientY - r.top) * canvas.height / r.height)];
+    return [Math.round((e.clientX - r.left) * screenW / r.width), Math.round((e.clientY - r.top) * screenH / r.height)];
   }
   canvas.addEventListener('mousemove', (e) => send(IN.move, 0, ...pos(e), e.timeStamp));
   canvas.addEventListener('mousedown', (e) => { canvas.focus(); send(IN.down, e.button, ...pos(e), e.timeStamp); e.preventDefault(); });

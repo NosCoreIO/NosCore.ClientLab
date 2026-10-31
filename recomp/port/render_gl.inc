@@ -9,7 +9,8 @@
 EM_JS(int, js_gl_init, (int w, int h), {
     const report = (gl) => { const d = gl.getExtension('WEBGL_debug_renderer_info'); return d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); };
     if (typeof OffscreenCanvas === 'undefined' || typeof importScripts !== 'function') return 0;
-    const canvas = new OffscreenCanvas(w, h);
+    const canvas = self.pageCanvas || new OffscreenCanvas(w, h);
+    canvas.width = w; canvas.height = h;
     const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, preserveDrawingBuffer: false, depth: true });
     if (!gl) return 0;
     const renderer = report(gl);
@@ -194,7 +195,8 @@ EM_JS(int, js_gl_init, (int w, int h), {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.enable(gl.SCISSOR_TEST);
     const G = self.__gl = { canvas, gl, program, STREAM, vbo, cur: null, textures: new Map(), buffers: [new Map(), new Map()],
-                            vao: gl.createVertexArray(), consts: gl.createTexture(), kring: 0, w, h, last: 0 };
+                            vao: gl.createVertexArray(), consts: gl.createTexture(), kring: 0, w, h, last: 0,
+                            direct: canvas === self.pageCanvas };
     // Draw constants: 27 blocks of 75 texels per row, and room for two frames' worth so a run never rewrites rows the
     // GPU may still be reading.
     gl.activeTexture(gl.TEXTURE2);
@@ -448,6 +450,26 @@ EM_JS(void, js_gl_resize, (int w, int h), {
    second, and the count is then resynchronised so a page that refreshes again does not leave every frame waiting. */
 EM_JS(void, js_gl_present, (void), {
     const G = self.__gl, V = self.vsync;
+    if (G.direct) {
+        // The page's own canvas: the frame is shown when Present yields (web_frame_wait); keep a copy for readbacks.
+        const gl = G.gl;
+        if (!G.kept) {
+            G.keptRb = gl.createRenderbuffer();
+            gl.bindRenderbuffer(gl.RENDERBUFFER, G.keptRb);
+            gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, G.w, G.h);
+            G.kept = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, G.kept);
+            gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, G.keptRb);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        }
+        gl.disable(gl.SCISSOR_TEST);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, G.kept);
+        gl.blitFramebuffer(0, 0, G.w, G.h, 0, 0, G.w, G.h, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+        gl.enable(gl.SCISSOR_TEST);
+        G.drawn = false;
+        return;
+    }
     if (V) {
         G.posted = G.posted || 0;
         let shown = Atomics.load(V, 0);
@@ -821,6 +843,7 @@ int r_gl_present(void) {
     double t = prof_now();
     gl_flush();
     js_gl_present();
+    web_frame_wait();
     prof_present += prof_now() - t;
     return 1;
 }
