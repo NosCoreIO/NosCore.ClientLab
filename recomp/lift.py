@@ -4,9 +4,11 @@ Generated code is derived from the user's own client and is written outside the 
 """
 import argparse
 import bisect
+import hashlib
 import io
 import math
 import os
+import re
 import struct
 from collections import defaultdict
 
@@ -24,6 +26,12 @@ REG8H = {"ah": 0, "ch": 1, "dh": 2, "bh": 3}
 UTYPE = {1: "uint8_t", 2: "uint16_t", 4: "uint32_t", 8: "uint64_t"}
 STYPE = {1: "int8_t", 2: "int16_t", 4: "int32_t", 8: "int64_t"}
 MSB = {1: "0x80u", 2: "0x8000u", 4: "0x80000000u"}
+# Entries with a hand-written version in runtime/rt_game.c, with the md5 of the function's code bytes it was written
+# against (they hold the addresses of the globals and helpers it uses). When every one matches, gen/overrides.c
+# includes rt_game.c and the lifted bodies become f_<addr>_lifted, still used for mid-function entries.
+OVERRIDES = {0x0045d2e0: "bfae3acbc5384b474eb710d2c7d85665", 0x00489ad0: "3812afb0a451ec19752c3dedbce12f87",
+             0x00490264: "a79899f5347a5ee921c68dc013a998af"}
+OVERRIDDEN = set()
 
 JCC = {
     "je": "ZF", "jne": "!ZF", "jb": "CF", "jae": "!CF", "jbe": "(CF||ZF)", "ja": "(!CF&&!ZF)",
@@ -469,7 +477,9 @@ class FnGen:
         fn = f"f_{self.entry:08x}"
         o = self.out
         o.append(f"/* {self.name} */")
-        o.append(f"{'RT_LEAF ' if self.is_small_leaf() else ''}void {fn}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{")
+        if self.entry in OVERRIDDEN:
+            fn += "_lifted"
+        o.append(f"{'RT_LEAF ' if self.is_small_leaf() and self.entry not in OVERRIDDEN else ''}void {fn}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{")
         o.append("  uint32_t tgt = entry, t, a, b, r; uint64_t q; int ind = 0; (void)t; (void)a; (void)b; (void)r; (void)q;")
         o.append("  RT_TRACE(c, entry, ret);")
         if self.fcache:
@@ -534,6 +544,11 @@ class FnGen:
                                                        or not self.inside(i.operands[0].imm)):
                 return False
         return True
+
+    def is_inlinable(self):
+        """A very short leaf: callers in other files get a static copy to inline too (the client's container
+        accessors are like this, and they sit in other files than the loops that call them)."""
+        return len(self.ins) <= 16 and self.entry not in OVERRIDDEN and self.is_small_leaf()
 
     # ---- instruction lifting ----
     def lift(self, i, live):
@@ -1389,6 +1404,14 @@ def main():
     fns.sort()
     covered = make_covered(fns)
 
+    global OVERRIDDEN
+    found = {e: hashlib.md5(b"".join(L.code[lo - L.code_lo: hi - L.code_lo] for lo, hi in rs)).hexdigest()
+             for e, _, rs in fns if e in OVERRIDES}
+    own_build = found == OVERRIDES
+    OVERRIDDEN = set(OVERRIDES) if own_build else set()
+    if not own_build:
+        print("hand-written functions not used, this client differs:", {f"{e:08x}": h for e, h in found.items()})
+
     # Which recompiled function to call for a direct call target: its own function for an entry, the owner for a
     # mid-function call target (those are labels there, see extra_labels).
     call_owner = {e: e for e, _, _ in fns}
@@ -1400,6 +1423,7 @@ def main():
     chunks, unimpl = defaultdict(list), defaultdict(int)
     chunk_callees = defaultdict(set)
 
+    inline_src = {}
     absorbed = 0
     lifted = bytearray(L.code_hi - L.code_lo)
     for e, name, rs in fns:
@@ -1415,16 +1439,30 @@ def main():
             if "rt_unimpl" in line:
                 unimpl[line.split('"')[1].split()[0]] += 1
         chunks[e >> 15].append(src)
+        if g.is_inlinable():
+            inline_src[e] = src.replace(f"RT_LEAF void f_{e:08x}(", f"static RT_LEAF void f_{e:08x}_i(", 1)
         chunk_callees[e >> 15] |= g.callees
         for lab in sorted(g.labelset):
             table.append((lab, e))
 
+    # A direct call to a function's entry: "f_X(c, 0xXu, ".
+    call_re = re.compile(r"\bf_([0-9a-f]{8})\(c, 0x\1u, ")
     wanted = set()
     for key, srcs in chunks.items():
         name = f"fn_{key << 15:08x}.c"
         wanted.add(name)
         protos = "".join(f"void f_{t:08x}(CPU*, uint32_t, uint32_t);\n" for t in sorted(chunk_callees[key]))
-        write_if_changed(os.path.join(a.outdir, name), '#include "rt.h"\n\n' + protos + "\n" + "\n\n".join(srcs) + "\n")
+        body = "\n\n".join(srcs)
+        # Leaves of this file are inlined already; the others get a static copy here.
+        used = sorted(t for t in chunk_callees[key] if t in inline_src and t >> 15 != key)
+        inlined = set(used)
+        if used:
+            body = call_re.sub(lambda mt: mt.group(0).replace("(", "_i(", 1) if int(mt.group(1), 16) in inlined
+                               else mt.group(0), body)
+            body = "\n\n".join(inline_src[t] for t in used) + "\n\n" + body
+        write_if_changed(os.path.join(a.outdir, name), '#include "rt.h"\n\n' + protos + "\n" + body + "\n")
+    write_if_changed(os.path.join(a.outdir, "overrides.c"),
+                     '#include "rt_game.c"\n' if own_build else "/* runtime/rt_game.c is for another client build. */\n")
     for old in os.listdir(a.outdir):
         if old.startswith("fn_") and old.endswith(".c") and old not in wanted:
             os.remove(os.path.join(a.outdir, old))

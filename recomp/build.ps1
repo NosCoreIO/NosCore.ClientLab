@@ -13,9 +13,12 @@ $vcvars = 'C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary
 
 # Generated code inlines helpers from the runtime header, so a newer header makes every object stale.
 $header = (Get-Item (Join-Path $runtime 'rt.h')).LastWriteTime
+# overrides.c includes the hand-written functions.
+$game = (Get-Item (Join-Path $runtime 'rt_game.c')).LastWriteTime
 $stale = Get-ChildItem $Gen -Filter *.c | Where-Object {
     $o = Join-Path $obj ($_.BaseName + '.obj')
-    $Full -or -not (Test-Path $o) -or (Get-Item $o).LastWriteTime -lt $_.LastWriteTime -or (Get-Item $o).LastWriteTime -lt $header
+    $Full -or -not (Test-Path $o) -or (Get-Item $o).LastWriteTime -lt $_.LastWriteTime -or (Get-Item $o).LastWriteTime -lt $header -or
+        ($_.Name -eq 'overrides.c' -and (Get-Item $o).LastWriteTime -lt $game)
 }
 $list = Join-Path $Out 'stale.rsp'
 $stale | ForEach-Object { '"' + $_.FullName + '"' } | Set-Content -Encoding ascii $list
