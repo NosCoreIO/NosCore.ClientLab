@@ -20,7 +20,8 @@ EM_JS(int, js_gl_init, (int w, int h), {
         'out vec4 vCol; out vec4 vUV; out float vFog;\n' +
         'void main() { gl_Position = aPos; gl_PointSize = 1.0; vCol = aCol.bgra; vUV = aUV; vFog = aFog; }\n';
     // Fixed-function vertex processing for draws from a vertex buffer, the same arithmetic as render.c fetch(). The
-    // key (gl_buffer_draw) is baked in as constants; the block C holds the matrices, viewport, fog, material and lights.
+    // key (gl_buffer_draw) is baked in as constants; K(i) reads the draw's constants (matrices, viewport, fog, material,
+    // lights), one row of 75 texels per draw in the constants texture.
     const vsBuffer = (k) => '#version 300 es\n' +
         'precision highp float; precision highp int;\n' +
         'const bool LIT = ' + ((k & 1) !== 0) + ', DIFFUSE = ' + ((k >> 15 & 1) !== 0) + ', NORMAL = ' + ((k >> 16 & 1) !== 0) + ';\n' +
@@ -31,9 +32,10 @@ EM_JS(int, js_gl_init, (int w, int h), {
         'const bvec2 PROJ = bvec2(' + ((k >> 10 & 1) !== 0) + ', ' + ((k >> 14 & 1) !== 0) + ');\n' +
         'const ivec2 TN = ivec2(' + (k >> 25 & 7) + ', ' + (k >> 28 & 7) + ');\n' +
         'in vec3 aPos; in vec4 aCol; in vec4 aT0; in vec4 aT1; in vec3 aNrm;\n' +
-        'layout(std140) uniform C { vec4 uC[75]; };\n' +
+        'uniform highp sampler2D uK; uniform ivec2 uB;\n' +
+        '#define K(i) texelFetch(uK, uB + ivec2(i, 0), 0)\n' +
         'out vec4 vCol; out vec4 vUV; out float vFog;\n' +
-        'mat4 M(int i) { return mat4(uC[i], uC[i + 1], uC[i + 2], uC[i + 3]); }\n' +
+        'mat4 M(int i) { return mat4(K(i), K(i + 1), K(i + 2), K(i + 3)); }\n' +
         'vec4 coords(vec4 t, int n) {\n' +
         '  return n == 1 ? vec4(t.x, 0.0, 1.0, 0.0) : n == 2 ? vec4(t.xy, 1.0, 0.0) : n == 3 ? vec4(t.xyz, 1.0) : n == 4 ? t : vec4(0.0, 0.0, 1.0, 0.0);\n' +
         '}\n' +
@@ -49,22 +51,22 @@ EM_JS(int, js_gl_init, (int w, int h), {
         '  float len = length(n);\n' +
         '  if (len > 0.0) n /= len;\n' +
         '  vec3 wp = (M(8) * p).xyz;\n' +
-        '  vec4 dsrc = DVC ? vc : uC[23], asrc = AVC ? vc : uC[24], esrc = EVC ? vc : uC[25];\n' +
-        '  vec3 o = esrc.rgb + uC[26].rgb * asrc.rgb;\n' +
+        '  vec4 dsrc = DVC ? vc : K(23), asrc = AVC ? vc : K(24), esrc = EVC ? vc : K(25);\n' +
+        '  vec3 o = esrc.rgb + K(26).rgb * asrc.rgb;\n' +
         '  for (int i = 0; i < LIGHTS; i++) {\n' +
         '    int b = 27 + 6 * i;\n' +
         '    vec3 dir; float atten = 1.0;\n' +
-        '    if (uC[b].x == 3.0) dir = -uC[b + 4].xyz;\n' +
+        '    if (K(b).x == 3.0) dir = -K(b + 4).xyz;\n' +
         '    else {\n' +
-        '      dir = uC[b + 3].xyz - wp;\n' +
+        '      dir = K(b + 3).xyz - wp;\n' +
         '      float d = length(dir);\n' +
-        '      if (uC[b].y > 0.0 && d > uC[b].y) continue;\n' +
-        '      float a = uC[b + 5].x + uC[b + 5].y * d + uC[b + 5].z * d * d;\n' +
+        '      if (K(b).y > 0.0 && d > K(b).y) continue;\n' +
+        '      float a = K(b + 5).x + K(b + 5).y * d + K(b + 5).z * d * d;\n' +
         '      atten = a > 0.0 ? 1.0 / a : 1.0;\n' +
         '    }\n' +
         '    float dl = length(dir);\n' +
         '    float ndotl = dl > 0.0 ? max(dot(n, dir) / dl, 0.0) : 0.0;\n' +
-        '    o += atten * (uC[b + 2].rgb * asrc.rgb + ndotl * uC[b + 1].rgb * dsrc.rgb);\n' +
+        '    o += atten * (K(b + 2).rgb * asrc.rgb + ndotl * K(b + 1).rgb * dsrc.rgb);\n' +
         '  }\n' +
         '  return vec4(clamp(o, 0.0, 1.0), clamp(dsrc.a, 0.0, 1.0));\n' +
         '}\n' +
@@ -74,15 +76,15 @@ EM_JS(int, js_gl_init, (int w, int h), {
         '  vec4 vc = DIFFUSE ? aCol.bgra : vec4(1.0);\n' +
         '  vCol = LIT ? light(p, vc) : vc;\n' +
         '  float d = abs(cam.z), f = 1.0;\n' +
-        '  if (FOG == 3) f = uC[22].y != uC[22].x ? (uC[22].y - d) / (uC[22].y - uC[22].x) : 1.0;\n' +
-        '  else if (FOG == 1) f = exp(-uC[22].z * d);\n' +
-        '  else if (FOG == 2) f = exp(-(uC[22].z * d) * (uC[22].z * d));\n' +
+        '  if (FOG == 3) f = K(22).y != K(22).x ? (K(22).y - d) / (K(22).y - K(22).x) : 1.0;\n' +
+        '  else if (FOG == 1) f = exp(-K(22).z * d);\n' +
+        '  else if (FOG == 2) f = exp(-(K(22).z * d) * (K(22).z * d));\n' +
         '  vFog = clamp(f, 0.0, 1.0);\n' +
         '  vUV = vec4(stageUV(0, aT0, cam, camN), stageUV(1, aT1, cam, camN));\n' +
         '  vec4 t = M(0) * p;\n' +
         '  float w = t.w != 0.0 ? t.w : 1.0;\n' +
-        '  vec2 s = vec2(uC[20].x + (t.x / w + 1.0) * 0.5 * uC[20].z, uC[20].y + (1.0 - t.y / w) * 0.5 * uC[20].w);\n' +
-        '  gl_Position = vec4(((s.x + 0.5) / uC[21].x * 2.0 - 1.0) * w, (1.0 - (s.y + 0.5) / uC[21].y * 2.0) * w, (t.z / w * 2.0 - 1.0) * w, w);\n' +
+        '  vec2 s = vec2(K(20).x + (t.x / w + 1.0) * 0.5 * K(20).z, K(20).y + (1.0 - t.y / w) * 0.5 * K(20).w);\n' +
+        '  gl_Position = vec4(((s.x + 0.5) / K(21).x * 2.0 - 1.0) * w, (1.0 - (s.y + 0.5) / K(21).y * 2.0) * w, (t.z / w * 2.0 - 1.0) * w, w);\n' +
         '  gl_PointSize = 1.0;\n' +
         '}\n';
     // The texture stage, alpha test and fog setup are constants of each program, one program per distinct setup:
@@ -175,7 +177,8 @@ EM_JS(int, js_gl_init, (int w, int h), {
         gl.useProgram(prog);
         p = { prog, u: {}, tex0: k[12] === 1, tex1: k[13] === 1, vkey: k[17] };
         for (const n of ['uTex0', 'uTex1', 'uTFactor', 'uARef', 'uFog']) p.u[n] = gl.getUniformLocation(prog, n);
-        if (k[17] !== STREAM) gl.uniformBlockBinding(prog, gl.getUniformBlockIndex(prog, 'C'), 0);
+        if (k[17] !== STREAM) { p.u.uK = gl.getUniformLocation(prog, 'uK'); p.u.uB = gl.getUniformLocation(prog, 'uB'); gl.uniform1i(p.u.uK, 2); }
+        p.block = -1;
         gl.uniform1i(p.u.uTex0, 0);
         gl.uniform1i(p.u.uTex1, 1);
         programs.set(key, p);
@@ -191,9 +194,15 @@ EM_JS(int, js_gl_init, (int w, int h), {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.enable(gl.SCISSOR_TEST);
     const G = self.__gl = { canvas, gl, program, STREAM, vbo, cur: null, textures: new Map(), buffers: [new Map(), new Map()],
-                            vao: gl.createVertexArray(), ubo: gl.createBuffer(), w, h, last: 0 };
-    // Constant blocks sit 256 bytes apart (gl_buffer_draw); a GPU that needs a coarser offset keeps the CPU path.
-    if (gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT) > 256) return 1;
+                            vao: gl.createVertexArray(), consts: gl.createTexture(), ring: 0, w, h, last: 0 };
+    // Draw constants: 27 blocks of 75 texels per row, and room for two frames' worth so a run never rewrites rows the
+    // GPU may still be reading.
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, G.consts);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 27 * 75, 608);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.activeTexture(gl.TEXTURE0);
     // 2: a GPU, which takes the vertex work too; 1: a software rasteriser, where the CPU path is faster on small maps.
     return /SwiftShader|llvmpipe|lavapipe|Software|Basic Render/i.test(renderer) ? 1 : 2;
 });
@@ -254,7 +263,7 @@ EM_JS(void, js_gl_texture_lod, (uint32_t id, int lod), {
 /* Runs one recorded command list: the vertices of all its draws are uploaded at once, then each command (GL
    primitive, first vertex, count, 41 state words, then 16 words for a draw from a vertex buffer: see gl_buffer_draw)
    sets what changed and draws. */
-EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, int ncmds, const uint8_t* consts, int cbytes), {
+EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, int ncmds, const float* consts, int nconsts), {
     const G = self.__gl, gl = G.gl;
     const P = G.prev || (G.prev = new Int32Array(41).fill(-1));
     const A = G.attribs || (G.attribs = new Int32Array(11).fill(-1));
@@ -270,13 +279,20 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
     gl.bufferSubData(gl.ARRAY_BUFFER, G.ring, HEAPU8, verts, bytes);
     const first = G.ring / 40;
     G.ring += bytes;
-    // Every constant block of the run goes up in one upload; each draw then binds its range, instead of thousands of
-    // uniform calls that filled the GPU process's command buffer.
-    if (cbytes) {
-        gl.bindBuffer(gl.UNIFORM_BUFFER, G.ubo);
-        gl.bufferData(gl.UNIFORM_BUFFER, HEAPU8.subarray(consts, consts + cbytes), gl.STREAM_DRAW);
+    // Every constant block of the run goes up in one upload, starting on a fresh row of the ring; each draw then only
+    // names its block. A uniform buffer bound per draw cost the D3D11 backend a constant-buffer copy each time.
+    let kbase = 0;
+    if (nconsts) {
+        const rows = Math.ceil(nconsts / 27);
+        if (G.ring + rows > 608) G.ring = 0;
+        kbase = G.ring * 27;
+        gl.activeTexture(gl.TEXTURE2);
+        const full = Math.floor(nconsts / 27), rest = nconsts - full * 27;
+        if (full) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.ring, 27 * 75, full, gl.RGBA, gl.FLOAT, HEAPF32, consts >> 2);
+        if (rest) gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, G.ring + full, rest * 75, 1, gl.RGBA, gl.FLOAT, HEAPF32, (consts >> 2) + full * 27 * 300);
+        gl.activeTexture(gl.TEXTURE0);
+        G.ring += rows;
     }
-    let block = -1;
     let base = 0;
     const S = (i) => HEAP32[base + i];
     const changed = (from, to) => {
@@ -356,7 +372,8 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
         }
         const vb = G.buffers[0].get(HEAP32[g + 1] >>> 0), ib = HEAP32[g + 2] ? G.buffers[1].get(HEAP32[g + 2] >>> 0) : null;
         if (!vb || (HEAP32[g + 2] && !ib)) continue;
-        if (block !== HEAP32[g + 13]) { block = HEAP32[g + 13]; gl.bindBufferRange(gl.UNIFORM_BUFFER, 0, G.ubo, block, 1200); }
+        const block = kbase + HEAP32[g + 13];
+        if (G.cur.block !== block) { G.cur.block = block; gl.uniform2i(u.uB, (block % 27) * 75, Math.floor(block / 27)); }
         if (!G.vaoOn) { gl.bindVertexArray(G.vao); G.vaoOn = true; A.fill(-1); }
         let same = true;
         for (let i = 0; i < 11; i++) if (A[i] !== HEAP32[g + 1 + i]) { A[i] = HEAP32[g + 1 + i]; same = false; }
@@ -556,21 +573,18 @@ static uint32_t gl_texture(uint32_t tex) {
 typedef struct { int32_t prim, first, count, st[41], g[16]; } GlCmd;
 static GlCmd gl_cmds[MAX_CMDS];
 static uint32_t gl_ncmds, gl_nverts;
-/* Vertex-shader constants of buffer draws: one block of up to GL_CONSTS vec4s per draw, each starting on a 256-byte
-   boundary so a draw can bind its own range, and followed by enough room for the full block the shader declares. A draw
-   whose constants match the previous block's reuses it. */
+/* Vertex-shader constants of buffer draws, GL_CONSTS vec4s per block; a draw whose constants match the previous
+   block's reuses it. */
 #define GL_CONSTS 75
-#define GL_CONST_SIZE (GL_CONSTS * 16)
-static float gl_consts[(MAX_CMDS * 1280 + GL_CONST_SIZE) / 4] __attribute__((aligned(16)));
-static uint32_t gl_cbytes, gl_clast, gl_clen;
+static float gl_consts[MAX_CMDS][GL_CONSTS * 4];
+static uint32_t gl_nconsts;
 
 static void gl_flush(void) {
     if (!gl_ncmds) return;
     double t = prof_mark();
-    js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds, (const uint8_t*)gl_consts,
-              gl_cbytes ? (int)(gl_cbytes + GL_CONST_SIZE) : 0);
+    js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds, gl_consts[0], (int)gl_nconsts);
     prof_submit += prof_mark() - t;
-    gl_ncmds = gl_nverts = gl_cbytes = gl_clen = 0;
+    gl_ncmds = gl_nverts = gl_nconsts = 0;
 }
 
 /* The command a draw appends to: the current one when it is a triangle list with the same state, else a new one. */
@@ -727,8 +741,8 @@ static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t bas
     gl_state(st);
     if (gl_ncmds == MAX_CMDS) gl_flush();
 
-    float* c = gl_consts + gl_cbytes / 4;
-    memset(c, 0, GL_CONST_SIZE);
+    float* c = gl_consts[gl_nconsts];
+    memset(c, 0, sizeof gl_consts[0]);
     put_mat(c, &wvp); put_mat(c + 16, &wv); put_mat(c + 32, &R.world); put_mat(c + 48, &R.tex[0]); put_mat(c + 64, &R.tex[1]);
     c[80] = LY.vx; c[81] = LY.vy; c[82] = LY.vw; c[83] = LY.vh;
     c[84] = (float)SW(R.target); c[85] = (float)SH(R.target);
@@ -743,12 +757,9 @@ static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t bas
         memcpy(d + 4, L + 1, 12); memcpy(d + 8, L + 9, 12); memcpy(d + 12, L + 13, 12); memcpy(d + 16, L + 16, 12);
         memcpy(d + 20, L + 21, 12);
     }
-    uint32_t len = (27u + 6u * (uint32_t)nlights) * 16u, block = gl_clast;
-    if (len != gl_clen || memcmp(c, gl_consts + gl_clast / 4, len)) {
-        block = gl_clast = gl_cbytes;
-        gl_clen = len;
-        gl_cbytes += (len + 255) & ~255u;
-    }
+    uint32_t block = gl_nconsts;
+    if (block && !memcmp(c, gl_consts[block - 1], sizeof gl_consts[0])) block--;
+    else gl_nconsts++;
 
     GlCmd* cmd = &gl_cmds[gl_ncmds++];
     static const int32_t gl_prim[7] = {0, 0, 1, 3, 4, 5, 6};   /* POINTS LINES LINE_STRIP TRIANGLES _STRIP _FAN */
