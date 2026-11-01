@@ -239,7 +239,9 @@ def make_handler(game, build, relay, auth):
                 return self.reply(404)
             headers = {h: self.headers[h] for h in FORWARDED_REQUEST_HEADERS if self.headers.get(h)}
             if path.startswith("gameforge/"):
-                headers["Origin"] = "spark://www.gameforge.com"
+                # The launcher's own pages send this Origin; its code request comes from the game library and sends none.
+                if self.headers.get("X-Spark-Origin") == "1":
+                    headers["Origin"] = "spark://www.gameforge.com"
                 if self.headers.get("X-User-Agent"):
                     headers["User-Agent"] = self.headers["X-User-Agent"]
                 if self.headers.get("X-Installation-Id"):

@@ -108,7 +108,8 @@
     let json = null;
     try { json = text ? JSON.parse(text.replace(/^﻿/, '')) : null; } catch { /* plain-text error */ }
     if (!r.ok) {
-      const detail = json?.message || json?.error || (json?.errorTypes || []).join(', ') || text || r.statusText;
+      const detail = [json?.message, json?.error, ...(json?.errorTypes || [])]
+        .filter(Boolean).map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(', ') || text || r.statusText;
       throw new Error(`${r.status} ${detail}`);
     }
     return json;
@@ -152,7 +153,7 @@
   }
 
   async function gameforgeLogin() {
-    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent };
+    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent, 'X-Spark-Origin': '1' };
     say('Logging in to Gameforge…');
     const session = await call('gameforge/v2/authProviders/credentials/sessions', {
       method: 'POST', headers,
@@ -165,7 +166,7 @@
   }
 
   async function loadAccounts() {
-    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent };
+    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent, 'X-Spark-Origin': '1' };
     const all = Object.values(await call('gameforge/v1/user/accounts', { bearer: gf.token, headers }) || {});
     gf.accounts = all.filter((a) => (a.guls?.game || 'nostale') === 'nostale');
     const none = !gf.accounts.length;
@@ -189,7 +190,7 @@
     if (!name) throw new Error('Enter a name for the game account');
     say('Creating the game account…');
     await call('gameforge/v2/users/me/accounts', {
-      method: 'POST', bearer: gf.token, headers: { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent },
+      method: 'POST', bearer: gf.token, headers: { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent, 'X-Spark-Origin': '1' },
       body: { blackbox: await blackbox(), displayName: name, gameEnvironmentId: NOSTALE_ENVIRONMENT_ID,
         gfLang: GF_LANG[Number($('region').value)], gameId: NOSTALE_GAME_ID },
     });
@@ -199,7 +200,7 @@
   async function gameforgeCode() {
     const account = gf.accounts.find((a) => a.id === $('account').value);
     prefs.set('gfAccount', account.id);
-    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent };
+    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent, 'X-Spark-Origin': '1' };
     say('Getting an auth code…');
     await call('gameforge/v1/auth/iovation', {
       method: 'POST', bearer: gf.token, headers, body: { accountId: account.id, blackbox: await blackbox(), type: 'play_now' },
