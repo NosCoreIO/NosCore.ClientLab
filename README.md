@@ -71,6 +71,12 @@ python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user <accou
 `serve.py` mints the launcher's auth code from the NosCore WebApi for that account, or you can pass one with
 `?auth=<code>`.
 
+Started without `--user`, the page opens a launcher instead (`launch.html`). It logs in with a Gameforge account,
+a NosCore account or the client's own username and password form, and sends the client to the login server you
+enter. Credentials go from the page through `serve.py`, which adds the headers a page cannot set, and are never
+stored. A Gameforge login runs Gameforge's own fingerprint and captcha scripts, so use a normal browser window:
+the captcha failed in headless Chromium. Gameforge's terms forbid third-party clients: use a throwaway account.
+
 ### Linux
 
 The same pipeline runs on Linux (Python 3 with `capstone` and `pefile`, Emscripten's `emcc` on `PATH`, Ghidra 12 with

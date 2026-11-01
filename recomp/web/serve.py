@@ -2,6 +2,9 @@
 HTTP Range support). Nothing of the client is copied anywhere.
 
 usage: serve.py --game "C:/Program Files (x86)/Nostale" [--build C:/tools/re/work/wasm/web] [--port 8077]
+
+Without --user, http://127.0.0.1:<port>/ opens the launcher (launch.html): Gameforge account, NosCore account or the
+client's own password form, and the login server to connect to.
 """
 import argparse
 import http.server
@@ -13,6 +16,7 @@ import socket
 import ssl
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -121,6 +125,27 @@ def fetch_auth_code(auth_url, user, password):
     return code["code"]
 
 
+# The launcher page cannot make these calls itself: it may not set User-Agent or Origin, and the hosts do not allow it
+# cross-origin. Each prefix maps to one upstream; nothing else is forwarded.
+GAMEFORGE_API = "https://spark.gameforge.com/api/"
+LAUNCHER_VERSION_URL = "http://dl.tnt.gameforge.com/tnt/final-ms3/clientversioninfo.json"
+FORWARDED_REQUEST_HEADERS = ("Content-Type", "Authorization", "gf-challenge-id")
+FORWARDED_RESPONSE_HEADERS = ("Content-Type", "gf-challenge-id")
+
+
+def forward(method, url, headers, body):
+    ctx = ssl.create_default_context()
+    if url.startswith("https://127.0.0.1") or url.startswith("https://localhost"):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url, data=body if method != "GET" else None, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=15) as r:
+            return r.status, r.headers, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read()
+
+
 def make_handler(game, build, relay, auth):
     class Handler(http.server.BaseHTTPRequestHandler):
         # Keep-alive: the worker reads game files in synchronous 1 MB range requests, and a new connection and thread
@@ -134,12 +159,17 @@ def make_handler(game, build, relay, auth):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
-            self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-            self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
+            # The launcher loads Gameforge's fingerprint and challenge scripts, which cross-origin isolation would block;
+            # only the game page needs it, for SharedArrayBuffer.
+            if urllib.parse.urlparse(self.path).path != "/launch.html":
+                self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+                self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
             self.send_header("Cache-Control", "max-age=31536000, immutable" if immutable else "no-cache")
 
         def resolve(self):
             path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
+            if path == "/launch.html":
+                return os.path.join(HERE, "launch.html")
             if path in ("/", "/index.html"):
                 return os.path.join(HERE, "index.html")
             if path == "/worker.js":
@@ -190,10 +220,55 @@ def make_handler(game, build, relay, auth):
                 return self.reply(502, str(e).encode(), "text/plain")
             self.reply(404)
 
+        def forward(self, url):
+            # A custom header makes any cross-site request preflight, which this server never answers, so only the
+            # launcher on this origin can use the forwarder.
+            if self.headers.get("X-Launcher") != "1":
+                return self.reply(403)
+            path = url.path[len("/forward/"):]
+            if path.startswith("gameforge/"):
+                target = GAMEFORGE_API + path[len("gameforge/"):]
+            elif path == "launcher-version":
+                target = LAUNCHER_VERSION_URL
+            elif path.startswith("noscore/"):
+                base = self.headers.get("X-Auth-Url") or auth["url"]
+                if not base.startswith(("http://", "https://")):
+                    return self.reply(400)
+                target = f"{base.rstrip('/')}/{path[len('noscore/'):]}"
+            else:
+                return self.reply(404)
+            headers = {h: self.headers[h] for h in FORWARDED_REQUEST_HEADERS if self.headers.get(h)}
+            if path.startswith("gameforge/"):
+                headers["Origin"] = "spark://www.gameforge.com"
+                if self.headers.get("X-User-Agent"):
+                    headers["User-Agent"] = self.headers["X-User-Agent"]
+                if self.headers.get("X-Installation-Id"):
+                    headers["tnt-installation-id"] = headers["gf-installation-id"] = self.headers["X-Installation-Id"]
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                status, rheaders, data = forward(self.command, target, headers, body)
+            except OSError as e:
+                return self.reply(502, str(e).encode(), "text/plain")
+            self.send_response(status)
+            self.headers_common(rheaders.get("Content-Type") or "application/octet-stream", len(data))
+            for h in FORWARDED_RESPONSE_HEADERS[1:]:
+                if rheaders.get(h):
+                    self.send_header(h, rheaders[h])
+            self.end_headers()
+            self.wfile.write(data)
+
         def serve(self, head):
             url = urllib.parse.urlparse(self.path)
             if url.path.startswith("/net/"):
                 return self.net(url)
+            if url.path.startswith("/forward/"):
+                return self.forward(url)
+            if url.path == "/" and not url.query and not auth["user"]:
+                self.send_response(302)
+                self.send_header("Location", "/launch.html")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if url.path == "/auth-code":
                 if not auth["user"]:
                     return self.reply(404)
@@ -248,6 +323,9 @@ def make_handler(game, build, relay, auth):
         def do_POST(self):
             self.serve(False)
 
+        def do_DELETE(self):
+            self.serve(False)
+
         def do_HEAD(self):
             self.serve(True)
 
@@ -260,7 +338,7 @@ def main():
     work = os.environ.get("NOSRECOMP_WORK", r"C:\tools\re\work" if os.name == "nt" else os.path.expanduser("~/re/work"))
     ap.add_argument("--build", default=os.path.join(work, "wasm", "web"))
     ap.add_argument("--port", type=int, default=8077)
-    ap.add_argument("--auth-url", default="https://127.0.0.1:7001")
+    ap.add_argument("--auth-url", default="https://127.0.0.1:7001", help="NosCore WebApi, for --user and the launcher's default")
     ap.add_argument("--user", help="local NosCore account used to mint _NC_AUTH_CODE (dev only)")
     ap.add_argument("--password")
     ap.add_argument("--remap", action="append", default=[], metavar="FROM=TO",
