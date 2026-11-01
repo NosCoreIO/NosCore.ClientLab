@@ -53,6 +53,7 @@
     <label data-for="gameforge noscore"><span id="userLabel">Email</span><input type="text" id="user" autocomplete="username" spellcheck="false"></label>
     <label data-for="gameforge noscore"><span>Password</span><input type="password" id="password" autocomplete="current-password"></label>
     <label data-for="gameforge" id="accountRow" hidden><span>Game account</span><select id="account"></select></label>
+    <label data-for="gameforge" id="newAccountRow" hidden><span>New NosTale game account name</span><input type="text" id="newAccount" spellcheck="false"></label>
     <p class="hint" data-for="password">The client asks for the username and password itself.</p>
     <p class="hint" data-for="gameforge">Your password goes from this page to Gameforge through the local server and is not stored.</p>
 
@@ -74,6 +75,9 @@
   if (!installationId) { installationId = crypto.randomUUID(); prefs.set('installationId', installationId); }
 
   let gf = null; // { token, accounts } while logged in; never persisted
+  const NOSTALE_GAME_ID = 'dd4e22d6-00d1-44b9-8126-d8b40e0cd7c9';
+  const NOSTALE_ENVIRONMENT_ID = '732876de-012f-4e8d-a501-2e0816cf22f2';
+  const GF_LANG = ['en', 'de', 'fr', 'it', 'pl', 'es', 'ru', 'cz', 'tr'];
   const mode = () => form.mode.value;
   function showMode() {
     const m = mode();
@@ -82,6 +86,7 @@
     $('user').value = prefs.get(`user.${m}`, '');
     $('userLabel').textContent = m === 'gameforge' ? 'Email' : 'Username';
     $('accountRow').hidden = true;
+    $('newAccountRow').hidden = true;
     gf = null;
     go.textContent = m === 'gameforge' ? 'Log in' : 'Launch';
     say('');
@@ -155,16 +160,40 @@
     });
     if (!session?.token) throw new Error('Gameforge sent no session token');
     $('password').value = '';
-    const accounts = Object.values(await call('gameforge/v1/user/accounts', { bearer: session.token, headers }) || {});
-    if (!accounts.length) throw new Error('This Gameforge login has no game accounts yet: create one by playing NosTale once in the launcher');
-    gf = { token: session.token, accounts };
+    gf = { token: session.token, accounts: [] };
+    await loadAccounts();
+  }
+
+  async function loadAccounts() {
+    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent };
+    const all = Object.values(await call('gameforge/v1/user/accounts', { bearer: gf.token, headers }) || {});
+    gf.accounts = all.filter((a) => (a.guls?.game || 'nostale') === 'nostale');
+    const none = !gf.accounts.length;
+    $('newAccountRow').hidden = !none;
+    $('accountRow').hidden = none;
+    if (none) {
+      go.textContent = 'Create game account';
+      say('This Gameforge login has no NosTale game account yet. Name one to create it.');
+      return;
+    }
     const select = $('account');
-    select.replaceChildren(...accounts.map((a) => new Option(a.displayName || a.id, a.id)));
+    select.replaceChildren(...gf.accounts.map((a) => new Option(a.displayName || a.id, a.id)));
     const last = prefs.get('gfAccount', null);
-    if (accounts.some((a) => a.id === last)) select.value = last;
-    $('accountRow').hidden = false;
+    if (gf.accounts.some((a) => a.id === last)) select.value = last;
     go.textContent = 'Launch';
-    say(accounts.length > 1 ? 'Pick the game account, then launch.' : 'Logged in.');
+    say(gf.accounts.length > 1 ? 'Pick the game account, then launch.' : 'Logged in.');
+  }
+
+  async function createGameAccount() {
+    const name = $('newAccount').value.trim();
+    if (!name) throw new Error('Enter a name for the game account');
+    say('Creating the game account…');
+    await call('gameforge/v2/users/me/accounts', {
+      method: 'POST', bearer: gf.token, headers: { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent },
+      body: { blackbox: await blackbox(), displayName: name, gameEnvironmentId: NOSTALE_ENVIRONMENT_ID,
+        gfLang: GF_LANG[Number($('region').value)], gameId: NOSTALE_GAME_ID },
+    });
+    await loadAccounts();
   }
 
   async function gameforgeCode() {
@@ -181,7 +210,7 @@
     const code = await call('gameforge/v1/auth/thin/codes', {
       method: 'POST', bearer: gf.token,
       headers: { 'X-Installation-Id': installationId, 'X-User-Agent': await launcherUserAgent(account.id) },
-      body: { blackbox: await encryptBlackbox(await blackbox(extra), gsid, account.id), gameId: account.gameId, gsid, platformGameAccountId: account.id },
+      body: { blackbox: await encryptBlackbox(await blackbox(extra), gsid, account.id), gameId: account.gameId || NOSTALE_GAME_ID, gsid, platformGameAccountId: account.id },
     });
     if (!code?.code) throw new Error(code?.message || 'Gameforge sent no auth code');
     return code.code;
@@ -227,6 +256,7 @@
       if (m === 'password') launch(null);
       else if (m === 'noscore') launch(await noscoreCode());
       else if (!gf) await gameforgeLogin();
+      else if (!gf.accounts.length) await createGameAccount();
       else launch(await gameforgeCode());
     } catch (err) {
       say(err.message, true);
