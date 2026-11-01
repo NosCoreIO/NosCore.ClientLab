@@ -112,6 +112,29 @@ function mountGame(FS) {
   postMessage({ type: 'log', text: `mounted ${files.length} game files` });
 }
 
+// ?login=host[:port] sends the client to another login server than the one its exe names: the first address it dials is
+// the login server, and every later connection to that same address goes to the chosen one instead. World servers are
+// whatever the login server sends, so they are left alone.
+const loginTarget = params.get('login');
+if (loginTarget) {
+  const [toHost, toPort] = loginTarget.split(':');
+  let loginServer = null;
+  const open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    if (typeof url === 'string' && url.startsWith('/net/connect?')) {
+      const q = new URLSearchParams(url.slice(url.indexOf('?') + 1));
+      const dialled = `${q.get('host')}:${q.get('port')}`;
+      loginServer = loginServer || dialled;
+      if (dialled === loginServer) {
+        q.set('host', toHost);
+        if (toPort) q.set('port', toPort);
+        url = `/net/connect?${q}`;
+      }
+    }
+    return open.call(this, method, url, ...rest);
+  };
+}
+
 self.Module = {
   noInitialRun: true,
   locateFile: (path) => `/build/${path}`,
@@ -119,7 +142,7 @@ self.Module = {
   printErr: (text) => postMessage({ type: 'log', text }),
   preRun: [() => {
     let code = params.get('auth');
-    if (!code) {
+    if (!code && params.get('mode') !== 'password') {
       const xhr = new XMLHttpRequest();
       xhr.open('GET', '/auth-code', false);
       xhr.send();
@@ -127,6 +150,8 @@ self.Module = {
       postMessage({ type: 'log', text: code ? 'auth code from dev server' : `no auth code (${xhr.status} ${xhr.responseText})` });
     }
     if (code) Module.ENV._NC_AUTH_CODE = code;
+    // The login packet carries the installation the auth code was issued to.
+    if (params.get('installation')) Module.ENV.NC_INSTALLATION_ID = params.get('installation');
     if (params.get('trace')) Module.ENV.PORT_TRACE_CLICK = '1';
     // Debug switches read by the host (PORT_TRACE, PORT_PROFILE_API, ...) pass straight through.
     for (const [k, v] of params) if (k.startsWith('PORT_')) Module.ENV[k] = v;
@@ -134,7 +159,10 @@ self.Module = {
   onRuntimeInitialized() {
     mountGame(Module.FS);
     try {
-      Promise.resolve(Module.callMain([`C:/Nostale/${params.get('exe') || 'NosCore.exe'}`, 'gf', params.get('region') || '0']))
+      // Without arguments the client opens its own username and password form; `gf <region>` logs in with the auth code.
+      const exe = `C:/Nostale/${params.get('exe') || 'NosCore.exe'}`;
+      const args = params.get('mode') === 'password' ? [exe] : [exe, 'gf', params.get('region') || '0'];
+      Promise.resolve(Module.callMain(args))
         .catch((e) => postMessage({ type: 'log', text: `exited: ${e}` }));
     } catch (e) {
       postMessage({ type: 'log', text: `exited: ${e}` });

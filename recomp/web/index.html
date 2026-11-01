@@ -54,6 +54,8 @@
   const status = document.getElementById('status');
   const log = document.getElementById('log');
   const worker = new Worker('/worker.js' + location.search);
+  // An auth code works once; a reload with it would fail at the login server, so a reload goes back to the launcher.
+  if (new URLSearchParams(location.search).has('auth')) history.replaceState(null, '', '/launch.html');
   if (canvas.transferControlToOffscreen) {
     const offscreen = canvas.transferControlToOffscreen();
     worker.postMessage({ type: 'canvas', canvas: offscreen }, [offscreen]);

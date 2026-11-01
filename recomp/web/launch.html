@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NosTale Recomp launcher</title>
+<style>
+  :root { --bg: #101014; --panel: #18181e; --fg: #d8d8e0; --muted: #8a8a96; --line: #2c2c36; --accent: #d9a441; --error: #e06c6c; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; }
+  main { max-width: 440px; margin: 48px auto; padding: 0 16px; }
+  h1 { font-size: 18px; margin: 0 0 16px; }
+  form { display: flex; flex-direction: column; gap: 14px; background: var(--panel); border: 1px solid var(--line); padding: 18px; }
+  fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  legend, label > span { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  label { display: flex; flex-direction: column; }
+  .choice { flex-direction: row; align-items: center; gap: 8px; color: var(--fg); }
+  input[type=text], input[type=email], input[type=password], select {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--line); padding: 7px 8px; font: inherit; }
+  input:focus, select:focus { outline: 1px solid var(--accent); }
+  button { background: var(--accent); color: #111; border: 0; padding: 9px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .hint { color: var(--muted); font-size: 12px; margin: 0; }
+  #status { min-height: 1.4em; margin: 0; }
+  #status.error { color: var(--error); }
+  [hidden] { display: none !important; }
+</style>
+<!-- Gameforge's own fingerprint script (window.game1) and its challenge handler, which wraps fetch to show the captcha
+     when a login answers 409 with gf-challenge-id. -->
+<script src="https://gameforge.com/tra/game1.js"></script>
+<script src="https://challenge.gameforge.com/withFetchPatch.js"></script>
+</head>
+<body>
+<main>
+  <h1>NosTale Recomp</h1>
+  <form id="form" autocomplete="on">
+    <fieldset>
+      <legend>Log in with</legend>
+      <label class="choice"><input type="radio" name="mode" value="gameforge"> Gameforge account</label>
+      <label class="choice"><input type="radio" name="mode" value="noscore"> NosCore account (auth code)</label>
+      <label class="choice"><input type="radio" name="mode" value="password"> Username and password in the client</label>
+    </fieldset>
+
+    <label><span>Login server (IP or IP:port)</span><input type="text" id="server" spellcheck="false" required></label>
+    <label data-for="gameforge noscore"><span>Language</span>
+      <select id="region">
+        <option value="0">English</option><option value="1">Deutsch</option><option value="2">Français</option>
+        <option value="3">Italiano</option><option value="4">Polski</option><option value="5">Español</option>
+        <option value="6">Русский</option><option value="7">Čeština</option><option value="8">Türkçe</option>
+      </select>
+    </label>
+    <label data-for="gameforge noscore"><span id="userLabel">Email</span><input type="text" id="user" autocomplete="username" spellcheck="false"></label>
+    <label data-for="gameforge noscore"><span>Password</span><input type="password" id="password" autocomplete="current-password"></label>
+    <label data-for="gameforge" id="accountRow" hidden><span>Game account</span><select id="account"></select></label>
+    <label data-for="gameforge" id="newAccountRow" hidden><span>New NosTale game account name</span><input type="text" id="newAccount" spellcheck="false"></label>
+    <p class="hint" data-for="password">The client asks for the username and password itself.</p>
+    <p class="hint" data-for="gameforge">Your password goes from this page to Gameforge through the local server and is not stored.</p>
+
+    <button id="go" type="submit">Launch</button>
+    <p id="status" role="status"></p>
+  </form>
+</main>
+<script>
+  const DEFAULT_SERVER = { gameforge: '79.110.84.75', noscore: '127.0.0.1', password: '127.0.0.1' };
+  const $ = (id) => document.getElementById(id);
+  const form = $('form'), status = $('status'), go = $('go');
+
+  const prefs = {
+    get(key, fallback) { try { return localStorage.getItem(`launcher.${key}`) ?? fallback; } catch { return fallback; } },
+    set(key, value) { try { localStorage.setItem(`launcher.${key}`, value); } catch { /* private window */ } },
+  };
+  // Gameforge ties sessions and auth codes to an installation, as its launcher does with the id it creates on install.
+  let installationId = prefs.get('installationId', null);
+  if (!installationId) { installationId = crypto.randomUUID(); prefs.set('installationId', installationId); }
+
+  let gf = null; // { token, accounts } while logged in; never persisted
+  const NOSTALE_GAME_ID = 'dd4e22d6-00d1-44b9-8126-d8b40e0cd7c9';
+  const NOSTALE_ENVIRONMENT_ID = '732876de-012f-4e8d-a501-2e0816cf22f2';
+  const GF_LANG = ['en', 'de', 'fr', 'it', 'pl', 'es', 'ru', 'cz', 'tr'];
+  const mode = () => form.mode.value;
+  function showMode() {
+    const m = mode();
+    for (const el of form.querySelectorAll('[data-for]')) el.hidden = !el.dataset.for.split(' ').includes(m);
+    $('server').value = prefs.get(`server.${m}`, DEFAULT_SERVER[m]);
+    $('user').value = prefs.get(`user.${m}`, '');
+    $('userLabel').textContent = m === 'gameforge' ? 'Email' : 'Username';
+    $('accountRow').hidden = true;
+    $('newAccountRow').hidden = true;
+    gf = null;
+    go.textContent = m === 'gameforge' ? 'Log in' : 'Launch';
+    say('');
+  }
+  form.mode.value = prefs.get('mode', 'gameforge');
+  $('region').value = prefs.get('region', '0');
+  for (const r of form.mode) r.addEventListener('change', showMode);
+  showMode();
+
+  function say(text, error = false) { status.textContent = text; status.classList.toggle('error', error); }
+
+  async function call(path, { method = 'GET', body, bearer, headers = {} } = {}) {
+    const h = { 'X-Launcher': '1', ...headers };
+    if (body !== undefined) h['Content-Type'] = 'application/json';
+    if (bearer) h.Authorization = `Bearer ${bearer}`;
+    const r = await fetch(`/forward/${path}`, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
+    const text = await r.text();
+    let json = null;
+    try { json = text ? JSON.parse(text.replace(/^﻿/, '')) : null; } catch { /* plain-text error */ }
+    if (!r.ok) {
+      const detail = [json?.message, json?.error, ...(json?.errorTypes || [])]
+        .filter(Boolean).map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(', ') || text || r.statusText;
+      throw new Error(`${r.status} ${detail}`);
+    }
+    return json;
+  }
+
+  // --- Gameforge ---------------------------------------------------------------------------------------------------
+
+  function blackbox(extra = null) {
+    if (typeof window.game1 !== 'function') throw new Error("Gameforge's fingerprint script did not load");
+    return new Promise((resolve) => window.game1((value) => resolve(`tra:${value}`), extra));
+  }
+
+  const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const digest = async (alg, text) => hex(await crypto.subtle.digest(alg, new TextEncoder().encode(text)));
+
+  // The thin-code call carries the fingerprint XORed with sha512("<gsid>-<account id>") (as hex text), each byte with the key
+  // byte at the same position counted from both ends.
+  async function encryptBlackbox(box, gsid, accountId) {
+    const key = new TextEncoder().encode(await digest('SHA-512', `${gsid}-${accountId}`));
+    const data = new TextEncoder().encode(box), out = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) { const k = i % key.length; out[i] = data[i] ^ key[k] ^ key[key.length - k - 1]; }
+    let binary = '';
+    for (const b of out) binary += String.fromCharCode(b);
+    return btoa(binary);
+  }
+
+  // The launcher's embedded browser announces itself as "Chrome/C<launcher version> (<checksum>)", the checksum
+  // binding the launcher's signing certificate, the installation and the game account.
+  async function launcherUserAgent(accountId) {
+    const info = await call('launcher-version');
+    const version = info.version;
+    const digit = Number((installationId.match(/[0-9]/) || ['0'])[0]);
+    const even = digit % 2 === 0;
+    const algs = even ? ['SHA-1', 'SHA-256', 'SHA-1'] : ['SHA-256', 'SHA-1', 'SHA-256'];
+    const cert = even ? '99025da70af1ef39d2acd049018887ef5140daebc6f11d80461bcf8d02f2d36b' : 'd68f9401f15791cc396d4d6af3b977bc58ad0002';
+    const parts = [`C${version}`, installationId, accountId];
+    let chain = cert;
+    for (let i = 0; i < 3; i++) chain += await digest(algs[i], parts[i]);
+    const sum = await digest('SHA-256', chain);
+    return `Chrome/C${version} (${accountId.slice(0, 2)}${even ? sum.slice(0, 8) : sum.slice(-8)})`;
+  }
+
+  async function gameforgeLogin() {
+    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent, 'X-Spark-Origin': '1' };
+    say('Logging in to Gameforge…');
+    const session = await call('gameforge/v2/authProviders/credentials/sessions', {
+      method: 'POST', headers,
+      body: { email: $('user').value, password: $('password').value, locale: navigator.language || 'en-GB', blackbox: await blackbox() },
+    });
+    if (!session?.token) throw new Error('Gameforge sent no session token');
+    $('password').value = '';
+    gf = { token: session.token, accounts: [] };
+    await loadAccounts();
+  }
+
+  async function loadAccounts() {
+    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent, 'X-Spark-Origin': '1' };
+    const all = Object.values(await call('gameforge/v1/user/accounts', { bearer: gf.token, headers }) || {});
+    gf.accounts = all.filter((a) => (a.guls?.game || 'nostale') === 'nostale');
+    const none = !gf.accounts.length;
+    $('newAccountRow').hidden = !none;
+    $('accountRow').hidden = none;
+    if (none) {
+      go.textContent = 'Create game account';
+      say('This Gameforge login has no NosTale game account yet. Name one to create it.');
+      return;
+    }
+    const select = $('account');
+    select.replaceChildren(...gf.accounts.map((a) => new Option(a.displayName || a.id, a.id)));
+    const last = prefs.get('gfAccount', null);
+    if (gf.accounts.some((a) => a.id === last)) select.value = last;
+    go.textContent = 'Launch';
+    say(gf.accounts.length > 1 ? 'Pick the game account, then launch.' : 'Logged in.');
+  }
+
+  async function createGameAccount() {
+    const name = $('newAccount').value.trim();
+    if (!name) throw new Error('Enter a name for the game account');
+    say('Creating the game account…');
+    await call('gameforge/v2/users/me/accounts', {
+      method: 'POST', bearer: gf.token, headers: { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent, 'X-Spark-Origin': '1' },
+      body: { blackbox: await blackbox(), displayName: name, gameEnvironmentId: NOSTALE_ENVIRONMENT_ID,
+        gfLang: GF_LANG[Number($('region').value)], gameId: NOSTALE_GAME_ID },
+    });
+    await loadAccounts();
+  }
+
+  async function gameforgeCode() {
+    const account = gf.accounts.find((a) => a.id === $('account').value);
+    prefs.set('gfAccount', account.id);
+    const headers = { 'X-Installation-Id': installationId, 'X-User-Agent': navigator.userAgent, 'X-Spark-Origin': '1' };
+    say('Getting an auth code…');
+    await call('gameforge/v1/auth/iovation', {
+      method: 'POST', bearer: gf.token, headers, body: { accountId: account.id, blackbox: await blackbox(), type: 'play_now' },
+    });
+    const session = crypto.randomUUID();
+    const gsid = `${session}-${String(1 + Math.floor(Math.random() * 9999)).padStart(4, '0')}`;
+    const extra = { features: [1 + Math.floor(Math.random() * 0xFFFFFFFD)], installation: installationId, session };
+    const code = await call('gameforge/v1/auth/thin/codes', {
+      method: 'POST', bearer: gf.token,
+      headers: { 'X-Installation-Id': installationId, 'X-User-Agent': await launcherUserAgent(account.id) },
+      body: { blackbox: await encryptBlackbox(await blackbox(extra), gsid, account.id), gameId: account.gameId || NOSTALE_GAME_ID, gsid, platformGameAccountId: account.id },
+    });
+    if (!code?.code) throw new Error(code?.message || 'Gameforge sent no auth code');
+    return code.code;
+  }
+
+  // --- NosCore -----------------------------------------------------------------------------------------------------
+
+  async function noscoreCode() {
+    say('Logging in to NosCore…');
+    const session = await call('noscore/api/v1/auth/thin/sessions', {
+      method: 'POST',
+      body: { identity: $('user').value, password: $('password').value, gfLang: 'EN', locale: 'en-GB', mfa: null },
+    });
+    $('password').value = '';
+    const code = await call('noscore/api/v1/auth/thin/codes', {
+      method: 'POST', bearer: session.token, body: { platformGameAccountId: session.platformGameAccountId },
+    });
+    return code.code;
+  }
+
+  // -----------------------------------------------------------------------------------------------------------------
+
+  // host[:port]: a host with no space or slash, and a port in 1..65535 when one is given.
+  function validLoginServer(value) {
+    const m = /^([^\s/:]+)(?::(\d{1,5}))?$/.exec(value);
+    return m && (m[2] === undefined || (Number(m[2]) >= 1 && Number(m[2]) <= 65535));
+  }
+
+  function launch(code) {
+    const m = mode(), q = new URLSearchParams(location.search), server = $('server').value.trim();
+    if (!validLoginServer(server)) throw new Error('Enter the login server as an address or address:port');
+    q.set('login', server);
+    if (m === 'password') q.set('mode', 'password');
+    else { q.set('auth', code); q.set('region', $('region').value); }
+    if (m === 'gameforge') q.set('installation', installationId);
+    location.href = `/?${q}`;
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const m = mode();
+    prefs.set('mode', m);
+    prefs.set(`server.${m}`, $('server').value.trim());
+    prefs.set(`user.${m}`, $('user').value);
+    prefs.set('region', $('region').value);
+    go.disabled = true;
+    try {
+      if (m === 'password') launch(null);
+      else if (m === 'noscore') launch(await noscoreCode());
+      else if (!gf) await gameforgeLogin();
+      else if (!gf.accounts.length) await createGameAccount();
+      else launch(await gameforgeCode());
+    } catch (err) {
+      say(err.message, true);
+    } finally {
+      go.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
