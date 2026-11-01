@@ -232,9 +232,16 @@
 
   // -----------------------------------------------------------------------------------------------------------------
 
+  // host[:port]: a host with no space or slash, and a port in 1..65535 when one is given.
+  function validLoginServer(value) {
+    const m = /^([^\s/:]+)(?::(\d{1,5}))?$/.exec(value);
+    return m && (m[2] === undefined || (Number(m[2]) >= 1 && Number(m[2]) <= 65535));
+  }
+
   function launch(code) {
-    const m = mode(), q = new URLSearchParams(location.search);
-    q.set('login', $('server').value.trim());
+    const m = mode(), q = new URLSearchParams(location.search), server = $('server').value.trim();
+    if (!validLoginServer(server)) throw new Error('Enter the login server as an address or address:port');
+    q.set('login', server);
     if (m === 'password') q.set('mode', 'password');
     else { q.set('auth', code); q.set('region', $('region').value); }
     if (m === 'gameforge') q.set('installation', installationId);

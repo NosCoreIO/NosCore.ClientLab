@@ -256,12 +256,18 @@ def make_handler(game, build, relay, auth):
             self.end_headers()
             self.wfile.write(data)
 
+        def loopback_host(self):
+            """The endpoints that open connections on a page's behalf are refused unless the page reached this server by
+            a loopback name, so a rebound DNS name pointing at 127.0.0.1 cannot drive them."""
+            host = self.headers.get("Host", "").rsplit(":", 1)[0].strip("[]")
+            return host in ("127.0.0.1", "localhost", "::1")
+
         def serve(self, head):
             url = urllib.parse.urlparse(self.path)
             if url.path.startswith("/net/"):
-                return self.net(url)
+                return self.net(url) if self.loopback_host() else self.reply(403)
             if url.path.startswith("/forward/"):
-                return self.forward(url)
+                return self.forward(url) if self.loopback_host() else self.reply(403)
             if url.path == "/" and not url.query and not auth["user"]:
                 self.send_response(302)
                 self.send_header("Location", "/launch.html")
