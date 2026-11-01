@@ -231,10 +231,7 @@ def make_handler(game, build, relay, auth):
             elif path == "launcher-version":
                 target = LAUNCHER_VERSION_URL
             elif path.startswith("noscore/"):
-                base = self.headers.get("X-Auth-Url") or auth["url"]
-                if not base.startswith(("http://", "https://")):
-                    return self.reply(400)
-                target = f"{base.rstrip('/')}/{path[len('noscore/'):]}"
+                target = f"{auth['url'].rstrip('/')}/{path[len('noscore/'):]}"
             else:
                 return self.reply(404)
             headers = {h: self.headers[h] for h in FORWARDED_REQUEST_HEADERS if self.headers.get(h)}
@@ -340,7 +337,7 @@ def main():
     work = os.environ.get("NOSRECOMP_WORK", r"C:\tools\re\work" if os.name == "nt" else os.path.expanduser("~/re/work"))
     ap.add_argument("--build", default=os.path.join(work, "wasm", "web"))
     ap.add_argument("--port", type=int, default=8077)
-    ap.add_argument("--auth-url", default="https://127.0.0.1:7001", help="NosCore WebApi, for --user and the launcher's default")
+    ap.add_argument("--auth-url", default="https://127.0.0.1:7001", help="NosCore WebApi, for --user and the launcher's NosCore login")
     ap.add_argument("--user", help="local NosCore account used to mint _NC_AUTH_CODE (dev only)")
     ap.add_argument("--password")
     ap.add_argument("--remap", action="append", default=[], metavar="FROM=TO",

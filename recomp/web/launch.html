@@ -49,7 +49,6 @@
         <option value="6">Русский</option><option value="7">Čeština</option><option value="8">Türkçe</option>
       </select>
     </label>
-    <label data-for="noscore"><span>NosCore WebApi</span><input type="text" id="authUrl" spellcheck="false"></label>
     <label data-for="gameforge noscore"><span id="userLabel">Email</span><input type="text" id="user" autocomplete="username" spellcheck="false"></label>
     <label data-for="gameforge noscore"><span>Password</span><input type="password" id="password" autocomplete="current-password"></label>
     <label data-for="gameforge" id="accountRow" hidden><span>Game account</span><select id="account"></select></label>
@@ -93,7 +92,6 @@
   }
   form.mode.value = prefs.get('mode', 'gameforge');
   $('region').value = prefs.get('region', '0');
-  $('authUrl').value = prefs.get('authUrl', 'https://127.0.0.1:7001');
   for (const r of form.mode) r.addEventListener('change', showMode);
   showMode();
 
@@ -220,15 +218,14 @@
   // --- NosCore -----------------------------------------------------------------------------------------------------
 
   async function noscoreCode() {
-    const headers = { 'X-Auth-Url': $('authUrl').value };
     say('Logging in to NosCore…');
     const session = await call('noscore/api/v1/auth/thin/sessions', {
-      method: 'POST', headers,
+      method: 'POST',
       body: { identity: $('user').value, password: $('password').value, gfLang: 'EN', locale: 'en-GB', mfa: null },
     });
     $('password').value = '';
     const code = await call('noscore/api/v1/auth/thin/codes', {
-      method: 'POST', headers, bearer: session.token, body: { platformGameAccountId: session.platformGameAccountId },
+      method: 'POST', bearer: session.token, body: { platformGameAccountId: session.platformGameAccountId },
     });
     return code.code;
   }
@@ -251,7 +248,6 @@
     prefs.set(`server.${m}`, $('server').value.trim());
     prefs.set(`user.${m}`, $('user').value);
     prefs.set('region', $('region').value);
-    prefs.set('authUrl', $('authUrl').value);
     go.disabled = true;
     try {
       if (m === 'password') launch(null);
