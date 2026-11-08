@@ -58,6 +58,16 @@ uint32_t guest_strdup(const char* s);
 
 int port_file_fd(uint32_t handle);
 extern uint32_t port_frames;
+/* How frames are paced (web.c). VSYNC, the default: the client's own frame limiter is skipped while Present waits for
+   the display, so the game runs at the display's refresh rate. CLIENT_LIMITER (PORT_CLIENT_LIMITER=1): the limiter's
+   wait runs as well, as before (16 ms by default, about 62 frames a second). UNCAPPED (PORT_UNCAPPED=1): neither
+   waits, to measure how fast the client could go. */
+enum { PORT_FRAMES_VSYNC, PORT_FRAMES_CLIENT_LIMITER, PORT_FRAMES_UNCAPPED };
+int port_frame_mode(void);
+/* Presents that waited for the display (an animation frame), counted by web_frame_wait, and when the last present of
+   any kind returned (port_now_ms). */
+extern uint32_t port_paced_frames;
+extern double port_present_ms;
 extern double port_prof_net;
 double port_now_ms(void);
 /* The emulated display: one monitor whose mode ChangeDisplaySettings picks from a fixed list. */

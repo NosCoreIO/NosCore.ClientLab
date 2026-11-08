@@ -409,12 +409,20 @@ static void sleep_ms(CPU* c, uint32_t ms) {
 }
 static void k_Sleep(CPU* c) { sleep_ms(c, ARG(0)); }
 /* No asynchronous procedure call is ever queued, so an alertable sleep only ends on its timeout. */
-/* The client's main loop sleeps out the rest of a 16 ms frame with an alertable SleepEx; PORT_UNCAPPED=1 skips that
-   wait so the frame rate shows what the machine can do. */
+/* The client's main loop is its own frame limiter: it times each frame with GetTickCount and sleeps the rest of an
+   interval (a game option: 32, 16, 13, 10, 7, 6 or 3 ms, 16 by default) with an alertable SleepEx. On top of Present's
+   wait for the display that held the game near 62 frames a second whatever the display. By default (port_frame_mode)
+   that wait is skipped as long as the loop presents and every present waits for the display: the display paces the
+   game instead, up to its refresh rate. A loop that stops presenting (or presents without waiting, such as under Node)
+   sleeps as the client asked, so it never spins. PORT_CLIENT_LIMITER=1 keeps the wait; PORT_UNCAPPED=1 always skips
+   it, for measuring. */
 static void k_SleepEx(CPU* c) {
-    static int uncapped = -1;
-    if (uncapped < 0) uncapped = getenv("PORT_UNCAPPED") != 0;
-    if (!(uncapped && ARG(1))) sleep_ms(c, ARG(0));
+    static uint32_t paced_seen;
+    int mode = port_frame_mode(), skip = 0;
+    if (ARG(1) && mode == PORT_FRAMES_UNCAPPED) skip = 1;
+    else if (ARG(1) && mode == PORT_FRAMES_VSYNC) skip = port_paced_frames != paced_seen;
+    paced_seen = port_paced_frames;
+    if (!skip) sleep_ms(c, ARG(0));
     RET(0);
 }
 /* The client's only thread is a TCkThread: every 10 minutes it raises an event (method pointer at +0x40/+0x44,
