@@ -63,6 +63,10 @@ FLAG_RW = {
 }
 
 
+# Integer instructions that leave the cached x87 values in their locals (anything else writes them back first).
+FCACHE_KEEP = {"wait", "fwait", "sahf", "mov", "lea", "push", "pop", "add", "sub", "and", "or", "xor", "cmp", "test",
+               "movzx", "movsx", "inc", "dec", "shl", "shr", "sar", "imul", "neg", "not", "cdq"}
+
 SHIFTS = {"shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr", "shld", "shrd"}
 
 
@@ -504,9 +508,7 @@ class FnGen:
             if i.address in labels:
                 self.fflush()
                 o.append(f"L_{i.address:08x}:")
-            if not i.mnemonic.startswith("f") and i.mnemonic not in ("wait", "fwait", "sahf", "mov", "lea", "push", "pop",
-                                                                     "add", "sub", "and", "or", "xor", "cmp", "test", "movzx", "movsx",
-                                                                     "inc", "dec", "shl", "shr", "sar", "imul", "neg", "not", "cdq"):
+            if not i.mnemonic.startswith("f") and i.mnemonic not in FCACHE_KEEP:
                 self.fflush()
             try:
                 self.in_fpu = i.mnemonic.startswith("f")
@@ -584,7 +586,10 @@ class FnGen:
         if m == "pop":
             if ops[0].type == X.X86_OP_REG and ops[0].reg == X.X86_REG_ESP:
                 self.e("c->esp = M32(c->esp);"); return
-            self.e("t = M32(c->esp); c->esp += 4;")
+            if ops[0].size == 2:
+                self.e("t = M16(c->esp); c->esp += 2;")
+            else:
+                self.e("t = M32(c->esp); c->esp += 4;")
             self.e(self.wr(ops[0], "t")); return
         if m == "pushfd":
             self.e("PUSH(rt_get_eflags(c));"); return
@@ -643,6 +648,16 @@ class FnGen:
             sz = ops[0].size
             cnt = self.rd(ops[2], 1) if len(ops) == 3 else "R8L(1)"
             fnm = "rt_shld" if m == "shld" else "rt_shrd"
+            if sz == 2:
+                # Counts above 16 leave the result undefined; up to 16 the word shifts in from the 32-bit pair.
+                d, s = self.rd(ops[0]), self.rd(ops[1])
+                if m == "shld":
+                    calc = "r = (uint16_t)((((uint64_t)a << 16 | b) << n) >> 16); CF = (a >> (16 - n)) & 1;"
+                else:
+                    calc = "r = (uint16_t)(((uint32_t)b << 16 | a) >> n); CF = (a >> (n - 1)) & 1;"
+                self.e(f"{{ uint32_t n = ({cnt}) & 31; if (n) {{ a = {d}; b = {s}; {calc} OF = ((r ^ a) >> 15) & 1;"
+                       f" ZF = r == 0; SF = r >> 15; PF = PARITY((uint8_t)r); {self.wr(ops[0], '(uint16_t)r')} }} }}")
+                return
             self.e(f"{{ uint32_t n = ({cnt}) & 31; if (n) {{ {self.wr(ops[0], f'{fnm}(c, {self.rd(ops[0])}, {self.rd(ops[1])}, n)')} }} }}")
             return
         if m == "imul":
@@ -682,7 +697,7 @@ class FnGen:
         if m in ("bt", "bts", "btr", "btc"):
             sz = ops[0].size
             if ops[0].type == X.X86_OP_MEM and ops[1].type == X.X86_OP_REG:
-                self.e(f"{{ int32_t bi = (int32_t){self.rd(ops[1])}; uint32_t ea = {self.addr(ops[0])} + (uint32_t)((bi >> 3) & ~3); uint32_t bit = (uint32_t)bi & 31; CF = (M32(ea) >> bit) & 1;"
+                self.e(f"{{ int32_t bi = ({STYPE[sz]}){self.rd(ops[1])}; uint32_t ea = {self.addr(ops[0])} + (uint32_t)((bi >> 3) & ~3); uint32_t bit = (uint32_t)bi & 31; CF = (M32(ea) >> bit) & 1;"
                        + {"bt": "", "bts": " M32(ea) |= 1u << bit;", "btr": " M32(ea) &= ~(1u << bit);", "btc": " M32(ea) ^= 1u << bit;"}[m] + " }")
                 return
             self.e(f"{{ uint32_t bit = {self.rd(ops[1])} & {sz * 8 - 1}; a = {self.rd(ops[0])}; CF = (a >> bit) & 1;")

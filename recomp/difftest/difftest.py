@@ -3,6 +3,10 @@ states in a native harness, and the same bytes run under Unicorn from the same s
 the memory sandbox must match.
 
 usage: difftest.py <client exe> <functions.txt> <work dir> [--cases N] [--only MNEMONIC]
+       difftest.py --synthetic <work dir> [--cases N] [--only MNEMONIC]
+
+--synthetic needs no client: it tests the forms listed in synthetic.py (operand sizes, edge counts, x87 and string
+forms the client may not contain), assembled with GNU as. On Linux and macOS the harness is built with cc.
 """
 import argparse
 import os
@@ -19,6 +23,7 @@ from unicorn import x86_const as U
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import lift  # noqa: E402
+import synthetic  # noqa: E402
 
 SANDBOX, SANDBOX_SIZE = 0x10000000, 0x1000
 CODE_AT = 0x20000000
@@ -27,12 +32,15 @@ REGS = [U.UC_X86_REG_EAX, U.UC_X86_REG_ECX, U.UC_X86_REG_EDX, U.UC_X86_REG_EBX,
         U.UC_X86_REG_ESP, U.UC_X86_REG_EBP, U.UC_X86_REG_ESI, U.UC_X86_REG_EDI]
 REG_INDEX = {X.X86_REG_EAX: 0, X.X86_REG_ECX: 1, X.X86_REG_EDX: 2, X.X86_REG_EBX: 3,
              X.X86_REG_ESP: 4, X.X86_REG_EBP: 5, X.X86_REG_ESI: 6, X.X86_REG_EDI: 7}
+REG16_INDEX = {X.X86_REG_AX: 0, X.X86_REG_CX: 1, X.X86_REG_DX: 2, X.X86_REG_BX: 3,
+               X.X86_REG_SP: 4, X.X86_REG_BP: 5, X.X86_REG_SI: 6, X.X86_REG_DI: 7}
 FLAG_BITS = {"cf": 0, "pf": 2, "zf": 6, "sf": 7, "of": 11}
 ALL_FLAG_MASK = sum(1 << b for b in FLAG_BITS.values())
 
 SKIP = {"call", "ret", "jmp", "loop", "loope", "loopne", "jecxz", "int3", "cpuid", "nop", "wait", "fwait",
         "leave", "pushfd", "popfd", "rdtsc", "hlt", "int", "int1", "into", "iretd", "retf", "ljmp", "lcall"}
-STRING = {"movsb", "movsw", "movsd", "stosb", "stosw", "stosd", "lodsb", "lodsw", "lodsd", "scasb", "cmpsb"}
+STRING = {"movsb", "movsw", "movsd", "stosb", "stosw", "stosd", "lodsb", "lodsw", "lodsd", "scasb", "scasw", "cmpsb",
+          "cmpsw", "cmpsd"}
 FPU_PROLOGUE = bytes([0xDB, 0xE3]) + b"".join(b"\xDD\x05" + struct.pack("<I", FPU_IN + 8 * k) for k in range(4))
 FPU_DEPTH = {"fld": 1, "fild": 1, "fld1": 1, "fldz": 1, "fldpi": 1, "fldl2e": 1, "fldln2": 1, "fldlg2": 1, "fldl2t": 1,
              "fptan": 1, "fsincos": 1, "fstp": -1, "fistp": -1, "fbstp": -1, "fcomp": -1, "fucomp": -1, "ficomp": -1,
@@ -40,9 +48,9 @@ FPU_DEPTH = {"fld": 1, "fild": 1, "fld1": 1, "fldz": 1, "fldpi": 1, "fldl2e": 1,
              "fyl2x": -1, "fpatan": -1, "fninit": -4}
 
 
-def fpu_epilogue(ins):
-    """Store only the stack slots that are valid after the instruction (the prologue loads four)."""
-    depth = 4 + FPU_DEPTH.get(ins.mnemonic, 0)
+def fpu_epilogue(insns):
+    """Store only the stack slots that are valid after the instructions (the prologue loads four)."""
+    depth = 4 + sum(FPU_DEPTH.get(i.mnemonic, 0) for i in insns)
     return b"".join(b"\xDD\x1D" + struct.pack("<I", FPU_OUT + 8 * k) for k in range(max(0, min(depth, 4))))
 
 
@@ -112,23 +120,45 @@ def is_fpu(ins):
     return ins.mnemonic.startswith("f")
 
 
+class SyntheticLifter:
+    """The parts of lift.Lifter a snippet needs, for tests without the client."""
+    code_lo = code_hi = 0
+    code = b""
+
+    def __init__(self):
+        self.md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_32)
+        self.md.detail = True
+
+
 def lift_snippet(L, code, name):
-    """Lift raw instruction bytes (placed at CODE_AT) into one C test function."""
+    """Lift raw instruction bytes (placed at CODE_AT) into one C test function, with x87 values cached in locals the
+    way FnGen.gen does it."""
     md = L.md
+    ins = list(md.disasm(code, CODE_AT))
     lines = [f"static void {name}(CPU* c) {{",
              "  uint32_t tgt = 0, t, a, b, r, ret = 0; uint64_t q; int ind = 0;",
              "  (void)tgt; (void)t; (void)a; (void)b; (void)r; (void)q; (void)ind; (void)ret;"]
     g = lift.FnGen.__new__(lift.FnGen)
-    g.L, g.entry, g.addrs, g.out, g.labelset = L, CODE_AT, set(), [], set()
-    for ins in md.disasm(code, CODE_AT):
-        g.lift(ins, lift.ALL_FLAGS)
+    g.L, g.entry, g.addrs, g.out, g.labelset, g.ins = L, CODE_AT, {i.address for i in ins}, [], set(), ins
+    g.uses_seh, g.call_owner, g.callees, g.fd, g.in_fpu = False, {}, set(), 0, False
+    g.fcache = any(i.mnemonic.startswith("f") for i in ins)
+    if g.fcache:
+        lines.append("  double F0, F1, F2, F3, F4, F5, F6, F7; (void)F0; (void)F1; (void)F2; (void)F3; (void)F4; (void)F5; (void)F6; (void)F7;")
+    for i in ins:
+        if not i.mnemonic.startswith("f") and i.mnemonic not in lift.FCACHE_KEEP:
+            g.fflush()
+        g.in_fpu = i.mnemonic.startswith("f")
+        g.lift(i, lift.ALL_FLAGS)
+        g.in_fpu = False
+    g.fflush()
     lines += g.out
     lines.append("}")
     return "\n".join(lines)
 
 
 def make_state(rng, ins):
-    regs = [rng.getrandbits(32) for _ in range(8)]
+    edge = [0, 1, 2, 0x7F, 0x80, 0xFF, 0x7FFF, 0x8000, 0xFFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 0xFFFFFF80]
+    regs = [rng.choice(edge) if rng.random() < 0.2 else rng.getrandbits(32) for _ in range(8)]
     bases, indexes = set(), set()
     for op in ins.operands:
         if op.type == X.X86_OP_MEM:
@@ -148,14 +178,28 @@ def make_state(rng, ins):
         regs[1] = rng.randrange(0, 24)
         if rng.random() < 0.5:
             regs[0] = (regs[0] & ~0xFF) | rng.choice([0, 0x41, 0x61])
+        if "movs" in m and rng.random() < 0.3:
+            regs[7] = regs[6] + rng.randrange(1, 8)  # overlapping copy: x86 copies element by element
     if m in ("div", "idiv"):
         regs[2] = rng.randrange(0, 4)
     if m.replace("lock ", "") in ("shl", "shr", "sar", "rol", "ror", "rcl", "rcr", "shld", "shrd", "sal") and rng.random() < 0.3:
         regs[1] = (regs[1] & ~0xFF) | rng.choice([0, 1, 31, 32, 33])
+    if m in ("shld", "shrd") and ins.operands[0].size == 2 and (regs[1] & 31) > 16:
+        regs[1] &= ~0x10  # a word shifted by more than 16 has an undefined result
+    if m in ("bt", "bts", "btr", "btc") and ins.operands[0].type == X.X86_OP_MEM and ins.operands[1].type == X.X86_OP_REG:
+        # A register bit offset reaches beyond the operand; keep it (and its sign) within the sandbox.
+        k = REG_INDEX.get(ins.operands[1].reg, REG16_INDEX.get(ins.operands[1].reg))
+        regs[k] = rng.randrange(-0x400, 0x400) & 0xFFFFFFFF
     flags = 0x202 | sum(rng.getrandbits(1) << b for b in FLAG_BITS.values())
+    if (m in STRING or m.startswith("rep")) and rng.random() < 0.3:
+        flags |= 0x400
     seed = rng.getrandbits(32) | 1
     pool = [0.0, 1.0, -2.5, 1e10, 123456789.0, 3.5, -0.5, 2.0 ** 40 + 3, 1.0 / 3, -7.25, 1e-5, 42.0, 0.75, 0.25, -3.0]
     fpu = tuple(rng.choice(pool) for _ in range(4))
+    if m in ("fyl2x", "fprem"):
+        # Unicorn leaves fyl2x of a negative or zero operand unchanged instead of producing NaN/-inf, and its fprem
+        # rounds through a double quotient: keep both in the range where it matches the hardware.
+        fpu = (fpu[0], fpu[1], rng.choice([1.0, 3.5, 0.75, 42.0]), rng.choice([0.25, 3.0, 123.5, 1e-3]))
     return regs, flags, seed, fpu
 
 
@@ -192,21 +236,31 @@ def run_unicorn(code, regs, flags, seed, fpu, fpu_test):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("exe")
-    ap.add_argument("functions")
-    ap.add_argument("work")
+    ap.add_argument("paths", nargs="+", help="<client exe> <functions.txt> <work dir>, or <work dir> with --synthetic")
+    ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--cases", type=int, default=24)
     ap.add_argument("--per-shape", type=int, default=2)
     ap.add_argument("--only")
     a = ap.parse_args()
+    if len(a.paths) != (1 if a.synthetic else 3):
+        ap.error("expected <client exe> <functions.txt> <work dir>, or --synthetic <work dir>")
+    a.work = os.path.abspath(a.paths[-1])
     os.makedirs(a.work, exist_ok=True)
 
-    L = lift.Lifter(a.exe)
-    fns = []
-    for line in open(a.functions):
-        e, n, rs = line.split()
-        fns.append((int(e, 16), n, [tuple(int(x, 16) for x in r.split("-")) for r in rs.split(",")]))
-    shapes = collect_shapes(L, fns, a.per_shape)
+    if a.synthetic:
+        L = SyntheticLifter()
+        texts = synthetic.forms()
+        shapes = {}
+        for text, raw in zip(texts, synthetic.assemble(texts, a.work)):
+            first = next(L.md.disasm(raw, CODE_AT))
+            shapes[f"{shape_key(first)} | {text}"] = [raw]
+    else:
+        L = lift.Lifter(a.paths[0])
+        fns = []
+        for line in open(a.paths[1]):
+            e, n, rs = line.split()
+            fns.append((int(e, 16), n, [tuple(int(x, 16) for x in r.split("-")) for r in rs.split(",")]))
+        shapes = collect_shapes(L, fns, a.per_shape)
     if a.only:
         shapes = {k: v for k, v in shapes.items() if k.split()[0] == a.only}
     print(f"{len(shapes)} instruction shapes")
@@ -217,7 +271,7 @@ def main():
         for raw in samples:
             ins = next(md.disasm(raw, CODE_AT))
             fpu_test = is_fpu(ins)
-            code = (FPU_PROLOGUE + raw + fpu_epilogue(ins)) if fpu_test else raw
+            code = (FPU_PROLOGUE + raw + fpu_epilogue(md.disasm(raw, CODE_AT))) if fpu_test else raw
             tests.append((key, ins, code, fpu_test))
 
     src = ['#include "rt.h"', ""]
@@ -234,6 +288,21 @@ def main():
 
     here = os.path.dirname(os.path.abspath(__file__))
     runtime = os.path.join(here, "..", "runtime")
+    if os.name != "nt":
+        exe = os.path.join(a.work, "harness")
+        r = subprocess.run([os.environ.get("CC", "cc"), "-O1", "-w", "-fno-strict-aliasing", f"-I{runtime}", "-o", exe,
+                            os.path.join(a.work, "tests.c"), os.path.join(here, "harness_posix.c"),
+                            os.path.join(runtime, "rt.c"), "-lm"], capture_output=True, text=True)
+    else:
+        r = build_msvc(a, here, runtime)
+    if r.returncode:
+        print(r.stdout[-4000:], r.stderr[-4000:])
+        sys.exit(1)
+    exe = os.path.join(a.work, "harness" + (".exe" if os.name == "nt" else ""))
+    run_cases(a, tests, exe)
+
+
+def build_msvc(a, here, runtime):
     vcvars = r"C:\Program Files\Microsoft Visual Studio\18\Professional\VC\Auxiliary\Build\vcvars32.bat"
     exe = os.path.join(a.work, "harness.exe")
     bat = os.path.join(a.work, "build.bat")
@@ -241,10 +310,10 @@ def main():
         f.write(f'@call "{vcvars}" >nul 2>nul\r\n'
                 f'cl /nologo /Od /W0 /GS- /I"{runtime}" /Fe"{exe}" /Fo"{a.work}\\\\" '
                 f'"{os.path.join(a.work, "tests.c")}" "{os.path.join(here, "harness.c")}" "{os.path.join(runtime, "rt.c")}"\r\n')
-    r = subprocess.run(["cmd", "/c", bat], capture_output=True, text=True)
-    if r.returncode:
-        print(r.stdout[-4000:], r.stderr[-2000:])
-        sys.exit(1)
+    return subprocess.run(["cmd", "/c", bat], capture_output=True, text=True)
+
+
+def run_cases(a, tests, exe):
 
     rng = random.Random(1234)
     cases = []

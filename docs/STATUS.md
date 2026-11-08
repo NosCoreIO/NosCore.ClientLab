@@ -72,6 +72,9 @@ The same generated C, built with Emscripten and linked with `recomp/port/` (a ho
 5. Run: `NosTaleRecomp.exe "C:\Program Files (x86)\Nostale\NosCore.exe" gf 0`. The log goes to `out\recomp.log`, plus `recomp-<pid>.log` for each CEF helper.
 6. `recomp/iterate.ps1` loops: run → missing function → add a seed → re-lift → rebuild.
 7. `recomp/difftest/difftest.py <exe> functions.txt <workdir>` runs the lifter correctness check (about 30 s).
+   `recomp/difftest/difftest.py --synthetic <workdir>` needs no client: it checks the forms listed in
+   `recomp/difftest/synthetic.py` (every operand size, shift counts 0/1/>width, 16-bit forms, x87, string ops with
+   overlap and DF=1), assembled with GNU `as`. On Linux it builds `harness_posix.c` with `cc` (about 40 s).
 
 ### How the native runtime works (`recomp/runtime`)
 

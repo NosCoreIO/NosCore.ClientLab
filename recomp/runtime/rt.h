@@ -5,12 +5,13 @@
 #include <intrin.h>
 #else
 /* Portable builds (Emscripten): no Windows underneath, so the MSVC intrinsics the generated code uses map to
-   compiler builtins, and fs: goes to a per-thread virtual TEB owned by the host layer (CPU.fs_base). */
+   compiler builtins on 32-bit guest values (long is 64-bit on LP64 hosts such as the native difftest harness),
+   and fs: goes to a per-thread virtual TEB owned by the host layer (CPU.fs_base). */
 static inline char _InterlockedCompareExchange8(volatile char* p, char x, char cmp) { __atomic_compare_exchange_n(p, &cmp, x, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return cmp; }
-static inline long _InterlockedCompareExchange(volatile long* p, long x, long cmp) { __atomic_compare_exchange_n(p, &cmp, x, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return cmp; }
-static inline long _InterlockedExchangeAdd(volatile long* p, long v) { return __atomic_fetch_add(p, v, __ATOMIC_SEQ_CST); }
-static inline long _InterlockedIncrement(volatile long* p) { return __atomic_add_fetch(p, 1, __ATOMIC_SEQ_CST); }
-static inline long _InterlockedDecrement(volatile long* p) { return __atomic_sub_fetch(p, 1, __ATOMIC_SEQ_CST); }
+static inline long _InterlockedCompareExchange(volatile long* p, long x, long cmp) { int32_t e = (int32_t)cmp; __atomic_compare_exchange_n((volatile int32_t*)p, &e, (int32_t)x, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); return e; }
+static inline long _InterlockedExchangeAdd(volatile long* p, long v) { return __atomic_fetch_add((volatile int32_t*)p, (int32_t)v, __ATOMIC_SEQ_CST); }
+static inline long _InterlockedIncrement(volatile long* p) { return __atomic_add_fetch((volatile int32_t*)p, 1, __ATOMIC_SEQ_CST); }
+static inline long _InterlockedDecrement(volatile long* p) { return __atomic_sub_fetch((volatile int32_t*)p, 1, __ATOMIC_SEQ_CST); }
 static inline unsigned char _BitScanForward(unsigned long* i, unsigned long v) { if (!v) return 0; *i = (unsigned long)__builtin_ctz((unsigned)v); return 1; }
 static inline unsigned char _BitScanReverse(unsigned long* i, unsigned long v) { if (!v) return 0; *i = 31u - (unsigned long)__builtin_clz((unsigned)v); return 1; }
 #define _byteswap_ulong(v) __builtin_bswap32(v)
