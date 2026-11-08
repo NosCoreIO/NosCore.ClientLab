@@ -400,10 +400,17 @@ static void fdset_filter(uint32_t set, int want_read) {
     }
     M32(set) = out;
 }
-/* Waits for readiness up to the timeval (forever when it is NULL); the sets come back holding only ready sockets. */
+/* Waits for readiness up to the timeval (forever when it is NULL); the sets come back holding only ready sockets.
+   The client polls its socket once a game tick with a 1 ms select (TClientCore.Poll). A short sleep here spins until
+   its deadline, so that poll cost a whole millisecond of every frame. Unless the client's own frame limiter is on
+   (port_frame_mode), a select of at most 1 ms reports at once that nothing is ready while the game is presenting
+   frames (one in the last 100 ms); a loop that waits on the network without presenting still waits. */
 static void ws_select(CPU* c) {
     uint32_t rd = ARG(1), wr = ARG(2), tv = ARG(4), saved[2][65];
     double deadline = tv ? port_now_ms() + M32(tv) * 1000.0 + M32(tv + 4) / 1000.0 : -1;
+    if (tv && !M32(tv) && M32(tv + 4) <= 1000 && port_frame_mode() != PORT_FRAMES_CLIENT_LIMITER && port_frames &&
+        port_now_ms() - port_present_ms < 100)
+        deadline = port_now_ms();
     if (rd) memcpy(saved[0], GPTR(rd), 4 * (1 + (M32(rd) < 64 ? M32(rd) : 64)));
     if (wr) memcpy(saved[1], GPTR(wr), 4 * (1 + (M32(wr) < 64 ? M32(wr) : 64)));
     for (;;) {

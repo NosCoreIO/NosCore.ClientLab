@@ -2,7 +2,12 @@
 // The browser is always closed at the end: the client reserves 1 GB+ and stacked runs exhaust RAM.
 //
 // usage: node drive.mjs [--url http://127.0.0.1:8077/] [--trace] [--params PORT_PROFILE_API=1] [--out dir] [--headed]
-//                       [--maps 2,145] [--cpuprofile]
+//                       [--maps 2,145] [--cpuprofile] [--walk-check] [--walk-teleport "<map> <x> <y>"]
+//
+// --walk-check measures walking speed: it clicks a far ground point and logs when each packet the client sends while
+// it walks leaves (the client sends its position as it goes), with screenshots at fixed times after the click. Run it
+// once per frame-pacing mode (the default, then --params PORT_CLIENT_LIMITER=1) from the same position
+// (--walk-teleport, a GM teleport command's arguments) and compare: the times and the screenshots should match.
 import { createRequire } from 'node:module';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -32,11 +37,15 @@ const CHANNEL_ROW = [1068, 422];
 const CHARACTER_SLOT = [1170, 70];
 const START_BUTTON = [840, 965];
 const GROUND = [1000, 520];
+const FAR_GROUND = [1400, 330];
 
 const browser = await chromium.launch({
   headless: !flag('--headed'),
   channel: process.env.DRIVE_CHANNEL || (windows ? 'chrome' : undefined),
-  args: [...(windows ? ['--use-angle=d3d11'] : []), '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-swiftshader'],
+  // DRIVE_CHROME_ARGS adds switches, e.g. "--disable-gpu-vsync --disable-frame-rate-limit" to run animation frames
+  // faster than a 60 Hz panel refreshes.
+  args: [...(windows ? ['--use-angle=d3d11'] : []), '--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-swiftshader',
+         ...(process.env.DRIVE_CHROME_ARGS || '').split(' ').filter(Boolean)],
 });
 let page, profiler;
 // --cpuprofile samples the worker from entering the world to the end of the run into worker.cpuprofile (open it in
@@ -152,6 +161,38 @@ try {
     await profiler('Profiler.enable');
     await profiler('Profiler.setSamplingInterval', { interval: 500 });
     await profiler('Profiler.start');
+  }
+
+  if (flag('--walk-check')) {
+    step('walk check');
+    const teleport = arg('--walk-teleport', '');
+    if (teleport) {
+      await page.focus('#screen');
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(500);
+      await page.keyboard.type(`$Teleport ${teleport}`, { delay: 60 });
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(500);
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(14000);
+    }
+    const r = await canvasAt();
+    await page.mouse.move(r.x + FAR_GROUND[0], r.y + FAR_GROUND[1], { steps: 5 });
+    await page.waitForTimeout(300);
+    const beforeWalk = (await logText()).length;
+    await page.mouse.down();
+    await page.waitForTimeout(150);
+    await page.mouse.up();
+    const t0 = Date.now(), sends = [], shots = [1000, 2000, 3000];
+    let seen = 0;
+    while (Date.now() - t0 < 8000) {
+      const lines = (await logText()).slice(beforeWalk).split('\n').filter((l) => /^send /.test(l));
+      for (; seen < lines.length; seen++) sends.push(Date.now() - t0);
+      if (shots.length && Date.now() - t0 >= shots[0]) await shot(`walk-${shots.shift()}ms.png`);
+      await page.waitForTimeout(40);
+    }
+    console.log(`walk check: packets sent at ${sends.join(', ')} ms after the click (polled every ~40 ms)`);
+    console.log('status:', await page.evaluate(() => document.getElementById('status').textContent));
   }
 
   step('click ground');

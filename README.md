@@ -18,7 +18,9 @@ once per frame. Browsers without it, such as Safari 26 and earlier, cannot start
 - walking, chat, the game windows (inventory, skills, ...), GM teleports between maps;
 - Direct3D 9 rendering on WebGL2 (fixed-function texture stages, lighting, fog, texture-coordinate generation),
   GDI text through the browser's font engine, Miles audio through WebAudio;
-- about 60 frames per second in town at 1080p on an integrated GPU.
+- frames paced to the display's refresh rate (the client's own 16 ms frame limiter is skipped by default;
+  `?PORT_CLIENT_LIMITER=1` restores it). Measured uncapped at 1080p on an integrated GPU: about 130 frames per second
+  in NosVille. [docs/MEASURING.md](docs/MEASURING.md) has the steps.
 
 Every one of the client's 19,436 functions is recompiled (90.4% of the code section's bytes; the rest is data the
 compiler keeps there: VMTs, RTTI, jump tables, strings). What is still open is listed in
@@ -108,6 +110,7 @@ client log to `C:\tools\re\work\drive\`. It is the starting point for NosCore en
 | `tools/` | decompilation pipeline (IDR, Ghidra scripts, cross-reference queries) |
 | `symbols/<md5>/` | names, packet handler tables and recompilation seeds for one client build |
 | `docs/STATUS.md` | current state, lessons learned, how to continue |
+| `docs/MEASURING.md` | frame pacing modes, how to measure frame rate and check game speed |
 
 ## Disclaimer
 
