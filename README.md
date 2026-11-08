@@ -37,7 +37,8 @@ NosCore.exe ──IDR + Ghidra──▶ function list + names (symbols/<md5>/)
 - **Lifter** (`recomp/lift.py`): recursive descent from the Ghidra function list, extended where Ghidra stops early
   (unresolved `case` dispatches, try/finally handlers, VMT-only methods). Direct calls become plain C calls; indirect
   ones go through a flat label table. A Unicorn-based differential tester (`recomp/difftest`) checks instruction
-  semantics. A few hot client functions (the height ray and the path search) have hand-written versions in
+  semantics, on the client's own instruction shapes or, without the client, on a synthetic set of forms
+  (`--synthetic`, runs on Linux). A few hot client functions (the height ray and the path search) have hand-written versions in
   `recomp/runtime/rt_game.c`, used only for the client build they were written against and checked against their lifted
   bodies by `recomp/difftest/overrides.c`.
 - **Portable host** (`recomp/port`): the Windows the client expects, implemented on browser primitives: WebGL2 for
