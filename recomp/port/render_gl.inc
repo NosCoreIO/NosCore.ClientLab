@@ -448,7 +448,7 @@ EM_JS(void, js_gl_resize, (int w, int h), {
    display and lets one slow frame be absorbed by the spare instead of repeating a refresh. A notify wakes it; the
    timeout only matters when the page stops refreshing (hidden or covered), where it keeps the game near 60 frames a
    second, and the count is then resynchronised so a page that refreshes again does not leave every frame waiting. */
-EM_JS(void, js_gl_present, (void), {
+EM_JS(int, js_gl_present, (void), {
     const G = self.__gl, V = self.vsync;
     if (G.direct) {
         // The page's own canvas: the frame is shown when Present yields (web_frame_wait); keep a copy for readbacks.
@@ -468,7 +468,7 @@ EM_JS(void, js_gl_present, (void), {
         gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
         gl.enable(gl.SCISSOR_TEST);
         G.drawn = false;
-        return;
+        return 0;
     }
     if (V) {
         G.posted = G.posted || 0;
@@ -533,6 +533,7 @@ EM_JS(void, js_gl_present, (void), {
         G.posted = (G.posted || 0) + 1;
     }
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    return V ? 1 : 0;
 });
 
 /* The frame as 32-bit BGRA rows, top row first. Presenting hands the drawing buffer to the page and leaves it blank,
@@ -850,8 +851,7 @@ int r_gl_present(void) {
     if (!gl_on) return 0;
     double t = prof_now();
     gl_flush();
-    js_gl_present();
-    web_frame_wait();
+    web_frame_wait(js_gl_present());
     prof_present += prof_now() - t;
     return 1;
 }

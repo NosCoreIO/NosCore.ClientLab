@@ -125,4 +125,7 @@ void hle_d3d9_register(void);
 void hle_cursor_override(const uint8_t* rgba, int w, int h, int hx, int hy);
 void hle_cursor_restore(void);
 void web_present(uint32_t surface);
-void web_frame_wait(void);
+/* paced: the frame was already held back to the page's refresh rate. */
+void web_frame_wait(int paced);
+/* Whether the last Present waited for the display, so frames already come at the screen's refresh rate. */
+int web_display_paced(void);

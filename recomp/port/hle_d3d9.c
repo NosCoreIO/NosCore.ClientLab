@@ -384,7 +384,7 @@ static void present_frame(void) {
     if (++frames % 300 == 1) port_log("Present frame %u", frames);
     if (!r_gl_present()) {
         web_present(backbuffer);
-        web_frame_wait();
+        web_frame_wait(0);
     }
     if (shot_dir && (frames == 1 || frames % 600 == 0)) {
         char path[400];
@@ -1355,14 +1355,20 @@ static void mat_identity(uint32_t m) {
     memset(GPTR(m), 0, 64);
     for (int k = 0; k < 4; k++) MF32(m + 20 * k) = 1.0f;
 }
-static void mat_mul(uint32_t out, uint32_t a, uint32_t b) {
-    float r[16];
+/* r = a * b on host copies, so the compiler need not assume the output aliases the inputs. */
+static void mat_mul_host(float* r, const float* a, const float* b) {
     for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++) {
             float s = 0;
-            for (int k = 0; k < 4; k++) s += MF32(a + 16 * i + 4 * k) * MF32(b + 16 * k + 4 * j);
+            for (int k = 0; k < 4; k++) s += a[4 * i + k] * b[4 * k + j];
             r[4 * i + j] = s;
         }
+}
+static void mat_mul(uint32_t out, uint32_t a, uint32_t b) {
+    float x[16], y[16], r[16];
+    memcpy(x, GPTR(a), 64);
+    memcpy(y, GPTR(b), 64);
+    mat_mul_host(r, x, y);
     memcpy(GPTR(out), r, 64);
 }
 static void x_MatrixPerspectiveFovRH(CPU* c) {
@@ -1504,11 +1510,11 @@ static void mat_set(float* m, float a, float b, float cc, float d, float e, floa
 }
 /* D3DX stack semantics: Op multiplies the top on the right (M = M * X), OpLocal on the left (M = X * M). */
 static void ms_apply(CPU* c, const float* x, int local) {
-    uint32_t tmp = guest_alloc(64, 16), top = ms_top(THIS);
-    memcpy(GPTR(tmp), x, 64);
-    if (local) mat_mul(top, tmp, top);
-    else mat_mul(top, top, tmp);
-    guest_free(tmp);
+    float top[16], r[16];
+    memcpy(top, GPTR(ms_top(THIS)), 64);
+    if (local) mat_mul_host(r, x, top);
+    else mat_mul_host(r, top, x);
+    memcpy(GPTR(ms_top(THIS)), r, 64);
     RET(0);
 }
 static void translation(float* m, float x, float y, float z) { mat_set(m, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1); }

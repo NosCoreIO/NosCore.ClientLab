@@ -33,9 +33,10 @@ void web_present(uint32_t surface) {
 
 /* With the page's canvas handed to the worker, what was drawn only reaches the screen when the worker yields, so
    Present waits here for the next display frame; the page is told how many frames it showed each second.
-   PORT_UNCAPPED=1 yields without waiting for the display, to measure how fast the client could go. */
-EM_ASYNC_JS(void, js_frame_wait, (int uncapped), {
-    if (!self.pageCanvas) return;
+   PORT_UNCAPPED=1 yields without waiting for the display, to measure how fast the client could go. Returns whether it
+   waited for the display. */
+EM_ASYNC_JS(int, js_frame_wait, (int uncapped), {
+    if (!self.pageCanvas) return 0;
     if (uncapped) {
         const ch = self.__yield || (self.__yield = new MessageChannel());
         await new Promise((r) => { ch.port1.onmessage = r; ch.port2.postMessage(0); });
@@ -49,13 +50,17 @@ EM_ASYNC_JS(void, js_frame_wait, (int uncapped), {
         postMessage({ type: 'shown', frames: F.n, w: self.pageCanvas.width, h: self.pageCanvas.height, uncapped });
         F.n = 0; F.since = now;
     }
+    return uncapped ? 0 : 1;
 });
-void web_frame_wait(void) {
+static int display_paced;
+void web_frame_wait(int paced) {
     static int uncapped = -1;
     if (uncapped < 0) uncapped = getenv("PORT_UNCAPPED") != 0;
-    js_frame_wait(uncapped);
+    display_paced = js_frame_wait(uncapped) || paced;
 }
+int web_display_paced(void) { return display_paced; }
 #else
 void web_present(uint32_t surface) { (void)surface; }
-void web_frame_wait(void) {}
+void web_frame_wait(int paced) { (void)paced; }
+int web_display_paced(void) { return 0; }
 #endif
