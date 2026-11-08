@@ -27,6 +27,9 @@ static double prof_mark(void) {
 }
 static double prof_draw, prof_upload, prof_frame_start, prof_frames_ms, prof_submit, prof_present, prof_fetch;
 static uint32_t prof_frames, prof_draw_calls, prof_vertices;
+/* Counters (no clock reads): draws on the vertex-shader path and how many joined the previous command, draws whose
+   vertices the CPU transformed, and GL commands and command-list runs. */
+static uint32_t gl_prof_gpu_draws, gl_prof_merged, prof_cpu_draws, prof_cpu_verts, gl_prof_cmds, gl_prof_runs;
 double port_prof_net;
 static void gl_start(uint32_t backbuffer);
 static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h);
@@ -752,6 +755,8 @@ static void draw_list(uint32_t prim, uint32_t count, Vtx* v, uint32_t n) {
     if (dump_state == 2 && n) dump_draw(prim, v, n);
     prof_fetch += prof_mark() - fetch_t0;
     S.draws++;
+    prof_cpu_draws++;
+    prof_cpu_verts += n;
     if (gl_on) { gl_draw_list(prim, v, n); return; }
     log_state_combo();
     if (!R.target || !SBITS(R.target) || (SFMT(R.target) != 21 && SFMT(R.target) != 22)) { S.skipped++; return; }
@@ -942,9 +947,15 @@ void r_prof_frame(void) {
              prof_draw_calls / prof_frames, prof_vertices / prof_frames, prof_submit / prof_frames, prof_upload / prof_frames,
              prof_present / prof_frames, (prof_frames_ms - prof_draw - prof_upload - prof_present) / prof_frames,
              prof_fetch / prof_frames, port_prof_net / prof_frames);
-    if (prof_detail)
+    if (prof_detail) {
         port_log("frames: %u late, worst %.1f ms of work (draw calls %.1f, texture uploads %.1f, game %.1f)", late,
                  worst, worst_draw, worst_upload, worst - worst_draw - worst_upload);
+        port_log("draws per frame: %u on the vertex-shader path (%u joined to the previous command), %u with vertices "
+                 "transformed on the CPU (%u vertices); %u GL commands in %u runs",
+                 gl_prof_gpu_draws / prof_frames, gl_prof_merged / prof_frames, prof_cpu_draws / prof_frames,
+                 prof_cpu_verts / prof_frames, gl_prof_cmds / prof_frames, gl_prof_runs / prof_frames);
+    }
+    gl_prof_gpu_draws = gl_prof_merged = prof_cpu_draws = prof_cpu_verts = gl_prof_cmds = gl_prof_runs = 0;
     late = 0;
     worst = 0;
     port_report_api_time(prof_frames);

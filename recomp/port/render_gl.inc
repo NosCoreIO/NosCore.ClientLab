@@ -312,24 +312,32 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
         base = cmd + 3;
         // Groups are tested one by one (no short-circuit) so the cache stays in step with GL.
         const s0 = changed(0, 6), s1 = changed(6, 12), at = changed(15, 17), fogOn = changed(39, 40);
-        let switched = false;
-        if (s0 || s1 || at || fogOn || !G.cur || vkey !== G.cur.vkey || (S(12) !== 0) !== G.cur.tex0 || (S(13) !== 0) !== G.cur.tex1) {
-            const setup = [S(0), S(1), S(2), S(3), S(4), S(5), S(6), S(7), S(8), S(9), S(10), S(11),
-                           S(12) ? 1 : 0, S(13) ? 1 : 0, S(15), S(16), S(39) ? 1 : 0, vkey];
-            const p = G.program(setup);
-            if (p !== G.cur) {
-                gl.useProgram(p.prog);
-                G.cur = p;
-                switched = true;
+        const t0 = S(12) !== 0 ? 1 : 0, t1 = S(13) !== 0 ? 1 : 0;
+        // The fragment setup is looked up (and its key string built) only when it changes; draws that only switch
+        // vertex programs, such as lit props between unlit effects, go through a map keyed by the vertex key.
+        if (s0 || s1 || at || fogOn || !G.frag || t0 !== G.fragT0 || t1 !== G.fragT1) {
+            const setup = [S(0), S(1), S(2), S(3), S(4), S(5), S(6), S(7), S(8), S(9), S(10), S(11), t0, t1, S(15), S(16), S(39) ? 1 : 0];
+            const key = setup.join(',');
+            G.fragT0 = t0; G.fragT1 = t1;
+            if (!G.frag || G.frag.key !== key) {
+                const byFrag = G.byFrag || (G.byFrag = new Map());
+                let frag = byFrag.get(key);
+                if (!frag) byFrag.set(key, frag = { key, setup, byVertex: new Map() });
+                G.frag = frag;
             }
         }
-        const u = G.cur.u;
-        // A program keeps its own uniforms, so a switch sets them all again.
-        if (changed(14, 15) || switched) {
-            const tf = S(14) >>> 0;
+        let p = G.frag.byVertex.get(vkey);
+        if (!p) { p = G.program(G.frag.setup.concat(vkey)); G.frag.byVertex.set(vkey, p); }
+        if (p !== G.cur) { gl.useProgram(p.prog); G.cur = p; }
+        const u = p.u;
+        // Each program keeps its own uniforms: they are set when they differ from what that program last had.
+        const tf = S(14) >>> 0;
+        if (p.tf !== tf) {
+            p.tf = tf;
             gl.uniform4f(u.uTFactor, ((tf >>> 16) & 255) / 255, ((tf >>> 8) & 255) / 255, (tf & 255) / 255, (tf >>> 24) / 255);
         }
-        if (changed(17, 18) || switched) gl.uniform1f(u.uARef, S(17) & 255);
+        const aref = S(17) & 255;
+        if (p.aref !== aref) { p.aref = aref; gl.uniform1f(u.uARef, aref); }
         for (let j = 0; j < 2; j++) {
             const b = 29 + 5 * j, texChanged = P[12 + j] !== S(12 + j), samplerChanged = changed(b, b + 5);
             P[12 + j] = S(12 + j);
@@ -338,10 +346,14 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
             if (!t || (!texChanged && !samplerChanged)) continue;
             gl.activeTexture(gl.TEXTURE0 + j);
             gl.bindTexture(gl.TEXTURE_2D, t);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, S(b) >= 2 ? gl.LINEAR : gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, S(b + 1) >= 2 ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap(S(b + 3)));
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap(S(b + 4)));
+            // The sampler state lives in the texture object: it is only set again when it differs from what this
+            // texture last had.
+            const mag = S(b) >= 2 ? gl.LINEAR : gl.NEAREST, min = S(b + 1) >= 2 ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST;
+            const ws = wrap(S(b + 3)), wt = wrap(S(b + 4));
+            if (t.mag !== mag) { t.mag = mag; gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, mag); }
+            if (t.min !== min) { t.min = min; gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, min); }
+            if (t.ws !== ws) { t.ws = ws; gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, ws); }
+            if (t.wt !== wt) { t.wt = wt; gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wt); }
         }
         if (changed(18, 22)) {
             if (S(18)) {
@@ -358,10 +370,8 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
             } else gl.disable(gl.DEPTH_TEST);
         }
         if (changed(25, 29)) gl.scissor(S(25), G.h - S(26) - S(28), S(27), S(28));
-        if (changed(38, 39) || switched) {
-            const fc = S(38) >>> 0;
-            gl.uniform3f(u.uFog, ((fc >>> 16) & 255) / 255, ((fc >>> 8) & 255) / 255, (fc & 255) / 255);
-        }
+        const fc = S(38) >>> 0;
+        if (p.fog !== fc) { p.fog = fc; gl.uniform3f(u.uFog, ((fc >>> 16) & 255) / 255, ((fc >>> 8) & 255) / 255, (fc & 255) / 255); }
         // Screen-clockwise (y down) stays clockwise in clip space (y up): a GL back face.
         if (changed(40, 41)) {
             if (S(40) === 2 || S(40) === 3) { gl.enable(gl.CULL_FACE); gl.cullFace(S(40) === 2 ? gl.BACK : gl.FRONT); }
@@ -375,7 +385,7 @@ EM_JS(void, js_gl_run, (const uint8_t* verts, int nverts, const int32_t* cmds, i
         const vb = G.buffers[0].get(HEAP32[g + 1] >>> 0), ib = HEAP32[g + 2] ? G.buffers[1].get(HEAP32[g + 2] >>> 0) : null;
         if (!vb || (HEAP32[g + 2] && !ib)) continue;
         const block = HEAP32[g + 13], row = kbase + Math.floor(block / 2025), col = block % 2025;
-        if (G.cur.block !== block || G.cur.row !== row) { G.cur.block = block; G.cur.row = row; gl.uniform2i(u.uB, col, row); }
+        if (p.block !== block || p.row !== row) { p.block = block; p.row = row; gl.uniform2i(u.uB, col, row); }
         if (!G.vaoOn) { gl.bindVertexArray(G.vao); G.vaoOn = true; A.fill(-1); }
         let same = true;
         for (let i = 0; i < 11; i++) if (A[i] !== HEAP32[g + 1 + i]) { A[i] = HEAP32[g + 1 + i]; same = false; }
@@ -605,6 +615,8 @@ static uint32_t gl_nconsts, gl_klast, gl_klast_size;
 
 static void gl_flush(void) {
     if (!gl_ncmds) return;
+    gl_prof_cmds += gl_ncmds;
+    gl_prof_runs++;
     double t = prof_mark();
     js_gl_run(gl_verts, (int)gl_nverts, (const int32_t*)gl_cmds, (int)gl_ncmds, gl_consts, (int)gl_nconsts);
     prof_submit += prof_mark() - t;
@@ -638,33 +650,43 @@ static void put_vertex(uint8_t* dst, const Vtx* v, float tw, float th) {
     memcpy(dst + 36, &v->fog, 4);
 }
 
+/* The setup loggers run on every draw: a key is looked up in a small hash set, one or two comparisons, instead of a
+   scan of every setup seen so far. Returns 1 the first time a key is seen, while fewer than max keys are kept. */
+#define SEEN_SLOTS 128
+typedef struct { uint32_t keys[SEEN_SLOTS][10]; uint8_t used[SEEN_SLOTS]; int count; } SeenSet;
+static int first_seen(SeenSet* set, const uint32_t* key, int n, int max) {
+    uint32_t h = 2166136261u;
+    for (int k = 0; k < n; k++) h = (h ^ key[k]) * 16777619u;
+    for (uint32_t i = h % SEEN_SLOTS, probes = 0; probes < SEEN_SLOTS; i = (i + 1) % SEEN_SLOTS, probes++) {
+        if (!set->used[i]) {
+            if (set->count >= max) return 0;
+            set->used[i] = 1;
+            set->count++;
+            memcpy(set->keys[i], key, sizeof *key * (size_t)n);
+            return 1;
+        }
+        if (!memcmp(set->keys[i], key, sizeof *key * (size_t)n)) return 0;
+    }
+    return 0;
+}
+
 /* Each distinct texture-stage setup is logged once (first 48), to spot fixed-function features not emulated. */
 static void log_stage_setup(void) {
-    static uint32_t seen[48][10];
-    static int nseen;
+    static SeenSet seen;
     uint32_t key[10] = {R.tss[0][1], R.tss[0][2] << 8 | R.tss[0][3], R.tss[0][4], R.tss[0][11], R.tss[0][24],
                         R.tss[1][1], R.tss[1][2] << 8 | R.tss[1][3], R.tss[1][4], R.tss[1][11], R.tss[1][24]};
-    static int last;
-    if (nseen && !memcmp(seen[last], key, sizeof key)) return;
-    for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) { last = k; return; }
-    if (nseen >= 48) return;
-    memcpy(seen[nseen++], key, sizeof key);
+    if (!first_seen(&seen, key, 10, 48)) return;
     port_log("stage setup: s0 op %u args %04x aop %u tci %x ttff %x | s1 op %u args %04x aop %u tci %x ttff %x | fvf %x",
              key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7], key[8], key[9], R.fvf);
 }
 
 /* Each distinct blend / alpha-test / depth / texture-format combination is logged once (first 64). */
 static void log_raster_setup(void) {
-    static uint32_t seen[64][6];
-    static int nseen;
+    static SeenSet seen;
     uint32_t tex = R.tex_obj[0], s = tex && M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
     uint32_t key[6] = {R.rs[27] << 16 | R.rs[19] << 8 | R.rs[20], R.rs[15] << 16 | R.rs[25] << 8 | (R.rs[24] & 255),
                        R.rs[7] << 16 | R.rs[14] << 8 | R.rs[23], s ? SFMT(s) : 0, R.rs[28], R.rs[22]};
-    static int last;
-    if (nseen && !memcmp(seen[last], key, sizeof key)) return;
-    for (int k = 0; k < nseen; k++) if (!memcmp(seen[k], key, sizeof key)) { last = k; return; }
-    if (nseen >= 64) return;
-    memcpy(seen[nseen++], key, sizeof key);
+    if (!first_seen(&seen, key, 6, 64)) return;
     port_log("raster setup: blend %u %u->%u | alpha test %u func %u ref %u | z %u write %u func %u | tex fmt %u | fog %u cull %u",
              R.rs[27], R.rs[19], R.rs[20], R.rs[15], R.rs[25], R.rs[24] & 255, R.rs[7], R.rs[14], R.rs[23], key[3], R.rs[28], R.rs[22]);
 }
@@ -791,20 +813,30 @@ static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t bas
     if (gl_klast_size == size && !memcmp(c, gl_consts + 4 * gl_klast, 16 * size)) block = gl_klast;
     else { gl_klast = at4; gl_klast_size = size; gl_nconsts = at4 + size; }
 
-    GlCmd* cmd = &gl_cmds[gl_ncmds++];
     static const int32_t gl_prim[7] = {0, 0, 1, 3, 4, 5, 6};   /* POINTS LINES LINE_STRIP TRIANGLES _STRIP _FAN */
+    int32_t g[16] = {1, (int32_t)vb, (int32_t)ib, idx32, (int32_t)vbase, (int32_t)stride,
+                     R.fvf & 0x10 ? (int32_t)LY.normal_at : -1, LY.has_diffuse ? (int32_t)LY.diffuse_at : -1,
+                     at[0], tn[0], at[1], tn[1], (int32_t)(first * (idx32 ? 4u : 2u)), (int32_t)block, key, 0};
+    S.draws++;
+    gl_prof_gpu_draws++;
+    /* A triangle-list draw that carries on where the previous command stopped (the next index or vertex range of the
+       same buffers, with the same state and constants) extends that command: one GL draw of the joined range
+       rasterises the same triangles in the same order. */
+    GlCmd* last = gl_ncmds ? &gl_cmds[gl_ncmds - 1] : 0;
+    if (last && prim == 4 && last->prim == 4 && last->g[0] && (uint32_t)last->first + (uint32_t)last->count == first &&
+        !memcmp(last->g + 1, g + 1, 11 * sizeof *g) && !memcmp(last->g + 13, g + 13, 2 * sizeof *g) &&
+        !memcmp(last->st, st, sizeof last->st)) {
+        last->count += (int32_t)n;
+        gl_prof_merged++;
+        prof_fetch += prof_mark() - fetch_t0;
+        return 1;
+    }
+    GlCmd* cmd = &gl_cmds[gl_ncmds++];
     cmd->prim = gl_prim[prim];
     cmd->first = (int32_t)first;
     cmd->count = (int32_t)n;
     memcpy(cmd->st, st, sizeof cmd->st);
-    int32_t* g = cmd->g;
-    g[0] = 1; g[1] = (int32_t)vb; g[2] = (int32_t)ib; g[3] = idx32; g[4] = (int32_t)vbase; g[5] = (int32_t)stride;
-    g[6] = R.fvf & 0x10 ? (int32_t)LY.normal_at : -1;
-    g[7] = LY.has_diffuse ? (int32_t)LY.diffuse_at : -1;
-    g[8] = at[0]; g[9] = tn[0]; g[10] = at[1]; g[11] = tn[1];
-    g[12] = (int32_t)(first * (idx32 ? 4u : 2u));
-    g[13] = (int32_t)block; g[14] = key;
-    S.draws++;
+    memcpy(cmd->g, g, sizeof g);
     prof_fetch += prof_mark() - fetch_t0;
     return 1;
 }
