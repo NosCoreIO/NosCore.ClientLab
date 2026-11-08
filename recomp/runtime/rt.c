@@ -102,9 +102,10 @@ void rt_act_pop(CPU* c, RtAct* a) {
 
 void rt_unimpl(CPU* c, uint32_t addr, const char* what) { rt_fatal("unimplemented instruction at %08x: %s", addr, what); }
 void rt_divzero(CPU* c, uint32_t addr) {
-    volatile int zero = 0;
+    /* Both operands volatile: with a constant dividend, GCC and clang turn the division into a select and nothing faults. */
+    volatile int one = 1, zero = 0;
     (void)addr;
-    c->r[0].d = 1 / zero;
+    c->r[0].d = one / zero;
 }
 void rt_int3(CPU* c, uint32_t addr) { rt_fatal("int3 at %08x", addr); }
 
@@ -129,13 +130,13 @@ void rt_set_eflags(CPU* c, uint32_t v) {
 
 uint32_t rt_shld(CPU* c, uint32_t d, uint32_t s, uint32_t n) {
     uint32_t r = (d << n) | (s >> (32 - n));
-    c->cf = (d >> (32 - n)) & 1; c->zf = r == 0; c->sf = r >> 31;
+    c->cf = (d >> (32 - n)) & 1; c->zf = r == 0; c->sf = r >> 31; c->of = (r ^ d) >> 31; c->pf = PARITY((uint8_t)r);
     return r;
 }
 
 uint32_t rt_shrd(CPU* c, uint32_t d, uint32_t s, uint32_t n) {
     uint32_t r = (d >> n) | (s << (32 - n));
-    c->cf = (d >> (n - 1)) & 1; c->zf = r == 0; c->sf = r >> 31;
+    c->cf = (d >> (n - 1)) & 1; c->zf = r == 0; c->sf = r >> 31; c->of = (r ^ d) >> 31; c->pf = PARITY((uint8_t)r);
     return r;
 }
 
@@ -220,13 +221,15 @@ static void cmp_flags(CPU* c, uint32_t a, uint32_t b, uint32_t bits) {
 }
 
 
+/* A forward copy onto an overlapping destination repeats the source pattern element by element, which memmove would
+   not do, so the block copy is only taken when the destination does not start inside the source. */
 void rt_str_rep_movsb(CPU* c) {
-    if (!c->df && c->ecx) { memmove((void*)(uintptr_t)c->edi, (void*)(uintptr_t)c->esi, c->ecx); c->esi += c->ecx; c->edi += c->ecx; c->ecx = 0; return; }
+    if (!c->df && c->ecx && c->edi - c->esi >= c->ecx) { memmove((void*)(uintptr_t)c->edi, (void*)(uintptr_t)c->esi, c->ecx); c->esi += c->ecx; c->edi += c->ecx; c->ecx = 0; return; }
     while (c->ecx) { rt_str_movsb(c); c->ecx--; }
 }
 void rt_str_rep_movsw(CPU* c) { while (c->ecx) { rt_str_movsw(c); c->ecx--; } }
 void rt_str_rep_movsd(CPU* c) {
-    if (!c->df && c->ecx) { memmove((void*)(uintptr_t)c->edi, (void*)(uintptr_t)c->esi, c->ecx * 4); c->esi += c->ecx * 4; c->edi += c->ecx * 4; c->ecx = 0; return; }
+    if (!c->df && c->ecx && (c->edi - c->esi) / 4 >= c->ecx) { memmove((void*)(uintptr_t)c->edi, (void*)(uintptr_t)c->esi, c->ecx * 4); c->esi += c->ecx * 4; c->edi += c->ecx * 4; c->ecx = 0; return; }
     while (c->ecx) { rt_str_movsd(c); c->ecx--; }
 }
 
