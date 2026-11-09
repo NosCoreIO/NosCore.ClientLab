@@ -7,7 +7,7 @@
 <style>
   :root { --bg: #101014; --fg: #d8d8e0; --muted: #8a8a96; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
-  #login-panel { min-height: 100vh; display: grid; place-items: center; padding: 20px; box-sizing: border-box; }
+  #login-panel { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; box-sizing: border-box; background: rgb(0 0 0 / 0.82); }
   #login-panel[hidden], #game[hidden] { display: none; }
   .login-card { width: min(100%, 360px); padding: 28px; border: 1px solid #30303a; border-radius: 12px; background: #19191f; box-sizing: border-box; }
   .login-card h1 { margin: 0 0 6px; font-size: 22px; }
@@ -23,6 +23,7 @@
   .captcha-icon-numbers { display: grid; grid-template-columns: repeat(4, 1fr); text-align: center; color: var(--fg); font-weight: 600; }
   .login-card button { width: 100%; margin-top: 8px; padding: 10px; border: 0; border-radius: 6px; background: #6652d8; color: white; font: inherit; font-weight: 600; cursor: pointer; }
   .login-card button:disabled { opacity: .6; cursor: wait; }
+  .login-card button.secondary { background: #363641; }
   #auth-error { min-height: 1.4em; margin-top: 12px; color: #ff9f9f; white-space: pre-wrap; }
   main { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; }
   canvas { max-width: 100%; height: auto; background: #000; image-rendering: auto; }
@@ -55,7 +56,7 @@
 </style>
 </head>
 <body>
-<section id="login-panel">
+<section id="login-panel" hidden>
   <div class="login-card">
     <h1>Sign in to Gameforge</h1>
     <p>Your credentials are sent to Gameforge through the local ClientLab server.</p>
@@ -76,12 +77,14 @@
         <label>Icon number<input id="captcha-answer" type="number" min="1" max="4" step="1" inputmode="numeric"></label>
       </div>
       <label id="account-label" hidden>Choose your NosTale game account<select id="game-account"></select></label>
+      <button id="login-cancel" class="secondary" type="button">Back to ClientLab</button>
       <button id="auth-submit" type="submit">Sign in</button>
       <div id="auth-error" role="status" aria-live="polite"></div>
     </form>
   </div>
 </section>
-<main id="game" hidden>
+<main id="game">
+  <button id="open-gameforge-login" type="button">Sign in with Gameforge</button>
   <div id="stage"><canvas id="screen" width="1024" height="768" tabindex="0"></canvas></div>
   <div id="status">starting…</div>
   <div id="log"></div>
@@ -187,6 +190,7 @@
   }
 
   function startGame(code, installationId = undefined) {
+    if (worker) worker.terminate();
     const params = new URLSearchParams(location.search);
     if (code) params.set('auth', code);
     if (installationId) params.set('NC_INSTALLATION_ID', installationId);
@@ -568,6 +572,25 @@
     game.hidden = false;
     startGame(result.code, result.installationId);
   }
+  document.getElementById('open-gameforge-login').addEventListener('click', () => {
+    loginPanel.hidden = false;
+    authEmail.focus();
+  });
+  document.getElementById('login-cancel').addEventListener('click', () => {
+    authSessionId = null;
+    authFlowId = null;
+    authChallengeType = null;
+    authForm.reset();
+    otpLabel.hidden = true;
+    captchaPanel.hidden = true;
+    accountLabel.hidden = true;
+    authPassword.required = true;
+    otpCode.required = false;
+    captchaAnswer.required = false;
+    authSubmit.textContent = 'Sign in';
+    authError.textContent = '';
+    loginPanel.hidden = true;
+  });
   authForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     authSubmit.disabled = true;
@@ -614,12 +637,8 @@
     }
   });
 
-  const authFromUrl = new URLSearchParams(location.search).get('auth');
-  if (authFromUrl) {
-    loginPanel.hidden = true;
-    game.hidden = false;
-    startGame(authFromUrl);
-  }
+  // Keep the established startup path as the default. Gameforge sign-in is an optional secondary flow.
+  startGame();
 </script>
 </body>
 </html>
