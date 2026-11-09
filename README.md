@@ -98,6 +98,35 @@ Without IDR's seeds the function list is shorter; the lifter takes unit initiali
 from the client's init table, and `iterate.py` is the browser counterpart of `iterate.ps1` for whatever is still
 only reached indirectly.
 
+### Gameforge sign-in
+
+To sign in directly with Gameforge and mint a launch code, use the `gameforge` provider. Open the page to enter your
+email and password. If the login has multiple linked game accounts, the page shows an account selector after sign-in:
+
+```sh
+python3 recomp/web/serve.py --game /path/to/nostale --auth-provider gameforge --build ./work/wasm/web
+```
+
+The page collects Gameforge's `game1.js` blackbox and sends it with the credentials to the loopback server, which
+forwards the login to Gameforge over HTTPS and discards the password after the request. The server calls Gameforge's
+session and account-list endpoints, then submits a play-now iovation event and a session-bound encrypted blackbox to
+the thin-code endpoint before passing the returned short-lived code to the worker as `_NC_AUTH_CODE`.
+The browser build does not run the Gameforge Windows launcher's named-pipe IPC: it feeds the Gameforge-issued ticket
+through the client's `noscore_gf.dll` session-ticket API. Although that DLL's exports are named `Steam_*`, this flow
+does not authenticate with Steam. ClientLab also passes the registered Gameforge installation ID into the worker so
+the client's later `NoS0577` login packet uses the same ID as the Gameforge requests.
+`TNT_INSTALLATION_ID` or `--gf-installation-id` sets the registered installation ID;
+`GF_USER_AGENT` or `--gf-user-agent` sets the request User-Agent. Gameforge can require additional verification or
+launcher-specific request headers; those responses appear in the sign-in form for diagnosis. MFA/captcha challenge
+completion stays in the page: enter the authenticator OTP when requested, or solve the displayed image-drop captcha
+and submit its answer number. The challenge and password are held only in server memory while sign-in is pending.
+On Windows, ClientLab reuses the official Gameforge installation ID from the registry by default. On Linux, set
+`TNT_INSTALLATION_ID` to the UUID from an existing registered Gameforge installation before starting the server.
+Do not generate a new UUID: Gameforge can accept the credentials session and still reject launch-code creation
+with HTTP 403 when the installation ID is unregistered. Gameforge credentials sign-in without a challenge is
+supported; MFA or captcha is only needed when Gameforge requests it.
+For a code obtained elsewhere, `CLIENTLAB_AUTH_CODE` or `--auth-code` remains available.
+
 ### Scripted runs
 
 `node recomp/web/drive.mjs [--maps 2,20,145] [--trace] [--dump-frame]` (Playwright with the installed Chrome) logs in,
