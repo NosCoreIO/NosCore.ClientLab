@@ -67,6 +67,51 @@ python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user <accou
 `serve.py` mints the launcher's auth code from the NosCore WebApi for that account, or you can pass one with
 `?auth=<code>`.
 
+### Linux browser run
+
+The portable Linux target is the browser build. It does not run the official Windows executable under Wine: it
+recompiles the supported client build to WebAssembly and supplies its Windows APIs in the browser. Install Python 3,
+Emscripten, and Chromium or Firefox on Linux. You also need the lifted C output from a matching client build (the
+decompilation scripts are Windows PowerShell tools; generated output is intentionally not stored in this repo).
+
+```sh
+python3 -m pip install capstone pefile
+python3 recomp/wasm/compile_all.py --gen /path/to/lifted-c --out ./work/wasm --web
+python3 recomp/web/serve.py --game /path/to/nostale-install --build ./work/wasm/web
+```
+
+Open `http://127.0.0.1:8077/`. For an externally issued game auth code, set `CLIENTLAB_AUTH_CODE` before starting
+the server. `--gen` and `--out` can also be set through `CLIENTLAB_GEN` and `CLIENTLAB_WASM_OUT`; `EMCC` can point
+to the Emscripten compiler if it is not on `PATH`. Linux native recompiled execution is not supported yet.
+
+To sign in directly with Gameforge and mint a launch code, use the `gameforge` provider. Open the page to enter your
+email and password. If the login has multiple linked game accounts, the page shows an account selector after sign-in:
+
+```sh
+python3 recomp/web/serve.py --game /path/to/nostale --auth-provider gameforge --build ./work/wasm/web
+```
+
+The page collects Gameforge's `game1.js` blackbox and sends it with the credentials to the loopback server, which
+forwards the login to Gameforge over HTTPS and discards the password after the request. The server calls Gameforge's
+session and account-list endpoints, then submits a play-now iovation event and a session-bound encrypted blackbox to
+the thin-code endpoint before passing the returned short-lived code to the worker as `_NC_AUTH_CODE`.
+The browser build does not run the Gameforge Windows launcher's named-pipe IPC: it feeds the Gameforge-issued ticket
+through the client's `noscore_gf.dll` session-ticket API. Although that DLL's exports are named `Steam_*`, this flow
+does not authenticate with Steam. ClientLab also passes the registered Gameforge installation ID into the worker so
+the client's later `NoS0577` login packet uses the same ID as the Gameforge requests.
+`TNT_INSTALLATION_ID` or `--gf-installation-id` sets the registered installation ID;
+`GF_USER_AGENT` or `--gf-user-agent` sets the request User-Agent. Gameforge can require additional verification or
+launcher-specific request headers; those responses appear in the sign-in form for diagnosis. MFA/captcha challenge
+completion stays in the page: enter the authenticator OTP when requested, or solve the displayed image-drop captcha
+and submit its answer number. The challenge and password are held only in server memory while sign-in is pending.
+On Windows, ClientLab reuses the official Gameforge installation ID from the registry by default. On Linux, set
+`TNT_INSTALLATION_ID` to the UUID from an existing registered Gameforge installation before starting the server.
+Do not generate a new UUID: Gameforge can accept the credentials session and still reject launch-code creation
+with HTTP 403 when the installation ID is unregistered. Gameforge credentials sign-in without a challenge is
+supported; MFA or captcha is only needed when Gameforge requests it.
+For a code obtained elsewhere, `CLIENTLAB_AUTH_CODE` or `--auth-code` remains available. The browser build is the
+portable Linux route; the native recompiled host and the official Windows executable do not run natively on Linux.
+
 ### Scripted runs
 
 `node recomp/web/drive.mjs [--maps 2,20,145] [--trace] [--dump-frame]` (Playwright with the installed Chrome) logs in,

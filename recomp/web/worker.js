@@ -125,6 +125,8 @@ self.Module = {
       postMessage({ type: 'log', text: code ? 'auth code from dev server' : `no auth code (${xhr.status} ${xhr.responseText})` });
     }
     if (code) Module.ENV._NC_AUTH_CODE = code;
+    const installationId = params.get('NC_INSTALLATION_ID');
+    if (installationId) Module.ENV.NC_INSTALLATION_ID = installationId;
     if (params.get('trace')) Module.ENV.PORT_TRACE_CLICK = '1';
     // Debug switches read by the host (PORT_TRACE, PORT_PROFILE_API, ...) pass straight through.
     for (const [k, v] of params) if (k.startsWith('PORT_')) Module.ENV[k] = v;

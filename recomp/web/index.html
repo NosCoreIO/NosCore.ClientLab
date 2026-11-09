@@ -7,6 +7,23 @@
 <style>
   :root { --bg: #101014; --fg: #d8d8e0; --muted: #8a8a96; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  #login-panel { min-height: 100vh; display: grid; place-items: center; padding: 20px; box-sizing: border-box; }
+  #login-panel[hidden], #game[hidden] { display: none; }
+  .login-card { width: min(100%, 360px); padding: 28px; border: 1px solid #30303a; border-radius: 12px; background: #19191f; box-sizing: border-box; }
+  .login-card h1 { margin: 0 0 6px; font-size: 22px; }
+  .login-card p { margin: 0 0 20px; color: var(--muted); }
+  .login-card label { display: block; margin: 14px 0; }
+  .login-card [hidden] { display: none; }
+  .login-card input, .login-card select { display: block; width: 100%; margin-top: 6px; padding: 10px; border: 1px solid #454550; border-radius: 6px; background: #101014; color: var(--fg); box-sizing: border-box; font: inherit; }
+  .captcha-images { display: grid; grid-template-columns: 1fr; gap: 8px; margin: 12px 0; }
+  .captcha-images img { display: block; max-width: 100%; max-height: 180px; margin: auto; object-fit: contain; background: white; }
+  #captcha-prompt { min-height: 38px; padding: 6px 8px; border-radius: 4px; background: #252530; box-sizing: border-box; }
+  .captcha-icon-strip { width: min(100%, 360px); margin: auto; }
+  .captcha-icon-strip img { width: 100%; max-height: none; }
+  .captcha-icon-numbers { display: grid; grid-template-columns: repeat(4, 1fr); text-align: center; color: var(--fg); font-weight: 600; }
+  .login-card button { width: 100%; margin-top: 8px; padding: 10px; border: 0; border-radius: 6px; background: #6652d8; color: white; font: inherit; font-weight: 600; cursor: pointer; }
+  .login-card button:disabled { opacity: .6; cursor: wait; }
+  #auth-error { min-height: 1.4em; margin-top: 12px; color: #ff9f9f; white-space: pre-wrap; }
   main { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px; }
   canvas { max-width: 100%; height: auto; background: #000; image-rendering: auto; }
   #status { color: var(--muted); }
@@ -38,18 +55,45 @@
 </style>
 </head>
 <body>
-<main>
+<section id="login-panel">
+  <div class="login-card">
+    <h1>Sign in to Gameforge</h1>
+    <p>Your credentials are sent to Gameforge through the local ClientLab server.</p>
+    <form id="auth-form">
+      <label>Email<input id="auth-email" type="email" autocomplete="username" required></label>
+      <label>Password<input id="auth-password" type="password" autocomplete="current-password" required></label>
+      <label id="otp-label" hidden>Authenticator code<input id="otp-code" inputmode="numeric" autocomplete="one-time-code"></label>
+      <div id="captcha-panel" hidden>
+        <p id="captcha-instructions">Read the instruction strip, match the requested item to the target, then enter the number beneath the matching icon.</p>
+        <div class="captcha-images">
+          <img id="captcha-prompt" alt="Gameforge challenge instructions">
+          <div class="captcha-icon-strip">
+            <img id="captcha-icons" alt="Four items to choose from, numbered left to right below">
+            <div class="captcha-icon-numbers" aria-hidden="true"><span>1</span><span>2</span><span>3</span><span>4</span></div>
+          </div>
+          <img id="captcha-target" alt="Item to match">
+        </div>
+        <label>Icon number<input id="captcha-answer" type="number" min="1" max="4" step="1" inputmode="numeric"></label>
+      </div>
+      <label id="account-label" hidden>Choose your NosTale game account<select id="game-account"></select></label>
+      <button id="auth-submit" type="submit">Sign in</button>
+      <div id="auth-error" role="status" aria-live="polite"></div>
+    </form>
+  </div>
+</section>
+<main id="game" hidden>
   <div id="stage"><canvas id="screen" width="1024" height="768" tabindex="0"></canvas></div>
   <div id="status">starting…</div>
   <div id="log"></div>
 </main>
+<script src="https://gameforge.com/tra/game1.js"></script>
 <script>
   const canvas = document.getElementById('screen');
   // The software renderer sends pixels (2D context); WebGL sends bitmaps, which a bitmaprenderer takes without a copy.
   let ctx = null, bitmaps = null;
   const status = document.getElementById('status');
   const log = document.getElementById('log');
-  const worker = new Worker('/worker.js' + location.search);
+  let worker = null;
   let frames = 0, last = performance.now();
   // Appending to textContent per line is quadratic; lines are batched per frame and the pane keeps the last 1000.
   const LOG_LINES = 1000;
@@ -85,7 +129,7 @@
     } else if (f.shown) f.repeated++;
     requestAnimationFrame(showFrame);
   }
-  worker.onmessage = (e) => {
+  function handleWorkerMessage(e) {
     const m = e.data;
     if (m.type === 'frame') {
       if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = m.w; canvas.height = m.h; }
@@ -140,7 +184,15 @@
       const c = nets.get(m.id);
       if (c) { c.open = false; nets.delete(m.id); c.sends.then(() => fetch(`/net/close?id=${m.id}`, { method: 'POST' })); }
     }
-  };
+  }
+
+  function startGame(code, installationId = undefined) {
+    const params = new URLSearchParams(location.search);
+    if (code) params.set('auth', code);
+    if (installationId) params.set('NC_INSTALLATION_ID', installationId);
+    worker = new Worker('/worker.js' + (params.size ? `?${params}` : ''));
+    worker.onmessage = handleWorkerMessage;
+  }
 
   // Relayed sockets (hle_misc.c): the page long-polls the dev server and fills the worker's ring, so the worker
   // never blocks on the network.
@@ -407,6 +459,167 @@
     e.preventDefault();
   });
   canvas.addEventListener('keyup', (e) => { send(IN.keyup, e.keyCode); e.preventDefault(); });
+
+  const loginPanel = document.getElementById('login-panel');
+  const game = document.getElementById('game');
+  const authForm = document.getElementById('auth-form');
+  const authEmail = document.getElementById('auth-email');
+  const authPassword = document.getElementById('auth-password');
+  const otpLabel = document.getElementById('otp-label');
+  const otpCode = document.getElementById('otp-code');
+  const captchaPanel = document.getElementById('captcha-panel');
+  const captchaInstructions = document.getElementById('captcha-instructions');
+  const captchaPrompt = document.getElementById('captcha-prompt');
+  const captchaIcons = document.getElementById('captcha-icons');
+  const captchaTarget = document.getElementById('captcha-target');
+  const captchaAnswer = document.getElementById('captcha-answer');
+  const accountLabel = document.getElementById('account-label');
+  const gameAccount = document.getElementById('game-account');
+  const authSubmit = document.getElementById('auth-submit');
+  const authError = document.getElementById('auth-error');
+  let authSessionId = null;
+  let authFlowId = null;
+  let authChallengeType = null;
+
+  async function authRequest(path, payload) {
+    const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Authentication failed (${response.status})`);
+    return result;
+  }
+  function createGameforgeBlackbox(request = undefined) {
+    return new Promise((resolve, reject) => {
+      if (typeof game1 !== 'function') {
+        reject(new Error('Gameforge identity script did not load. Check the connection and retry.'));
+        return;
+      }
+      const timeout = setTimeout(() => reject(new Error('Gameforge identity collection timed out.')), 15000);
+      const done = (value) => { clearTimeout(timeout); resolve(`tra:${value}`); };
+      try {
+        if (request === undefined) game1(done);
+        else game1(done, request);
+      } catch (error) {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    });
+  }
+  function showChallenge(result) {
+    authFlowId = result.flowId;
+    authChallengeType = result.challenge;
+    accountLabel.hidden = true;
+    authPassword.required = false;
+    otpLabel.hidden = result.challenge !== 'otp';
+    captchaPanel.hidden = result.challenge !== 'captcha';
+    otpCode.required = result.challenge === 'otp';
+    captchaAnswer.required = result.challenge === 'captcha';
+    if (result.challenge === 'otp') {
+      otpCode.value = '';
+      authSubmit.textContent = 'Verify code';
+      authError.textContent = result.message || 'Enter the one-time code from your authenticator.';
+      otpCode.focus();
+    } else {
+      captchaPrompt.src = result.images.prompt;
+      captchaIcons.src = result.images.icons;
+      captchaTarget.src = result.images.target;
+      captchaAnswer.value = '';
+      authSubmit.textContent = 'Submit captcha answer';
+      authError.textContent = result.message || '';
+      captchaAnswer.focus();
+    }
+  }
+  function showAccounts(result) {
+    authFlowId = null;
+    authChallengeType = null;
+    otpLabel.hidden = true;
+    captchaPanel.hidden = true;
+    otpCode.required = false;
+    captchaAnswer.required = false;
+    authSessionId = result.sessionId;
+    gameAccount.replaceChildren(...result.accounts.map((account) => {
+      const option = document.createElement('option');
+      option.value = account.id;
+      option.textContent = `${account.name} (${account.id})`;
+      return option;
+    }));
+    accountLabel.hidden = false;
+    authSubmit.textContent = 'Continue';
+  }
+  async function requestGameforgeLaunchCode() {
+    const iovationBlackbox = await createGameforgeBlackbox();
+    const launch = await authRequest('/auth/launch', {
+      sessionId: authSessionId,
+      accountId: gameAccount.value,
+      iovationBlackbox
+    });
+    const codeBlackbox = await createGameforgeBlackbox(launch.blackboxRequest);
+    return authRequest('/auth/launch-code', {
+      sessionId: authSessionId,
+      accountId: gameAccount.value,
+      gsid: launch.gsid,
+      codeBlackbox
+    });
+  }
+  async function launchGame(result) {
+    authSessionId = null;
+    authPassword.required = true;
+    authPassword.value = '';
+    loginPanel.hidden = true;
+    game.hidden = false;
+    startGame(result.code, result.installationId);
+  }
+  authForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    authSubmit.disabled = true;
+    authError.textContent = '';
+    try {
+      if (authSessionId) {
+        const launched = await requestGameforgeLaunchCode();
+        await launchGame(launched);
+      } else if (authFlowId) {
+        const payload = { flowId: authFlowId, blackbox: await createGameforgeBlackbox() };
+        if (authChallengeType === 'otp') payload.otpCode = otpCode.value;
+        else payload.answer = Number(captchaAnswer.value) - 1;
+        const result = await authRequest('/auth/challenge', payload);
+        if (result.challenge) showChallenge(result);
+        else showAccounts(result);
+      } else {
+        const blackbox = await createGameforgeBlackbox();
+        const result = await authRequest('/auth/login', { email: authEmail.value, password: authPassword.value, blackbox });
+        authPassword.value = '';
+        authPassword.required = false;
+        if (result.challenge) showChallenge(result);
+        else showAccounts(result);
+      }
+    } catch (error) {
+      if (authSessionId && error.message !== 'Sign-in expired. Please sign in again.') {
+        authError.textContent = error.message;
+        authSubmit.textContent = 'Retry launch code';
+      } else {
+        authSessionId = null;
+        authFlowId = null;
+        authChallengeType = null;
+        authPassword.required = true;
+        authPassword.value = '';
+        otpLabel.hidden = true;
+        captchaPanel.hidden = true;
+        accountLabel.hidden = true;
+        otpCode.required = false;
+        captchaAnswer.required = false;
+        authSubmit.textContent = 'Sign in';
+        authError.textContent = error.message;
+      }
+    } finally {
+      authSubmit.disabled = false;
+    }
+  });
+
+  const authFromUrl = new URLSearchParams(location.search).get('auth');
+  if (authFromUrl) {
+    loginPanel.hidden = true;
+    game.hidden = false;
+    startGame(authFromUrl);
+  }
 </script>
 </body>
 </html>

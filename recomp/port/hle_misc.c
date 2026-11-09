@@ -248,8 +248,10 @@ static uint32_t gdi_misc_next = 0x00280000u;
 static void g_NewHandle(CPU* c) { RET(gdi_misc_next += 4); }
 static void w_timeGetDevCaps(CPU* c) { if (ARG(0)) { M32(ARG(0)) = 1; M32(ARG(0) + 4) = 1000000; } RET(0); }
 
-/* ---- Gameforge wrapper (noscore_gf.dll): same answers as NosCore.DeveloperTools.GfStub ----
-   The session ticket is the _NC_AUTH_CODE GUID as ASCII text; the client sends it verbatim in NoS0577. */
+/* ---- Gameforge ticket API (noscore_gf.dll) ----
+   This client build exposes Steam-named compatibility exports, but the browser build does not use Steam auth or the
+   Windows launcher's named pipe. It supplies the code obtained from Gameforge as the session ticket; the client then
+   sends that ticket in its NoS0577 login packet. */
 
 static uint32_t persona_addr, language_addr, branch_addr;
 static void s_one(CPU* c) { RET(1); }
@@ -645,7 +647,7 @@ static void ewsf_ShowNostaleSplash(CPU* c) {
 static void ewsf_FreeNostaleSplash(CPU* c) { js_splash(0, 0); RET(0); }
 
 #define K(n, a, f) {"kernel32.dll", #n, a, f}
-/* The Steam stubs (steam_wrapper.dll / noscore_gf.dll) are cdecl: they end in a plain ret. */
+/* These compatibility exports are cdecl: they end in a plain ret. */
 #define S(n) {"steam_wrapper.dll", #n, CDECL_ARGS, r_zero}
 
 static const Hle misc[] = {
