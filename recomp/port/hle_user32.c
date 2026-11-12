@@ -2249,7 +2249,9 @@ static int get_msg(CPU* c, uint32_t m, uint32_t fh, uint32_t lo, uint32_t hi, in
             QMsg q = queue[found];
             if (remove) queue_remove(found);
             if (remove && q.msg == WM_TIMER) timer_delivered(q.hwnd, q.wp);
-            int key = q.msg >= WM_KEYDOWN && q.msg <= 0x109;
+            /* Key messages only: a WH_KEYBOARD hook reads wParam as a virtual key, so a WM_CHAR 'y' (0x79) handed to
+               it is F10 to the game's hook, which eats it. */
+            int key = q.msg == WM_KEYDOWN || q.msg == WM_KEYUP || q.msg == WM_SYSKEYDOWN || q.msg == WM_SYSKEYUP;
             if (key && next_hook(WH_KEYBOARD, UINT32_MAX) && call_hooks(c, WH_KEYBOARD, remove ? 0 : 3, q.wp, q.lp)) {
                 if (!remove)
                     for (int k = 0; k < qn; k++)
