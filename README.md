@@ -89,6 +89,18 @@ Without IDR's seeds the function list is shorter; the lifter takes unit initiali
 from the client's init table, and `iterate.py` is the browser counterpart of `iterate.ps1` for whatever is still
 only reached indirectly.
 
+Where Ghidra cannot be installed, `tools/find_functions.py` writes the same `functions.txt` with the lifter's own
+decoder (copy the exe to `$W/input/NosCore.exe` first, as `decompile.sh` does):
+
+```bash
+python3 tools/find_functions.py $W/input/NosCore.exe $W/functions.txt
+```
+
+It starts from the entry point and the init table, then takes relocated code pointers, and drops a candidate whose
+walk runs through data or cuts across an instruction of an accepted function. It also lists a routine with thousands
+of branch points (the packet dispatcher) as several functions, which the WebAssembly backend otherwise takes hours
+to compile.
+
 ### Scripted runs
 
 `node recomp/web/drive.mjs [--maps 2,20,145] [--trace] [--dump-frame]` (Playwright with the installed Chrome) logs in,
