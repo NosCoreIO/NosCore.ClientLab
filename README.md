@@ -121,7 +121,7 @@ client log to `C:\tools\re\work\drive\`. It is the starting point for NosCore en
 ## Contributing
 
 Questions, ideas and pull requests are welcome; most of the discussion happens on [Discord](https://discord.gg/Eu3ETSw).
-[Quick start](#quick-start) and [Linux](#linux) above give the setup and build steps.
+[Quick start](#quick-start) and [Linux](#linux) above give the setup and build steps; [docs/STATUS.md](docs/STATUS.md) has the lifter correctness check (`recomp/difftest/difftest.py`).
 
 ## Supporting NosCore
 
