@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
+    <AssemblyName>ClientLab</AssemblyName>
+    <RootNamespace>NosCore.ClientLab.Launcher</RootNamespace>
+    <Version>0.1.0</Version>
+    <PublishTrimmed>false</PublishTrimmed>
+    <CefArchitecture Condition="'$(CefArchitecture)' == ''">x64</CefArchitecture>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.23" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="CefGlue.Avalonia" Version="120.6099.215" Condition="'$(CefArchitecture)' == 'x64'" />
+    <PackageReference Include="CefGlue.Avalonia.ARM64" Version="120.6099.215" Condition="'$(CefArchitecture)' == 'arm64'" />
+  </ItemGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Assets/**" />
+    <ProjectReference Include="../../recomp/dotnet/ClientLab.Recompiler/ClientLab.Recompiler.csproj" />
+    <EmbeddedResource Include="../../recomp/port/*.c;../../recomp/port/*.h;../../recomp/port/*.inc" LogicalName="Source/recomp/port/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../recomp/runtime/*.c;../../recomp/runtime/*.h" LogicalName="Source/recomp/runtime/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../recomp/web/index.html;../../recomp/web/worker.js" LogicalName="Source/recomp/web/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../symbols/**/*.txt" LogicalName="Source/symbols/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

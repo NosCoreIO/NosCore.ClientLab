@@ -120,12 +120,31 @@ the client's later `NoS0577` login packet uses the same ID as the Gameforge requ
 launcher-specific request headers; those responses appear in the sign-in form for diagnosis. MFA/captcha challenge
 completion stays in the page: enter the authenticator OTP when requested, or solve the displayed image-drop captcha
 and submit its answer number. The challenge and password are held only in server memory while sign-in is pending.
-On Windows, ClientLab reuses the official Gameforge installation ID from the registry by default. On Linux, set
+On Windows, ClientLab prefers the machine-wide Gameforge installation ID, falling back to the per-user registry
+value when the machine-wide value is absent. A stale per-user value can allow sign-in and iovation while code
+retrieval returns HTTP 403. An explicit `TNT_INSTALLATION_ID` or `--gf-installation-id` still overrides detection.
+On Linux, set
 `TNT_INSTALLATION_ID` to the UUID from an existing registered Gameforge installation before starting the server.
 Do not generate a new UUID: Gameforge can accept the credentials session and still reject launch-code creation
 with HTTP 403 when the installation ID is unregistered. Gameforge credentials sign-in without a challenge is
 supported; MFA or captcha is only needed when Gameforge requests it.
 For a code obtained elsewhere, `CLIENTLAB_AUTH_CODE` or `--auth-code` remains available.
+
+If browser-collected identity data is rejected at code retrieval, use `--gf-identity-file /path/to/identity.json`
+(or `GF_IDENTITY_FILE`). This uses an identity collected by your official launcher for the play-now and code
+requests, refreshing the timestamps/vector and binding it to each new launch session. Credentials sign-in and
+MFA/captcha continue through the page. The captured installation ID must match `TNT_INSTALLATION_ID` on Linux/macOS.
+The identity file contains device fingerprint data; keep it local and out of version control.
+
+To import a `tra:` blackbox obtained from your own launcher's iovation request (for example with
+[GflessClient's BlackboxExtractor](https://github.com/hatz2/GflessClient)), save the value to a local text file and run:
+
+```sh
+python3 recomp/web/gameforge_identity.py --blackbox-file blackbox.txt --installation-id YOUR_INSTALLATION_UUID --output official.gameforge-identity.json
+python3 recomp/web/serve.py --game /path/to/nostale --build /path/to/web --gf-installation-id YOUR_INSTALLATION_UUID --gf-identity-file official.gameforge-identity.json
+```
+
+The output format is ClientLab's version 12 fingerprint array, rather than GflessClient's named-field identity JSON.
 
 ### Scripted runs
 

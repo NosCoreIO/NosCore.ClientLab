@@ -1,0 +1,135 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="NosCore.ClientLab.Launcher.MainWindow" Title="ClientLab" Width="1250" Height="830"
+        MinWidth="1030" MinHeight="700" WindowStartupLocation="CenterScreen">
+  <Grid>
+    <Grid x:Name="LauncherPanel" RowDefinitions="Auto,*">
+      <Grid ColumnDefinitions="Auto,*,Auto" Margin="32,24,32,6">
+        <StackPanel Orientation="Horizontal" Spacing="11" VerticalAlignment="Center">
+          <Border Background="#B9F074" Width="30" Height="30" CornerRadius="9"><TextBlock Text="C" FontSize="18" FontWeight="Bold" Foreground="#1A2A15" HorizontalAlignment="Center" VerticalAlignment="Center" /></Border>
+          <TextBlock Text="ClientLab" FontWeight="SemiBold" FontSize="16" VerticalAlignment="Center" />
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+          <Button Classes="nav" Classes.active="{Binding IsLibrary}" Command="{Binding NavigateCommand}" CommandParameter="library" Content="Play" />
+          <Button Classes="nav" Classes.active="{Binding IsActivity}" Command="{Binding NavigateCommand}" CommandParameter="activity" Content="Activity" />
+          <Button Classes="nav" Classes.active="{Binding IsSettings}" Command="{Binding NavigateCommand}" CommandParameter="settings" Content="Settings" />
+        </StackPanel>
+      </Grid>
+      <Grid Grid.Row="1" Margin="32,18,32,26">
+        <ScrollViewer IsVisible="{Binding IsLibrary}" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Spacing="20" MaxWidth="560" HorizontalAlignment="Center">
+            <StackPanel Spacing="4" Margin="0,12,0,0">
+              <TextBlock Text="NosTale" FontSize="44" FontWeight="Bold" LetterSpacing="-1.5" />
+              <TextBlock Text="ClientLab edition" Classes="muted" FontSize="14" />
+            </StackPanel>
+            <Border IsVisible="{Binding HasNotice}" Background="#332C23" BorderBrush="#796344" BorderThickness="1" CornerRadius="9" Padding="14"><TextBlock Text="{Binding Notice}" Foreground="#EBD7AC" TextWrapping="Wrap" /></Border>
+            <Border Classes="card" Padding="24,22">
+              <StackPanel Spacing="16">
+                <StackPanel Orientation="Horizontal" Spacing="9">
+                  <Ellipse Fill="#B9F074" Width="7" Height="7" VerticalAlignment="Center" />
+                  <TextBlock Text="{Binding StatusLabel}" FontWeight="SemiBold" FontSize="16" />
+                </StackPanel>
+                <TextBlock Text="{Binding Message}" Classes="muted" FontSize="13" TextWrapping="Wrap" />
+                <ProgressBar Value="{Binding Progress}" Maximum="100" IsIndeterminate="{Binding IsIndeterminate}" IsVisible="{Binding Busy}" Height="4" Foreground="#B9F074" />
+                <Grid ColumnDefinitions="Auto,*,Auto">
+                  <Button Content="Cancel" Command="{Binding CancelCommand}" IsVisible="{Binding Busy}" />
+                  <Button Grid.Column="2" Classes="primary" Content="{Binding ActionLabel}" Command="{Binding PrimaryCommand}" IsEnabled="{Binding CanAct}" MinWidth="190" HorizontalContentAlignment="Center" />
+                </Grid>
+              </StackPanel>
+            </Border>
+            <Border Classes="card" Padding="18,15">
+              <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="Game files" FontSize="13" />
+                  <TextBlock Text="{Binding ImportDirectory}" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+                <Button Grid.Column="1" Content="Change…" Click="BrowseImport" VerticalAlignment="Center" FontSize="12" />
+              </Grid>
+            </Border>
+            <Border Classes="card" Padding="18,15" IsVisible="{Binding UseGameforge}">
+              <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="Gameforge account" FontSize="13" />
+                  <TextBlock Text="{Binding SignedInAs, StringFormat='Signed in as {0}'}" Classes="muted" FontSize="11" IsVisible="{Binding SignedIn}" />
+                  <TextBlock Text="Not signed in" Classes="muted" FontSize="11" IsVisible="{Binding !SignedIn}" />
+                </StackPanel>
+                <Button Grid.Column="1" Content="Sign in" Command="{Binding OpenSignInCommand}" IsVisible="{Binding CanSignIn}" VerticalAlignment="Center" FontSize="12" />
+              </Grid>
+            </Border>
+            <StackPanel Orientation="Horizontal" Spacing="18" IsVisible="{Binding !Busy}">
+              <Button Content="Check for updates" Command="{Binding CheckUpdatesCommand}" IsEnabled="{Binding CanCheck}" FontSize="12" />
+              <Button Content="Play current build" Command="{Binding PlayCurrentCommand}" IsEnabled="{Binding CanPlayCurrent}" FontSize="12" />
+            </StackPanel>
+          </StackPanel>
+        </ScrollViewer>
+        <Grid IsVisible="{Binding IsActivity}" RowDefinitions="Auto,*" RowSpacing="14">
+          <TextBlock Text="Activity" FontSize="22" FontWeight="SemiBold" />
+          <Border Grid.Row="1" Classes="card" Padding="16"><TextBox Text="{Binding Activity, Mode=OneWay}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" FontFamily="Cascadia Code, Consolas, monospace" FontSize="11" BorderThickness="0" Background="Transparent" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto" /></Border>
+        </Grid>
+        <ScrollViewer IsVisible="{Binding IsSettings}" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Spacing="18" MaxWidth="620" HorizontalAlignment="Left">
+            <TextBlock Text="Settings" FontSize="22" FontWeight="SemiBold" />
+            <Border Classes="card" Padding="22"><StackPanel Spacing="11">
+              <TextBlock Text="Game files" FontSize="15" FontWeight="SemiBold" />
+              <TextBlock Text="The folder with your NosTale install. ClientLab builds and plays from these files; leave it empty to download from Gameforge instead." Classes="muted" TextWrapping="Wrap" FontSize="12" />
+              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10"><TextBox Text="{Binding ImportDirectory}" Watermark="Path to your NosTale installation" /><Button Grid.Column="1" Content="Browse…" Click="BrowseImport" /></Grid>
+            </StackPanel></Border>
+            <Border Classes="card" Padding="22"><StackPanel Spacing="12">
+              <TextBlock Text="Gameforge sign-in" FontSize="15" FontWeight="SemiBold" />
+              <CheckBox IsChecked="{Binding UseGameforge}" Content="Sign in with your Gameforge account" />
+              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10"><TextBox Text="{Binding IdentityFile}" Watermark="Captured Gameforge identity (.json), optional" /><Button Grid.Column="1" Content="Browse…" Click="BrowseIdentity" /></Grid>
+              <TextBox Text="{Binding InstallationId}" Watermark="Installation ID (optional if included in the identity file)" />
+              <TextBlock Text="Email, password and any verification are entered when you sign in. Nothing is stored here." Classes="muted" TextWrapping="Wrap" FontSize="12" />
+            </StackPanel></Border>
+            <Button Classes="primary" Content="Save settings" Command="{Binding SaveSettingsCommand}" IsEnabled="{Binding CanCheck}" HorizontalAlignment="Left" />
+          </StackPanel>
+        </ScrollViewer>
+      </Grid>
+    </Grid>
+    <Grid x:Name="GamePanel" IsVisible="False" RowDefinitions="Auto,*" Background="#10131C">
+      <Grid ColumnDefinitions="Auto,*,Auto" Margin="16,10"><Button Content="←  Back" Click="BackToLibrary" /><TextBlock Grid.Column="1" Text="NosTale" VerticalAlignment="Center" Margin="20,0" Classes="muted" /><Button Grid.Column="2" Content="Close game" Click="CloseGame" /></Grid>
+      <Border x:Name="GameHost" Grid.Row="1" />
+    </Grid>
+    <Grid IsVisible="{Binding SignInVisible}" Background="#D80A0D14">
+      <Border Classes="card" Width="420" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="26">
+        <StackPanel Spacing="14">
+          <TextBlock Text="Sign in with Gameforge" FontSize="18" FontWeight="SemiBold" />
+          <Border IsVisible="{Binding HasSignInError}" Background="#3A2420" BorderBrush="#7A4B42" BorderThickness="1" CornerRadius="8" Padding="12"><TextBlock Text="{Binding SignInError}" Foreground="#F0C5BC" TextWrapping="Wrap" FontSize="12" /></Border>
+          <StackPanel Spacing="10" IsVisible="{Binding StageCredentials}">
+            <TextBox Text="{Binding SignInEmail}" Watermark="Gameforge email" />
+            <TextBox Text="{Binding SignInPassword}" Watermark="Password" PasswordChar="●" />
+          </StackPanel>
+          <StackPanel Spacing="8" IsVisible="{Binding StageOtp}">
+            <TextBlock Text="Enter the code from your authenticator app." Classes="muted" FontSize="12" />
+            <TextBox Text="{Binding SignInOtp}" Watermark="Authenticator code" />
+          </StackPanel>
+          <StackPanel Spacing="10" IsVisible="{Binding StageCaptcha}">
+            <Image Source="{Binding CaptchaPrompt}" Stretch="Uniform" MaxHeight="40" HorizontalAlignment="Left" />
+            <Image Source="{Binding CaptchaIcons}" Stretch="Uniform" MaxHeight="90" HorizontalAlignment="Left" />
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <Image Source="{Binding CaptchaTarget}" Stretch="Uniform" MaxHeight="70" />
+              <StackPanel VerticalAlignment="Center" Spacing="6">
+                <TextBlock Text="Type the number of the matching image." Classes="muted" FontSize="12" TextWrapping="Wrap" MaxWidth="180" />
+                <TextBox Text="{Binding SignInCaptchaAnswer}" Watermark="1–4" Width="90" HorizontalAlignment="Left" />
+              </StackPanel>
+            </StackPanel>
+          </StackPanel>
+          <StackPanel Spacing="6" IsVisible="{Binding StageAccounts}">
+            <TextBlock Text="Choose your game account" FontSize="13" />
+            <ItemsControl ItemsSource="{Binding SignInAccounts}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Button Classes="nav" HorizontalAlignment="Stretch" Margin="0,2" Command="{Binding $parent[ItemsControl].DataContext.ChooseAccountCommand}" CommandParameter="{Binding Id}" Content="{Binding Name}" />
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+          <ProgressBar IsIndeterminate="True" IsVisible="{Binding SignInBusy}" Height="3" Foreground="#B9F074" />
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <Button Content="Cancel" Command="{Binding CancelSignInCommand}" />
+            <Button Grid.Column="2" Classes="primary" Content="{Binding SignInSubmitLabel}" Command="{Binding SignInSubmitCommand}" IsVisible="{Binding SignInSubmitVisible}" IsEnabled="{Binding !SignInBusy}" />
+          </Grid>
+        </StackPanel>
+      </Border>
+    </Grid>
+  </Grid>
+</Window>

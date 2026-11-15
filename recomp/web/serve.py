@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from gameforge_identity import OfficialIdentity
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GF_NOSTALE_GAME_ID = "dd4e22d6-00d1-44b9-8126-d8b40e0cd7c9"
@@ -177,8 +178,11 @@ def windows_gameforge_installation_id():
     try:
         import winreg
         locations = (
-            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Gameforge4d\GameforgeClient\MainApp"),
+            # The installed launcher uses the machine-wide ID. HKCU can retain
+            # an older ID: credentials/iovation accept it, but thin/codes can
+            # return 403. Prefer the active installation over that stale value.
             (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Gameforge4d\GameforgeClient\MainApp"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Gameforge4d\GameforgeClient\MainApp"),
         )
         for root, subkey in locations:
             try:
@@ -289,10 +293,9 @@ def gameforge_code_user_agent(chrome_version, installation_id, account_id):
         hash_installation = hashlib.sha1(installation_id.encode("utf-8")).hexdigest().encode("ascii")
         hash_account = hashlib.sha256(account_id.encode("utf-8")).hexdigest().encode("ascii")
         marker = hashlib.sha256(hash_cert + hash_version + hash_installation + hash_account).hexdigest()[-8:]
-    # Gameforge's thin-code endpoint expects the launcher UA suffix too. The
-    # browser-style UA used for sessions/account lookup is not interchangeable
-    # with the launcher UA used to mint a game code.
-    return f"Chrome/{chrome_version} ({account_id[:2]}{marker}) GameforgeClient/2.1.22"
+    # Match NostaleAuth::sendThinCodes in GflessClient: this endpoint uses
+    # only the version and account-bound marker, without a launcher suffix.
+    return f"Chrome/{chrome_version} ({account_id[:2]}{marker})"
 
 
 def encrypt_gameforge_blackbox(blackbox, gsid, account_id):
@@ -301,6 +304,32 @@ def encrypt_gameforge_blackbox(blackbox, gsid, account_id):
     encrypted = bytes(value ^ key[index % len(key)] ^ key[len(key) - (index % len(key)) - 1]
                       for index, value in enumerate(source))
     return base64.b64encode(encrypted).decode("ascii")
+
+
+def validate_gameforge_launch_blackbox(blackbox, gsid, installation_id):
+    """Check the official script's result without changing its identity data."""
+    try:
+        if not isinstance(blackbox, str) or not blackbox.startswith("tra:"):
+            raise ValueError("missing tra prefix")
+        encoded = blackbox[4:]
+        raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        decoded = bytes((value - (raw[index - 1] if index else 0)) % 256
+                        for index, value in enumerate(raw))
+        fields = json.loads(urllib.parse.unquote(decoded.decode("ascii")))
+        # Field order is defined by the official game1 script / BlackBox::BLACKBOX_FIELDS.
+        if not isinstance(fields, list) or len(fields) != 30:
+            raise ValueError("unrecognized identity field layout")
+        request = fields[28]
+        if not isinstance(request, dict):
+            raise ValueError("identity script omitted the launch request")
+        if request.get("session") != gsid.rsplit("-", 1)[0]:
+            raise ValueError("identity script returned a different launch session")
+        if request.get("installation") != installation_id:
+            raise ValueError("identity script returned a different installation")
+        if not request.get("features"):
+            raise ValueError("identity script omitted launch features")
+    except (ValueError, TypeError, UnicodeError, IndexError) as error:
+        raise RuntimeError(f"Gameforge launch identity is invalid: {error}. Please reload and retry.") from error
 
 
 def gameforge_begin_launch(token, account_id, installation_id, user_agent, iovation_blackbox):
@@ -316,7 +345,7 @@ def gameforge_begin_launch(token, account_id, installation_id, user_agent, iovat
 
     # The Gameforge endpoint rejects a code request sent immediately after iovation.
     time.sleep(1)
-    blackbox_request = {"features": [secrets.randbelow(2147483646) + 1],
+    blackbox_request = {"features": [secrets.randbelow(0xFFFFFFFD) + 1],
                         "installation": installation_id, "session": game_session_id}
     return gsid, blackbox_request
 
@@ -324,6 +353,7 @@ def gameforge_begin_launch(token, account_id, installation_id, user_agent, iovat
 def gameforge_thin_code(token, account_id, installation_id, gsid, code_blackbox):
     if not all((code_blackbox, gsid)):
         raise RuntimeError("Gameforge launch requires a session-bound blackbox and game session ID.")
+    validate_gameforge_launch_blackbox(code_blackbox, gsid, installation_id)
     chrome_version = gameforge_chrome_version()
     code_user_agent = gameforge_code_user_agent(chrome_version, installation_id, account_id)
     result = gameforge_request("auth/thin/codes", installation_id, code_user_agent, "POST",
@@ -336,7 +366,7 @@ def gameforge_thin_code(token, account_id, installation_id, gsid, code_blackbox)
     return code
 
 
-def make_handler(game, build, relay, auth):
+def make_handler(game, build, relay, auth, client_exe=None):
     class Handler(http.server.BaseHTTPRequestHandler):
         # Keep-alive: the worker reads game files in synchronous 1 MB range requests, and a new connection and thread
         # per request made each one cost several milliseconds more.
@@ -362,6 +392,8 @@ def make_handler(game, build, relay, auth):
             if path.startswith("/build/"):
                 return os.path.join(build, path[len("/build/"):])
             if path.startswith("/game/"):
+                if client_exe and path[len("/game/"):].lower() == "noscore.exe":
+                    return client_exe
                 full = os.path.realpath(os.path.join(game, path[len("/game/"):]))
                 return full if full.startswith(os.path.realpath(game)) else None
             return None
@@ -372,7 +404,12 @@ def make_handler(game, build, relay, auth):
                 for f in files:
                     full = os.path.join(root, f)
                     rel = os.path.relpath(full, game).replace("\\", "/")
+                    if client_exe and rel.lower() == "noscore.exe":
+                        continue
                     out.append({"path": rel, "size": os.path.getsize(full), "mtime": int(os.path.getmtime(full))})
+            if client_exe:
+                out.append({"path": "NosCore.exe", "size": os.path.getsize(client_exe),
+                            "mtime": int(os.path.getmtime(client_exe))})
             body = json.dumps(out).encode()
             self.send_response(200)
             self.headers_common("application/json", len(body))
@@ -497,9 +534,17 @@ def make_handler(game, build, relay, auth):
                     if account_id not in {item["id"] for item in session["accounts"]}:
                         return self.reply_json(400, {"error": "Select one of your linked game accounts."})
                     if url.path == "/auth/launch":
+                        identity = (OfficialIdentity(auth["gf_identity_file"], auth["gf_installation_id"])
+                                    if auth.get("gf_identity_file") else None)
                         gsid, blackbox_request = gameforge_begin_launch(
                             session["token"], account_id, auth["gf_installation_id"],
-                            auth["gf_user_agent"], payload.get("iovationBlackbox", ""))
+                            identity.user_agent if identity else auth["gf_user_agent"],
+                            identity.blackbox() if identity else payload.get("iovationBlackbox", ""))
+                        if identity:
+                            code = gameforge_thin_code(session["token"], account_id, auth["gf_installation_id"],
+                                                      gsid, identity.blackbox(blackbox_request))
+                            auth["login_sessions"].pop(session_id, None)
+                            return self.reply_json(200, {"code": code, "installationId": auth["gf_installation_id"]})
                         session["pending_launch"] = {"account_id": account_id, "gsid": gsid,
                                                       "created": time.monotonic()}
                         return self.reply_json(200, {"gsid": gsid, "blackboxRequest": blackbox_request})
@@ -548,6 +593,10 @@ def make_handler(game, build, relay, auth):
             # Game file URLs carry the file's modification time (worker.js), so a changed file gets a new URL and the
             # browser may keep every range it has read: a reload reads them from its cache instead of from here.
             versioned = url.path.startswith("/game/") and "v=" in url.query
+            try:
+                stream = open(full, "rb")
+            except PermissionError:
+                return self.reply(403, b"ClientLab cannot read this file. Check the configured game/build directory.", "text/plain")
             self.send_response(status)
             self.headers_common(ctype, end - start + 1, immutable=versioned)
             if versioned:
@@ -557,8 +606,9 @@ def make_handler(game, build, relay, auth):
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()
             if head:
+                stream.close()
                 return
-            with open(full, "rb") as f:
+            with stream as f:
                 f.seek(start)
                 left = end - start + 1
                 while left > 0:
@@ -584,6 +634,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--game", required=True)
     work = os.environ.get("NOSRECOMP_WORK", r"C:\tools\re\work" if os.name == "nt" else os.path.expanduser("~/re/work"))
+    ap.add_argument("--client-exe", help="exact executable used for this recompilation, mounted as NosCore.exe")
     ap.add_argument("--build", default=os.environ.get("CLIENTLAB_BUILD", os.path.join(work, "wasm", "web")))
     ap.add_argument("--port", type=int, default=8077)
     ap.add_argument("--auth-url", default="https://127.0.0.1:7001")
@@ -595,6 +646,8 @@ def main():
                     help="authentication provider (defaults to NosCore when --user is set, otherwise Gameforge)")
     ap.add_argument("--gf-installation-id", default=os.environ.get("TNT_INSTALLATION_ID"),
                     help="registered TNT installation ID (defaults to Windows Gameforge registry ID)")
+    ap.add_argument("--gf-identity-file", default=os.environ.get("GF_IDENTITY_FILE"),
+                    help="portable identity captured from your official Gameforge launcher")
     ap.add_argument("--gf-locale", default="en-GB", help="Gameforge locale, for example en-GB")
     ap.add_argument("--gf-user-agent", default=os.environ.get(
         "GF_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 "
@@ -613,7 +666,10 @@ def main():
         except (ValueError, AttributeError, TypeError):
             ap.error("TNT installation ID must be a UUID from an existing Gameforge installation.")
     if a.auth_provider == "gameforge":
+        if a.gf_identity_file:
+            OfficialIdentity(a.gf_identity_file, a.gf_installation_id)
         auth = {"provider": "gameforge", "gf_installation_id": a.gf_installation_id,
+                "gf_identity_file": a.gf_identity_file,
                 "gf_locale": a.gf_locale, "gf_user_agent": a.gf_user_agent,
                 "login_sessions": {}, "pending_logins": {}, "code": None, "user": None}
     else:
@@ -621,11 +677,15 @@ def main():
                 "code": a.auth_code}
     remap = {int(f): int(t) for f, t in (r.split("=") for r in a.remap)}
     a.game, a.build = os.path.abspath(a.game), os.path.abspath(a.build)
+    if a.client_exe:
+        a.client_exe = os.path.abspath(a.client_exe)
+        if not os.path.isfile(a.client_exe):
+            ap.error("compiled client executable does not exist")
     if not os.path.isdir(a.game):
         ap.error(f"game directory does not exist: {a.game}")
     if not os.path.isfile(os.path.join(a.build, "nostale.js")):
         ap.error(f"browser build not found in {a.build}; build with compile_all.py --web")
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(a.game, a.build, Relay(remap), auth))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(a.game, a.build, Relay(remap), auth, a.client_exe))
     print(f"http://127.0.0.1:{a.port}/  (game: {a.game})")
     server.serve_forever()
 

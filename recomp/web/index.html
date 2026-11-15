@@ -214,6 +214,13 @@
     if (installationId) params.set('NC_INSTALLATION_ID', installationId);
     worker = new Worker('/worker.js' + (params.size ? `?${params}` : ''));
     worker.onmessage = handleWorkerMessage;
+    worker.onerror = (event) => {
+      status.textContent = 'Game startup failed. See the log below.';
+      handleWorkerMessage({ data: { type: 'log', text: `Worker failed: ${event.message || 'unable to load the game build'}` } });
+    };
+    worker.onmessageerror = () => {
+      status.textContent = 'Game worker communication failed.';
+    };
   }
 
   // Relayed sockets (hle_misc.c): the page long-polls the dev server and fills the worker's ring, so the worker
@@ -568,12 +575,17 @@
     authSubmit.textContent = 'Continue';
   }
   async function requestGameforgeLaunchCode() {
+    for (const path of ['/build/nostale.js', '/build/nostale.wasm']) {
+      const response = await fetch(path, { method: 'HEAD', cache: 'no-store' });
+      if (!response.ok) throw new Error(`Game build is unavailable (${response.status}). Fix the build directory before retrying sign-in.`);
+    }
     const iovationBlackbox = await createGameforgeBlackbox();
     const launch = await authRequest('/auth/launch', {
       sessionId: authSessionId,
       accountId: gameAccount.value,
       iovationBlackbox
     });
+    if (launch.code) return launch;
     const codeBlackbox = await createGameforgeBlackbox(launch.blackboxRequest);
     return authRequest('/auth/launch-code', {
       sessionId: authSessionId,
@@ -656,7 +668,12 @@
   });
 
   // Keep the established startup path as the default. Gameforge sign-in is an optional secondary flow.
-  startGame();
+  if (new URLSearchParams(location.search).get('login') === 'gameforge') {
+    loginPanel.hidden = false;
+    game.hidden = true;
+  } else {
+    startGame();
+  }
 </script>
 </body>
 </html>
