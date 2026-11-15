@@ -5,6 +5,7 @@ the memory sandbox must match.
 usage: difftest.py <client exe> <functions.txt> <work dir> [--cases N] [--only MNEMONIC]
 """
 import argparse
+import json
 import os
 import random
 import struct
@@ -198,6 +199,7 @@ def main():
     ap.add_argument("--cases", type=int, default=24)
     ap.add_argument("--per-shape", type=int, default=2)
     ap.add_argument("--only")
+    ap.add_argument("--recompiler-dotnet", help="C# recompiler DLL to test instead of the reference lifter")
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
 
@@ -220,11 +222,21 @@ def main():
             code = (FPU_PROLOGUE + raw + fpu_epilogue(ins)) if fpu_test else raw
             tests.append((key, ins, code, fpu_test))
 
+    dotnet_snippets = None
+    if a.recompiler_dotnet:
+        snippet_input = os.path.join(a.work, "snippets-in.json")
+        snippet_output = os.path.join(a.work, "snippets-out.json")
+        with open(snippet_input, "w") as stream:
+            json.dump([{"Code": code.hex(), "Name": f"t_{k}", "Address": CODE_AT}
+                       for k, (_, _, code, _) in enumerate(tests)], stream)
+        subprocess.run(["dotnet", a.recompiler_dotnet, "--emit-json", snippet_input, snippet_output], check=True)
+        with open(snippet_output) as stream:
+            dotnet_snippets = json.load(stream)
     src = ['#include "rt.h"', ""]
     for k, (key, ins, code, fpu_test) in enumerate(tests):
         try:
             src.append(f"/* {key}: {ins.mnemonic} {ins.op_str} */")
-            src.append(lift_snippet(L, code, f"t_{k}"))
+            src.append(dotnet_snippets[f"t_{k}"] if dotnet_snippets is not None else lift_snippet(L, code, f"t_{k}"))
         except Exception as ex:  # lifter refused: the test fails loudly at run time
             src.append(f"static void t_{k}(CPU* c) {{ rt_unimpl(c, 0, \"{ins.mnemonic}\"); }} /* {ex} */")
     src.append("typedef void (*TestFn)(CPU*);")

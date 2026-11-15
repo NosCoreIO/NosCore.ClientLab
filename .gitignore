@@ -24,3 +24,9 @@ node_modules/
 # Python caches
 __pycache__/
 *.pyc
+
+# Captured Gameforge device identities
+*.gameforge-identity.json
+
+# Browser automation scratch
+.playwright-mcp/
