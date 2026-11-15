@@ -121,9 +121,7 @@ client log to `C:\tools\re\work\drive\`. It is the starting point for NosCore en
 ## Contributing
 
 Questions, ideas and pull requests are welcome; most of the discussion happens on [Discord](https://discord.gg/Eu3ETSw).
-Any editor that handles .NET 11 works: `dotnet build` and `dotnet test` run on Windows, Linux and macOS.
-In Visual Studio, [Roslynator](https://github.com/dotnet/roslynator) and
-[ReSharper](https://www.jetbrains.com/resharper/) help keep to the code style.
+[Quick start](#quick-start) and [Linux](#linux) above give the setup and build steps.
 
 ## Supporting NosCore
 
