@@ -181,11 +181,28 @@ EM_JS(void, js_text_measure, (const char* css, const void* text, int n, int wide
         return;
     }
     const g = self.__textCtx || (self.__textCtx = new OffscreenCanvas(4, 4).getContext('2d', { willReadFrequently: true }));
-    g.font = font;
+    // This private context is shared only with js_text_prefixes below. Avoid
+    // reparsing the same CSS and reading its resolved font on every label.
+    if (g.__fontSpec !== font) { g.font = font; g.__fontSpec = font; g.__resolvedFont = g.font; }
+    // Busy towns ask for the same names/labels every frame. Key the resolved
+    // font, so invalid CSS still follows Canvas's existing-font fallback.
+    const cache = self.__textMetricsCache || (self.__textMetricsCache = { enabled: ENV.PORT_TEXT_CACHE !== '0', entries: new Map(), hits: 0, misses: 0 });
+    const loading = self.fonts?.status === 'loading';
+    if (loading) cache.entries.clear();
+    const key = g.__resolvedFont + '\x00' + s;
+    if (cache.enabled && !loading && cache.entries.has(key)) {
+        const hit = cache.entries.get(key); cache.hits++;
+        HEAP32[out >> 2] = hit[0]; HEAP32[(out >> 2) + 1] = hit[1]; HEAP32[(out >> 2) + 2] = hit[2];
+        return;
+    }
     const m = g.measureText(s);
     const asc = Math.ceil(m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? 10);
     const desc = Math.ceil(m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? 3);
     HEAP32[out >> 2] = Math.round(m.width); HEAP32[(out >> 2) + 1] = asc; HEAP32[(out >> 2) + 2] = desc;
+    if (cache.enabled && !loading && s.length <= 2048) {
+        if (cache.entries.size >= 4096) cache.entries.delete(cache.entries.keys().next().value);
+        cache.entries.set(key, [Math.round(m.width), asc, desc]); cache.misses++;
+    }
 });
 EM_JS(void, js_text_prefixes, (const char* css, const void* text, int n, int wide, int* out), {
     const s = wide ? String.fromCharCode.apply(null, HEAPU16.subarray(text >> 1, (text >> 1) + n))
@@ -195,7 +212,8 @@ EM_JS(void, js_text_prefixes, (const char* css, const void* text, int n, int wid
         return;
     }
     const g = self.__textCtx || (self.__textCtx = new OffscreenCanvas(4, 4).getContext('2d', { willReadFrequently: true }));
-    g.font = UTF8ToString(css);
+    const font = UTF8ToString(css);
+    if (g.__fontSpec !== font) { g.font = font; g.__fontSpec = font; g.__resolvedFont = g.font; }
     for (let i = 0; i < n; i++) HEAP32[(out >> 2) + i] = Math.round(g.measureText(s.slice(0, i + 1)).width);
 });
 /* Coverage (0..255) of the string drawn at baseline 'asc' into a w x h box. Returns 0 when it cannot render. */
@@ -225,6 +243,7 @@ EM_JS(int, js_font_add, (const char* family, const uint8_t* data, int n), {
         const name = UTF8ToString(family);
         const face = new FontFace(name, HEAPU8.slice(data, data + n).buffer);
         self.fonts.add(face);
+        self.__textMetricsCache?.entries.clear();
         (self.__addedFonts || (self.__addedFonts = {}))[name] = face;
         return face.status === 'error' ? 0 : 1;
     } catch (e) { return 0; }
@@ -233,6 +252,7 @@ EM_JS(int, js_font_remove, (const char* family), {
     const name = UTF8ToString(family), faces = self.__addedFonts || {};
     if (!faces[name] || !self.fonts) return 0;
     self.fonts.delete(faces[name]);
+    self.__textMetricsCache?.entries.clear();
     delete faces[name];
     return 1;
 });

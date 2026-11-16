@@ -27,7 +27,8 @@ once per frame. Browsers without it, such as Safari 26 and earlier, cannot start
 - walking, chat, the game windows (inventory, skills, ...), GM teleports between maps;
 - Direct3D 9 rendering on WebGL2 (fixed-function texture stages, lighting, fog, texture-coordinate generation),
   GDI text through the browser's font engine, Miles audio through WebAudio;
-- about 60 frames per second in town at 1080p on an integrated GPU.
+- about 60 frames per second in earlier NosCore town tests at 1080p on an integrated GPU;
+  crowded official-server scenes are being profiled separately (see [Performance](docs/PERFORMANCE.md)).
 
 Every one of the client's 19,436 functions is recompiled (90.4% of the code section's bytes; the rest is data the
 compiler keeps there: VMTs, RTTI, jump tables, strings). What is still open is listed in

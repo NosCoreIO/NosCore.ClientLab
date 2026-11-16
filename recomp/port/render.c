@@ -1,6 +1,7 @@
 /* Software rasteriser behind the null Direct3D 9 device: enough of the fixed-function pipeline for NosTale's sprites
    (FVF vertices, world/view/projection + texture matrix, TFACTOR/diffuse modulation, alpha test and blending). */
 #include "render.h"
+#include "render_compare.h"
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -60,6 +61,7 @@ static void identity(Mat* m) { memset(m, 0, sizeof *m); m->m[0] = m->m[5] = m->m
 
 static int wvp_dirty = 1;
 static int has_depth = 1;
+static int gl_state_dirty = 1;
 static void gl_resize(uint32_t backbuffer);
 
 /* The state a freshly created or reset device starts with. */
@@ -90,6 +92,7 @@ static void reset_state(uint32_t backbuffer) {
     R.sc_h = SH(backbuffer);
     wvp_dirty = 1;
     has_depth = 1;
+    gl_state_dirty = 1;
 }
 void r_init(uint32_t backbuffer) {
     reset_state(backbuffer);
@@ -99,10 +102,11 @@ void r_reset(uint32_t backbuffer) {
     reset_state(backbuffer);
     gl_resize(backbuffer);
 }
-void r_set_depth(int present) { has_depth = present; }
+void r_set_depth(int present) { if (has_depth != present) gl_state_dirty = 1; has_depth = present; }
 void r_set_scissor(uint32_t rect) {
-    R.sc_x = M32(rect); R.sc_y = M32(rect + 4);
-    R.sc_w = M32(rect + 8) - M32(rect); R.sc_h = M32(rect + 12) - M32(rect + 4);
+    uint32_t x = M32(rect), y = M32(rect + 4), w = M32(rect + 8) - x, h = M32(rect + 12) - y;
+    if (R.sc_x != x || R.sc_y != y || R.sc_w != w || R.sc_h != h) gl_state_dirty = 1;
+    R.sc_x = x; R.sc_y = y; R.sc_w = w; R.sc_h = h;
 }
 void r_get_scissor(uint32_t rect) {
     M32(rect) = R.sc_x; M32(rect + 4) = R.sc_y; M32(rect + 8) = R.sc_x + R.sc_w; M32(rect + 12) = R.sc_y + R.sc_h;
@@ -134,6 +138,7 @@ void r_state_load(const uint8_t* in, const uint8_t* mask) {
     uint8_t* r = (uint8_t*)&R;
     for (uint32_t k = 0; k < sizeof R; k++) if (mask[k]) r[k] = in[k];
     wvp_dirty = 1;
+    gl_state_dirty = 1;
 }
 #define MARK(field) memset(mask + offsetof(__typeof__(R), field), 1, sizeof R.field)
 #define MARK_RS(i) memset(mask + offsetof(__typeof__(R), rs) + 4 * (i), 1, 4)
@@ -176,6 +181,7 @@ void r_set_render_target(uint32_t surface) {
     }
     R.target = surface;
     R.vp_set = 0;
+    gl_state_dirty = 1;
 }
 void r_set_transform(uint32_t type, uint32_t addr) {
     Mat* m = type == 256 ? &R.world : type == 2 ? &R.view : type == 3 ? &R.proj : (type >= 16 && type < 24) ? &R.tex[type - 16] : 0;
@@ -188,7 +194,7 @@ void r_get_transform(uint32_t type, uint32_t addr) {
     if (m) memcpy(GPTR(addr), m->m, 64);
     else { Mat i; identity(&i); memcpy(GPTR(addr), i.m, 64); }
 }
-void r_set_render_state(uint32_t s, uint32_t v) { if (s < 256) R.rs[s] = v; }
+void r_set_render_state(uint32_t s, uint32_t v) { if (s < 256 && R.rs[s] != v) { R.rs[s] = v; gl_state_dirty = 1; } }
 void r_set_light(uint32_t i, uint32_t p) {
     if (i >= 8) return;
     R.light[i][0] = (float)M32(p);
@@ -204,16 +210,20 @@ uint32_t r_light_enabled(uint32_t i) { return i < 8 ? (uint32_t)R.light_on[i] : 
 void r_set_material(uint32_t p) { for (int k = 0; k < 17; k++) R.material[k] = MF32(p + 4 * (uint32_t)k); }
 void r_get_material(uint32_t p) { for (int k = 0; k < 17; k++) MF32(p + 4 * (uint32_t)k) = R.material[k]; }
 uint32_t r_get_render_state(uint32_t s) { return s < 256 ? R.rs[s] : 0; }
-void r_set_tss(uint32_t st, uint32_t t, uint32_t v) { if (st < 8 && t < 33) R.tss[st][t] = v; }
+void r_set_tss(uint32_t st, uint32_t t, uint32_t v) { if (st < 8 && t < 33 && R.tss[st][t] != v) { R.tss[st][t] = v; gl_state_dirty = 1; } }
 uint32_t r_get_tss(uint32_t st, uint32_t t) { return st < 8 && t < 33 ? R.tss[st][t] : 0; }
-void r_set_sampler(uint32_t s, uint32_t t, uint32_t v) { if (s < 8 && t < 14) R.samp[s][t] = v; }
+void r_set_sampler(uint32_t s, uint32_t t, uint32_t v) { if (s < 8 && t < 14 && R.samp[s][t] != v) { R.samp[s][t] = v; gl_state_dirty = 1; } }
 uint32_t r_get_sampler(uint32_t s, uint32_t t) { return s < 8 && t < 14 ? R.samp[s][t] : 0; }
 void r_set_texture(uint32_t st, uint32_t tex) { if (st < 8) R.tex_obj[st] = tex; }
 uint32_t r_get_texture(uint32_t st) { return st < 8 ? R.tex_obj[st] : 0; }
 void r_set_stream(uint32_t vb, uint32_t offset, uint32_t stride) { R.vb = vb; R.vb_offset = offset; R.vb_stride = stride; }
 void r_set_indices(uint32_t ib) { R.ib = ib; }
 void r_set_fvf(uint32_t fvf) { R.fvf = fvf; }
-void r_set_viewport(uint32_t vp) { R.vp_x = M32(vp); R.vp_y = M32(vp + 4); R.vp_w = M32(vp + 8); R.vp_h = M32(vp + 12); R.vp_set = 1; }
+void r_set_viewport(uint32_t vp) {
+    uint32_t x = M32(vp), y = M32(vp + 4), w = M32(vp + 8), h = M32(vp + 12);
+    if (!R.vp_set || R.vp_x != x || R.vp_y != y || R.vp_w != w || R.vp_h != h) gl_state_dirty = 1;
+    R.vp_x = x; R.vp_y = y; R.vp_w = w; R.vp_h = h; R.vp_set = 1;
+}
 
 /* ---- pixels ---- */
 
@@ -631,10 +641,12 @@ static void layout_begin(void) {
     LY.vh = (float)(R.vp_set ? R.vp_h : SH(R.target));
     LY.vx = (float)(R.vp_set ? R.vp_x : 0);
     LY.vy = (float)(R.vp_set ? R.vp_y : 0);
-    if (!LY.pretransformed) update_wvp();
 }
 
 static void fetch(uint32_t p, Vtx* o) {
+    // GPU draws use the original matrices directly. Build the CPU combination
+    // only when a software vertex path actually consumes it.
+    if (!LY.pretransformed) update_wvp();
     float in[4] = {MF32(p), MF32(p + 4), MF32(p + 8), 1}, t[4];
     o->diffuse = LY.has_diffuse ? M32(p + LY.diffuse_at) : 0xffffffffu;
     if (LY.lit) {

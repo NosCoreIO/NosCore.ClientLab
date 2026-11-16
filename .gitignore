@@ -30,6 +30,7 @@ __pycache__/
 
 # Browser automation scratch
 .playwright-mcp/
+perf-results/
 
 # Chromium caches written beside a browser-mode run
 DawnCache/

@@ -1,0 +1,14 @@
+import {logger} from '../../tools/logger.mjs';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+const renderer=readFileSync(new URL('../../recomp/web/gl.js',import.meta.url),'utf8');
+const executeSource=renderer.slice(renderer.indexOf('function execute('),renderer.indexOf('\nonmessage ='));
+let clocks=0,clears=0;
+const context=vm.createContext({performance:{now:()=>++clocks},G:{},frameData(){},clear(){clears++;},load:{ops:new Float64Array(11)},Int32Array,Uint8Array,Float32Array});
+vm.runInContext(executeSource,context);
+const commands=new Int32Array(8000);for(let i=0;i<1000;i++)commands.set([6,1,0,0,0,0,1,1],i*8);
+context.execute(commands.buffer);assert.equal(clears,1000);assert.equal(clocks,0);
+context.renderProfileDetailed=true;context.execute(commands.buffer);assert.equal(clocks,1001);
+context.renderProfileDetailed=false;context.execute(commands.buffer);assert.equal(clocks,1001);assert.equal(clears,3000);
+logger.log('PASS: normal command decoding performs zero per-command clock reads; detailed timing can be enabled and disabled without changing command execution.');

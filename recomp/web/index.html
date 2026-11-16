@@ -146,15 +146,32 @@
     log.textContent = lines.join('\n');
     log.scrollTop = log.scrollHeight;
   }
-  // WebGL frames are shown one per display refresh from a queue of at most two, so a frame that comes a little late
-  // still has one ready behind it instead of the refresh repeating the last frame. shownCount[0] counts the frames
-  // shown; the worker reads it to stay at most two frames ahead (js_gl_present in render_gl.inc).
-  window.frameStats = { refreshes: 0, shown: 0, repeated: 0, overwritten: 0 };
+  // Pace presentation to 60 FPS, independently of a 120/144 Hz monitor. The
+  // spare queued frame absorbs short producer stalls. fps=0 measures uncapped
+  // throughput; the counters always count bitmaps actually displayed.
+  const requestedFps = Number(new URLSearchParams(location.search).get('fps') ?? 60);
+  let targetFps = Number.isFinite(requestedFps) && requestedFps >= 0 && requestedFps <= 240 ? requestedFps : 60;
+  let nextPresentation = 0;
+  window.getTargetFps = () => targetFps;
+  window.setTargetFps = value => {
+    if (!Number.isFinite(value) || value < 0 || value > 240) throw Error('Frame rate must be between 0 and 240.');
+    targetFps = value; nextPresentation = 0;
+  };
+  window.frameStats = { refreshes: 0, shown: 0, repeated: 0, overwritten: 0, capped: 0 };
   const queued = [];
   let shownCount = null;
-  function showFrame() {
-    const f = window.frameStats, bmp = queued.shift();
+  function showFrame(refreshTime = performance.now()) {
+    const f = window.frameStats;
     f.refreshes++;
+    if (targetFps && refreshTime + 0.75 < nextPresentation) {
+      f.capped++; requestAnimationFrame(showFrame); return;
+    }
+    if (targetFps) {
+      const interval = 1000 / targetFps;
+      if (!nextPresentation) nextPresentation = refreshTime;
+      nextPresentation += interval * Math.max(1, Math.floor((refreshTime - nextPresentation) / interval) + 1);
+    }
+    const bmp = queued.shift();
     if (bmp) {
       if (canvas.width !== bmp.width || canvas.height !== bmp.height) { canvas.width = bmp.width; canvas.height = bmp.height; }
       bitmaps = bitmaps || canvas.getContext('bitmaprenderer');
@@ -480,7 +497,12 @@
   // Same event codes as pump_input in hle_user32.c.
   const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7, dumpFrame: 8, profile: 9 };
   // From DevTools: toggles the detailed profile lines of a running game.
-  window.toggleProfile = () => send(IN.profile, 0);
+  let rendererProfileDetailed = false;
+  window.toggleProfile = () => {
+    send(IN.profile, 0);
+    rendererProfileDetailed = !rendererProfileDetailed;
+    renderer?.postMessage({type:'profile', enabled:rendererProfileDetailed});
+  };
   let ring = null;
   function send(type, a, x = 0, y = 0, time = performance.now()) {
     if (!ring) return;

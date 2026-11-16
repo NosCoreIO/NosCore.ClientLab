@@ -16,10 +16,13 @@ internal static class WasmCompiler
         static string[] Headers(string directory) => Directory.GetFiles(directory).Where(path => Path.GetExtension(path) is ".h" or ".inc").ToArray();
         string[] runtimeHeaders = Headers(runtime), portHeaders = Headers(port);
         string[] compileFlags = ["-O2", "-w", "-c", "-sSUPPORT_LONGJMP=0"];
-        async Task<string> IdentityAsync(IEnumerable<string> dependencies)
+        // SIMD applies to portable host math/state copies, while existing lifted
+        // game objects keep their compiler identity and remain reusable.
+        string[] hostCompileFlags = ["-O3", "-msimd128", "-w", "-c", "-sSUPPORT_LONGJMP=0"];
+        async Task<string> IdentityAsync(IEnumerable<string> dependencies, string[] compilerOptions)
         {
             using var fingerprint = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            fingerprint.AppendData(Encoding.UTF8.GetBytes("wasm-objects-v1\0" + string.Join(' ', compileFlags) + "\0" + Path.GetFullPath(compiler) + "\0" +
+            fingerprint.AppendData(Encoding.UTF8.GetBytes("wasm-objects-v1\0" + string.Join(' ', compilerOptions) + "\0" + Path.GetFullPath(compiler) + "\0" +
                 System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier + "\0" + Environment.GetEnvironmentVariable("EMCC_CFLAGS")));
             foreach (var dependency in dependencies.Order(StringComparer.Ordinal).Prepend(compiler))
             {
@@ -32,8 +35,8 @@ internal static class WasmCompiler
         // Generated code includes only rt.h, so its objects (nearly all of the compile time) survive changes to the
         // portable host's headers, such as the renderer; host objects depend on both sets of headers.
         var cacheRoot = Path.Combine(app.DataDirectory, "cache", "wasm-objects");
-        var gameCache = new CompilationCache(cacheRoot, await IdentityAsync(runtimeHeaders));
-        var hostCache = new CompilationCache(cacheRoot, await IdentityAsync(portHeaders.Concat(runtimeHeaders)));
+        var gameCache = new CompilationCache(cacheRoot, await IdentityAsync(runtimeHeaders, compileFlags));
+        var hostCache = new CompilationCache(cacheRoot, await IdentityAsync(portHeaders.Concat(runtimeHeaders), hostCompileFlags));
         var generatedRoot = Path.GetFullPath(generated) + Path.DirectorySeparatorChar;
         var memory = GC.GetGCMemoryInfo();
         var budget = Math.Max(0, memory.TotalAvailableMemoryBytes - memory.MemoryLoadBytes);
@@ -58,9 +61,10 @@ internal static class WasmCompiler
             await Parallel.ForEachAsync(sources, new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = token }, async (source, cancellation) =>
             {
                 var watch = Stopwatch.StartNew();
-                var cache = Path.GetFullPath(source).StartsWith(generatedRoot, StringComparison.OrdinalIgnoreCase) ? gameCache : hostCache;
+                var gameSource = Path.GetFullPath(source).StartsWith(generatedRoot, StringComparison.OrdinalIgnoreCase);
+                var cache = gameSource ? gameCache : hostCache;
                 var result = await cache.GetOrCompileAsync(source, (obj, ct) => app.RunAsync(compiler,
-                    compileFlags.Concat(["-I", runtime, "-I", port, source, "-o", obj]), ct), cancellation);
+                    (gameSource ? compileFlags : hostCompileFlags).Concat(["-I", runtime, "-I", port, source, "-o", obj]), ct), cancellation);
                 objects[source] = result.Path;
                 if (result.Reused) Interlocked.Increment(ref reused);
                 app.Log($"{(result.Reused ? "Reused" : "Compiled")} {Path.GetFileName(source)} ({watch.Elapsed.TotalSeconds:F1}s)");
@@ -70,8 +74,8 @@ internal static class WasmCompiler
         finally { heartbeat.Cancel(); await progress; }
         app.Log($"Reused {reused} cached files; compiled {sources.Length - reused} files in {elapsed.Elapsed.TotalSeconds:F0}s.");
         app.Status("compiling", "Finishing game preparation…", .9);
-        string[] flags = ["-O2", "-sGLOBAL_BASE=536870912", "-sINITIAL_MEMORY=1024MB", "-sALLOW_MEMORY_GROWTH=1", "-sMAXIMUM_MEMORY=2048MB", "-sSTACK_SIZE=64MB", "-sEXIT_RUNTIME=1", "-sSUPPORT_LONGJMP=0", "-sENVIRONMENT=worker", "-sFORCE_FILESYSTEM=1", "-sINVOKE_RUN=0", "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV"];
-        var arguments = flags.Concat(sources.Order(StringComparer.Ordinal).Select(source => objects[source])).Concat(["-o", Path.Combine(output, "nostale.js")]);
+        string[] flags = ["-O3", "-msimd128", "-sGLOBAL_BASE=536870912", "-sINITIAL_MEMORY=1024MB", "-sALLOW_MEMORY_GROWTH=1", "-sMAXIMUM_MEMORY=2048MB", "-sSTACK_SIZE=64MB", "-sEXIT_RUNTIME=1", "-sSUPPORT_LONGJMP=0", "-sENVIRONMENT=worker", "-sFORCE_FILESYSTEM=1", "-sINVOKE_RUN=0", "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV"];
+        var arguments = flags.Concat(sources.Order(StringComparer.Ordinal).Select(source => objects[source])).Concat(["--emit-symbol-map", "-o", Path.Combine(output, "nostale.js")]);
         var responseFile = Path.Combine(Path.GetDirectoryName(output)!, "link.rsp");
         await File.WriteAllLinesAsync(responseFile, arguments.Select(value => "\"" + value.Replace('\\', '/').Replace("\"", "\\\"") + "\""), token);
         await app.RunAsync(compiler, ["@" + responseFile], token);

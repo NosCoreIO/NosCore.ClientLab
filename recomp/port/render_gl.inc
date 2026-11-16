@@ -11,12 +11,47 @@ EM_JS(int, js_gl_available, (void), {
     if (typeof OffscreenCanvas === 'undefined' || typeof importScripts !== 'function' || !self.glPort) return 0;
     const probe = new OffscreenCanvas(1, 1).getContext('webgl2');
     if (!probe) return 0;
+    self.glCommandPoolSupported = false;
+    if (typeof SharedArrayBuffer === 'function' && ENV.PORT_GL_COMMAND_POOL !== '0') {
+        try {
+            const bytes = new Uint8Array(new SharedArrayBuffer(4));
+            probe.bindBuffer(probe.ARRAY_BUFFER, probe.createBuffer());
+            probe.bufferData(probe.ARRAY_BUFFER, bytes, probe.STREAM_DRAW);
+            let supported = probe.getError() === 0;
+            probe.bufferSubData(probe.ARRAY_BUFFER, 0, bytes, 0, 4);
+            supported &&= probe.getError() === 0;
+            probe.bindTexture(probe.TEXTURE_2D, probe.createTexture());
+            probe.texImage2D(probe.TEXTURE_2D, 0, probe.RGBA, 1, 1, 0, probe.RGBA, probe.UNSIGNED_BYTE, bytes, 0);
+            supported &&= probe.getError() === 0;
+            probe.texSubImage2D(probe.TEXTURE_2D, 0, 0, 0, 1, 1, probe.RGBA, probe.UNSIGNED_BYTE, bytes, 0);
+            self.glCommandPoolSupported = supported && probe.getError() === 0;
+        } catch { /* Use ordinary transferable buffers on implementations without shared uploads. */ }
+    }
     const lose = probe.getExtension('WEBGL_lose_context');
     if (lose) lose.loseContext();
     return 1;
 });
 
 EM_JS(void, js_gl_submit, (const uint8_t* q, int len), {
+    const slotBytes = 8 * 1024 * 1024;
+    if (self.glCommandPoolSupported && len <= slotBytes && ENV.PORT_GL_COMMAND_POOL !== '0') {
+        let pool = self.glCommandPool;
+        if (!pool) {
+            pool = self.glCommandPool = { states: new Int32Array(new SharedArrayBuffer(12)), bytes: new Uint8Array(new SharedArrayBuffer(3 * slotBytes)), next: 0 };
+            self.glPort.postMessage({ type: 'command-pool', states: pool.states.buffer, bytes: pool.bytes.buffer, slotBytes });
+        }
+        for (let n = 0; n < 3; n++) {
+            const slot = (pool.next + n) % 3;
+            if (Atomics.compareExchange(pool.states, slot, 0, 1) !== 0) continue;
+            pool.bytes.set(HEAPU8.subarray(q, q + len), slot * slotBytes);
+            Atomics.store(pool.states, slot, 2);
+            self.glPort.postMessage({ type: 'commands', slot, bytes: len });
+            pool.next = (slot + 1) % 3;
+            return;
+        }
+    }
+    // Oversized/loading bursts and a busy pool retain the original ordered
+    // transfer path. The game never waits for a pool slot to become available.
     const copy = HEAPU8.slice(q, q + len).buffer;
     self.glPort.postMessage(copy, [copy]);
 });
@@ -167,7 +202,7 @@ static GlCmd* gl_command(int32_t prim, const int32_t* st, uint32_t verts) {
     gl_tnl_flush_batch();
     if (gl_nverts + verts > FRAME_VERTS || gl_ncmds == MAX_CMDS) gl_flush_list();
     GlCmd* last = gl_ncmds ? &gl_cmds[gl_ncmds - 1] : 0;
-    if (last && prim == 4 && last->prim == 4 && !memcmp(last->st, st, sizeof last->st)) return last;
+    if (last && prim == 4 && last->prim == 4 && r_words_equal(last->st, st, 41)) return last;
     GlCmd* c = &gl_cmds[gl_ncmds++];
     c->prim = prim;
     c->first = (int32_t)gl_nverts;
@@ -219,8 +254,17 @@ static void log_raster_setup(void) {
 }
 
 static void gl_state(int32_t* st) {
+    static int32_t cached[41];
     log_stage_setup();
     log_raster_setup();
+    if (!gl_state_dirty) {
+        memcpy(st, cached, sizeof cached);
+        // Texture contents/validity can change without changing the binding.
+        // Keep checking uploads in draw order even when scalar state is cached.
+        st[12] = (int32_t)gl_texture(R.tex_obj[0]);
+        st[13] = (int32_t)gl_texture(R.tex_obj[1]);
+        return;
+    }
     memset(st, 0, 41 * sizeof *st);
     for (int s = 0; s < 2; s++) {
         for (int k = 0; k < 6; k++) st[6 * s + k] = (int32_t)R.tss[s][1 + k];
@@ -239,6 +283,8 @@ static void gl_state(int32_t* st) {
     st[38] = (int32_t)R.rs[34];
     st[39] = (int32_t)(R.rs[28] != 0);
     st[40] = (int32_t)R.rs[22];
+    memcpy(cached, st, sizeof cached);
+    gl_state_dirty = 0;
 }
 
 static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n) {
@@ -286,13 +332,13 @@ static int32_t gl_tnl_params[338], gl_tnl_last[338];
 /* Which uniform groups and vertex layout differ from the previous GPU draw (see tnl() in web/gl.js). */
 static int32_t gl_tnl_changes(const int32_t* p) {
     if (!gl_tnl_primed) { gl_tnl_primed = 1; return 255; }
-#define TNL_DIFF(from, to) memcmp(p + (from), gl_tnl_last + (from), 4 * ((to) - (from)))
+#define TNL_DIFF(from, to) (!r_words_equal(p + (from), gl_tnl_last + (from), (to) - (from)))
     int32_t mask = 0;
     if (p[5] != gl_tnl_last[5] || TNL_DIFF(13, 21)) mask |= 1;
     if (TNL_DIFF(27, 43)) mask |= 2;
     if (TNL_DIFF(43, 75)) mask |= 4;
     if (TNL_DIFF(75, 81)) mask |= 8;
-    if (TNL_DIFF(21, 26) || TNL_DIFF(81, 96) || TNL_DIFF(99, 259)) mask |= 16;
+    if (!r_tnl_material_equal(p, gl_tnl_last)) mask |= 16;
     if (TNL_DIFF(26, 27) || TNL_DIFF(96, 99)) mask |= 32;
     if (TNL_DIFF(300, 337)) mask |= 64;
     if (TNL_DIFF(259, 300)) mask |= 128;
@@ -304,7 +350,7 @@ static int gl_tnl_reject(int reason) { prof_cpu_reason[reason]++; return 0; }
 
 static void gl_tnl_submit(int32_t* p) {
     p[337] = gl_tnl_changes(p);
-    memcpy(gl_tnl_last, p, sizeof gl_tnl_last);
+    r_tnl_copy(gl_tnl_last, p);
     prof_gl_draws++;
     double t = prof_mark();
     /* Words 0..26, then the groups that changed in gl.js's GROUPS order, then data the renderer must upload. */
@@ -333,7 +379,7 @@ static void gl_tnl_flush_batch(void) {
     if (!gl_batch_verts) return;
     int32_t* p = gl_batch_params;
     float* f = (float*)p;
-    memcpy(p, gl_batch_key, sizeof gl_batch_params);
+    r_tnl_copy(p, gl_batch_key);
     p[0] = 4; p[1] = (int32_t)gl_batch_verts; p[2] = 0; p[3] = 0;
     p[5] = -3; p[6] = (int32_t)(uintptr_t)gl_batch; p[7] = (int32_t)gl_batch_bytes; p[8] = 2;
     p[14] = 0;
@@ -345,8 +391,7 @@ static void gl_tnl_flush_batch(void) {
 
 /* Everything but the draw's buffers, its position in them and the world matrix. */
 static int gl_batch_matches(const int32_t* p) {
-    const int32_t* k = gl_batch_key;
-    return p[13] == k[13] && !memcmp(p + 15, k + 15, 4 * (27 - 15)) && !memcmp(p + 43, k + 43, 4 * (337 - 43));
+    return r_tnl_batch_equal(p, gl_batch_key);
 }
 
 static int gl_tnl_batch(const int32_t* p, uint32_t prim, uint32_t n, int indexed, int idx32, uint32_t data, uint32_t base,
@@ -363,7 +408,7 @@ static int gl_tnl_batch(const int32_t* p, uint32_t prim, uint32_t n, int indexed
         verts[k] = data + base + v * stride;
     }
     if (gl_batch_verts && (!gl_batch_matches(p) || gl_batch_bytes + bytes > BATCH_BYTES)) gl_tnl_flush_batch();
-    if (!gl_batch_verts) memcpy(gl_batch_key, p, sizeof gl_batch_key);
+    if (!gl_batch_verts) r_tnl_copy(gl_batch_key, p);
     int32_t normal = p[15];
     for (uint32_t t = 0; t < tris; t++)
         for (int j = 0; j < 3; j++) {
@@ -465,7 +510,6 @@ static int gl_tnl_draw(uint32_t prim, uint32_t count, int indexed, int32_t base_
         o[12] = L[16]; o[13] = L[17]; o[14] = L[18]; o[15] = L[22];  /* direction, attenuation 1 */
         o[16] = L[23]; o[17] = o[18] = o[19] = 0;                    /* attenuation 2 */
     }
-    memset(f + 99 + 20 * lights, 0, sizeof(float) * 20 * (size_t)(8 - lights));
     p[25] = lights;
     memcpy(p + 259, st, sizeof st);
     for (int s = 0; s < 2; s++) {
