@@ -256,6 +256,18 @@ function texture(id, w, h, B, at) {
     G.tnlState = false;
 }
 
+// The changed part of a texture already uploaded whole.
+function textureRect(id, x, y, w, h, B, at) {
+    const gl = G.gl, t = G.textures.get(id);
+    if (!t) return;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, B, at);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    G.prev[12] = -1; G.prev[13] = -1;
+    G.tnlState = false;
+}
+
 // SetLOD: the most detailed mip level sampled.
 function lod(id, level) {
     const gl = G.gl, t = G.textures.get(id);
@@ -362,6 +374,7 @@ function frameData(W, start) {
             case 6: at += 7; break;
             case 7: at += 4 + W[at + 2] * W[at + 3]; break;
             case 9: break;
+            case 10: at += 5 + W[at + 3] * W[at + 4]; break;
             default: throw new Error('renderer: unknown command ' + op);
         }
     }
@@ -528,16 +541,31 @@ function read(m) {
 }
 
 // Every 5 s: how long this thread was busy per frame, which bounds the frame rate as much as the game thread does.
-const load = { busy: 0, frames: 0, draws: 0, bytes: 0, since: performance.now(), ops: new Float64Array(10) };
+const load = { busy: 0, frames: 0, draws: 0, bytes: 0, since: performance.now(), ops: new Float64Array(11), textures: new Map() };
+// Texture uploads by texture, for the profile line: which ones the client keeps changing.
+function uploaded(id, w, h, pixels) {
+    const t = load.textures.get(id);
+    if (t) { t.n++; t.pixels += pixels; } else load.textures.set(id, { w, h, n: 1, pixels });
+}
 function reportLoad() {
     const now = performance.now();
     if (now - load.since < 5000 || !load.frames) return;
     postMessage({ type: 'log', text: `profile: renderer thread ${(load.busy / load.frames).toFixed(1)} ms/frame busy, ` +
         `${Math.round(load.draws / load.frames)} WebGL draws, ${Math.round(load.bytes / load.frames / 1024)} KB of commands per frame; ` +
-        ['', 'init', 'textures', 'lod', 'lists', 'draws', 'clears', 'writes', 'resize', 'present']
-            .map((name, op) => load.ops[op] >= load.frames * 0.1 ? `${name} ${(load.ops[op] / load.frames).toFixed(1)}` : '').filter(Boolean).join(', ') });
+        ['', 'init', 'textures', 'lod', 'lists', 'draws', 'clears', 'writes', 'resize', 'present', 'texture parts']
+            .map((name, op) => load.ops[op] >= load.frames * 0.1 ? `${name} ${(load.ops[op] / load.frames).toFixed(1)}` : '').filter(Boolean).join(', ') +
+        uploadReport() });
     Object.assign(load, { busy: 0, frames: 0, draws: 0, bytes: 0, since: now });
+    load.textures.clear();
     load.ops.fill(0);
+}
+
+function uploadReport() {
+    const top = [...load.textures.entries()].sort((a, b) => b[1].pixels - a[1].pixels).slice(0, 4)
+        .filter(([, t]) => t.pixels * 4 >= load.frames * 64 * 1024);
+    if (!top.length) return '';
+    return '; most uploaded: ' + top.map(([id, t]) => `${id.toString(16)} ${t.w}x${t.h} ${(t.n / load.frames).toFixed(1)}/frame ` +
+        `${Math.round(t.pixels * 4 / load.frames / 1024)} KB`).join(', ');
 }
 
 function run(buffer) {
@@ -557,7 +585,7 @@ function execute(buffer) {
         if (op !== 1 && !G) return;
         switch (op) {
             case 1: init(W[at], W[at + 1]); at += 2; if (G) frameData(W, at); break;
-            case 2: { const id = W[at] >>> 0, w = W[at + 1], h = W[at + 2]; texture(id, w, h, B, (at + 3) * 4); at += 3 + w * h; break; }
+            case 2: { const id = W[at] >>> 0, w = W[at + 1], h = W[at + 2]; texture(id, w, h, B, (at + 3) * 4); uploaded(id, w, h, w * h); at += 3 + w * h; break; }
             case 3: lod(W[at] >>> 0, W[at + 1]); at += 2; break;
             case 4: {
                 const nverts = W[at], ncmds = W[at + 1], verts = at + 2, cmds = verts + nverts * 10;
@@ -571,6 +599,13 @@ function execute(buffer) {
             case 7: { const w = W[at + 2], h = W[at + 3]; write(W[at], W[at + 1], w, h, B, (at + 4) * 4); at += 4 + w * h; break; }
             case 8: resize(W[at], W[at + 1]); at += 2; break;
             case 9: present(); load.frames++; break;
+            case 10: {
+                const id = W[at] >>> 0, w = W[at + 3], h = W[at + 4];
+                textureRect(id, W[at + 1], W[at + 2], w, h, B, (at + 5) * 4);
+                uploaded(id, w, h, w * h);
+                at += 5 + w * h;
+                break;
+            }
             default: throw new Error('renderer: unknown command ' + op);
         }
     }

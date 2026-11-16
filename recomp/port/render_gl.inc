@@ -104,7 +104,8 @@ static void gl_start(uint32_t backbuffer) {
     }
 }
 
-/* Textures are uploaded (level 0, then mipmapped) when Lock marked them dirty: +56 is 2 once uploaded. */
+/* Textures are uploaded (level 0, then mipmapped) when something changed them: +56 is 2 once uploaded. When only
+   rectangles of level 0 changed since (hle_d3d9.c changed()), only their bounding box is sent. */
 static uint32_t gl_texture(uint32_t tex) {
     if (!tex) return 0;
     uint32_t s = M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
@@ -112,10 +113,23 @@ static uint32_t gl_texture(uint32_t tex) {
     if (M32(tex + 56) != 2) {
         gl_flush();
         double t0 = prof_mark();
-        uint32_t w = SW(s), h = SH(s);
-        glq_op(2); glq_word((int32_t)tex); glq_word((int32_t)w); glq_word((int32_t)h);
-        surface_rgba(s, glq_take(w * h * 4));
+        uint32_t w = SW(s), h = SH(s), size = w | h << 16;
+        if (M32(tex + 88) || M32(tex + 92) != size) {
+            glq_op(2); glq_word((int32_t)tex); glq_word((int32_t)w); glq_word((int32_t)h);
+            surface_rgba(s, glq_take(w * h * 4));
+        } else {
+            uint32_t l = M32(tex + 80) & 0xffff, t = M32(tex + 80) >> 16, r = M32(tex + 84) & 0xffff, b = M32(tex + 84) >> 16;
+            if (SFMT(s) == FMT_DXT1 || SFMT(s) == FMT_DXT3 || SFMT(s) == FMT_DXT5) { l &= ~3u; t &= ~3u; r = (r + 3) & ~3u; b = (b + 3) & ~3u; }
+            if (r > w) r = w;
+            if (b > h) b = h;
+            if (l < r && t < b) {
+                glq_op(10); glq_word((int32_t)tex); glq_word((int32_t)l); glq_word((int32_t)t); glq_word((int32_t)(r - l)); glq_word((int32_t)(b - t));
+                surface_rgba_rect(s, l, t, r - l, b - t, glq_take((r - l) * (b - t) * 4));
+            }
+        }
         M32(tex + 56) = 2;
+        M32(tex + 88) = 0;
+        M32(tex + 92) = size;
         prof_upload += prof_mark() - t0;
     }
     return tex;

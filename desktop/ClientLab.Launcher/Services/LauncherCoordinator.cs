@@ -350,36 +350,20 @@ public sealed class LauncherCoordinator : IAsyncDisposable
     {
         downloadedFiles = 0;
         string version, client, pinned, buildVersionId, buildLabel;
-        // The runtime targets the NosCore-patched client; fall back to the stock executable only if it is absent.
-        var installExe = Setting("provider") == "noscore" && Setting("import_dir").Length > 0
-            ? new[] { "NosCore.exe", "NostaleClientX.exe" }.Select(name => Path.Combine(Setting("import_dir"), name)).FirstOrDefault(File.Exists)
-            : null;
-        if (installExe is not null)
-        {
-            // Install mode: build and play straight from the existing local NosTale install; no Gameforge download.
-            Status("installing", "Using your installed NosTale files…");
-            buildVersionId = (await HashAsync(installExe, "sha1", token))[..16];
-            buildLabel = "installed-" + buildVersionId[..6];
-            if (await CanReuseBuildAsync(buildVersionId, token)) { Status("ready", "Your game is up to date.", 1); return; }
-            version = BuildWorkspace.Create(Path.Combine(directory, "versions", buildVersionId));
-            client = Setting("import_dir");
-            pinned = Path.Combine(version, "compiled-client.exe"); File.Copy(installExe, pinned, overwrite: true);
-        }
+        // Both sign-in modes play the current official client: the host points its connections at the private
+        // server, and files the local install already has are copied rather than downloaded.
+        await CheckAsync(token);
+        buildVersionId = manifest!["id"]!.GetValue<string>(); buildLabel = manifest["build"]!.GetValue<string>();
+        // A complete current runtime can be reused on startup; failed/partial builds are never selected.
+        if (await CanReuseBuildAsync(buildVersionId, token))
+        { Status("ready", "Your game is up to date.", 1); return; }
+        var versionDirectory = Path.Combine(directory, "versions", buildVersionId);
+        client = Path.Combine(versionDirectory, "client"); Directory.CreateDirectory(client);
+        var entries = manifest["entries"]!.AsArray(); var total = Math.Max(1, entries.Sum(item => item!["size"]!.GetValue<long>())); long completed = 0;
+        if (VerifiedClientFiles.IsCurrent(client, buildVersionId, entries))
+            Log($"All {entries.Count} game files are already verified; no download or patch is needed.");
         else
         {
-            // Download mode: fetch the client from Gameforge (needs a reachable patch host).
-            await CheckAsync(token);
-            buildVersionId = manifest!["id"]!.GetValue<string>(); buildLabel = manifest["build"]!.GetValue<string>();
-            // A complete current runtime can be reused on startup; failed/partial builds are never selected.
-            if (await CanReuseBuildAsync(buildVersionId, token))
-            { Status("ready", "Your game is up to date.", 1); return; }
-            var versionDirectory = Path.Combine(directory, "versions", buildVersionId);
-            client = Path.Combine(versionDirectory, "client"); Directory.CreateDirectory(client);
-            var entries = manifest["entries"]!.AsArray(); var total = Math.Max(1, entries.Sum(item => item!["size"]!.GetValue<long>())); long completed = 0;
-            if (VerifiedClientFiles.IsCurrent(client, buildVersionId, entries))
-                Log($"All {entries.Count} game files are already verified; no download or patch is needed.");
-            else
-            {
             var checkedFiles = 0;
             foreach (var entry in entries)
             {
@@ -396,25 +380,24 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             }
             VerifiedClientFiles.MarkVerified(client, buildVersionId, entries);
             Log($"Verified {entries.Count} game files; downloaded {downloadedFiles} files. The rest were already present or reused locally.");
-            }
-            var executable = Path.Combine(client, "NostaleClientX.exe");
-            // Asset-only patches still install, but do not invalidate compiled machine code.
-            JsonObject? previous;
-            lock (gate) previous = state["active"]?.DeepClone().AsObject();
-            if (previous is not null && await CanReuseBuildAsync(previous["id"]!.GetValue<string>(), token) &&
-                await HashAsync(executable, "sha256", token) == previous["executable_sha256"]!.GetValue<string>())
-            {
-                previous["id"] = buildVersionId; previous["build"] = buildLabel; previous["client"] = client;
-                SaveJson(Path.Combine(versionDirectory, "build.json"), previous);
-                SaveJson(Path.Combine(directory, "active.json"), previous);
-                lock (gate) state["active"] = previous;
-                Log("Game files updated; the executable is unchanged, so the compiled runtime was reused.");
-                Status("ready", "Your game is up to date.", 1);
-                return;
-            }
-            version = BuildWorkspace.Create(versionDirectory);
-            pinned = Path.Combine(version, "compiled-client.exe"); File.Copy(Path.Combine(client, "NostaleClientX.exe"), pinned, overwrite: true);
         }
+        var executable = Path.Combine(client, "NostaleClientX.exe");
+        // Asset-only patches still install, but do not invalidate compiled machine code.
+        JsonObject? previous;
+        lock (gate) previous = state["active"]?.DeepClone().AsObject();
+        if (previous is not null && await CanReuseBuildAsync(previous["id"]!.GetValue<string>(), token) &&
+            await HashAsync(executable, "sha256", token) == previous["executable_sha256"]!.GetValue<string>())
+        {
+            previous["id"] = buildVersionId; previous["build"] = buildLabel; previous["client"] = client;
+            SaveJson(Path.Combine(versionDirectory, "build.json"), previous);
+            SaveJson(Path.Combine(directory, "active.json"), previous);
+            lock (gate) state["active"] = previous;
+            Log("Game files updated; the executable is unchanged, so the compiled runtime was reused.");
+            Status("ready", "Your game is up to date.", 1);
+            return;
+        }
+        version = BuildWorkspace.Create(versionDirectory);
+        pinned = Path.Combine(version, "compiled-client.exe"); File.Copy(Path.Combine(client, "NostaleClientX.exe"), pinned, overwrite: true);
         var image = new NosCore.ClientLab.Recompiler.ExecutableImage(pinned);
         var digest = await HashAsync(pinned, "sha256", token);
         var buildId = await HashAsync(pinned, "md5", token);

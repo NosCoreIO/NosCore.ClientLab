@@ -283,16 +283,17 @@ static uint32_t texel(uint32_t s, uint32_t x, uint32_t y) {
 /* ARGB as the R, G, B, A bytes WebGL takes. */
 static uint32_t to_rgba(uint32_t t) { return (t & 0xff00ff00u) | (t >> 16 & 0xff) | (t & 0xff) << 16; }
 
-/* A whole surface as R, G, B, A bytes, for uploads and readbacks. Going through texel() costs a call and a format
-   switch per pixel, and for DXT a whole block decode per pixel; this converts rows, 16-bit formats through a table. */
-static void surface_rgba(uint32_t s, uint8_t* bytes) {
+/* A rectangle of a surface (x, y, w, h) as R, G, B, A bytes, for uploads and readbacks. Going through texel() costs a
+   call and a format switch per pixel, and for DXT a whole block decode per pixel; this converts rows, 16-bit formats
+   through a table. */
+static void surface_rgba_rect(uint32_t s, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, uint8_t* bytes) {
     static uint32_t* tables[27];
-    uint32_t w = SW(s), h = SH(s), fmt = SFMT(s), *o = (uint32_t*)bytes;
+    uint32_t fmt = SFMT(s), *o = (uint32_t*)bytes;
     switch (fmt) {
     case 21: case 22: {
         uint32_t opaque = fmt == 22 ? 0xff000000u : 0;
         for (uint32_t y = 0; y < h; y++) {
-            const uint32_t* row = (const uint32_t*)GPTR(SBITS(s) + y * SPITCH(s));
+            const uint32_t* row = (const uint32_t*)GPTR(SBITS(s) + (y0 + y) * SPITCH(s)) + x0;
             for (uint32_t x = 0; x < w; x++) *o++ = to_rgba(row[x] | opaque);
         }
         return;
@@ -309,34 +310,36 @@ static void surface_rgba(uint32_t s, uint8_t* bytes) {
         }
         const uint32_t* table = tables[fmt];
         for (uint32_t y = 0; y < h; y++) {
-            const uint16_t* row = (const uint16_t*)GPTR(SBITS(s) + y * SPITCH(s));
+            const uint16_t* row = (const uint16_t*)GPTR(SBITS(s) + (y0 + y) * SPITCH(s)) + x0;
             for (uint32_t x = 0; x < w; x++) *o++ = table[row[x]];
         }
         return;
     }
     case 28:
         for (uint32_t y = 0; y < h; y++) {
-            const uint8_t* row = (const uint8_t*)GPTR(SBITS(s) + y * SPITCH(s));
+            const uint8_t* row = (const uint8_t*)GPTR(SBITS(s) + (y0 + y) * SPITCH(s)) + x0;
             for (uint32_t x = 0; x < w; x++) *o++ = (uint32_t)row[x] << 24 | 0xffffff;
         }
         return;
     case FMT_DXT1: case FMT_DXT3: case FMT_DXT5: {
-        uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4, bsize = fmt == FMT_DXT1 ? 8 : 16, t[16];
-        for (uint32_t by = 0; by < bh; by++)
-            for (uint32_t bx = 0; bx < bw; bx++) {
+        uint32_t bw = (SW(s) + 3) / 4, bsize = fmt == FMT_DXT1 ? 8 : 16, t[16];
+        for (uint32_t by = y0 / 4; by * 4 < y0 + h; by++)
+            for (uint32_t bx = x0 / 4; bx * 4 < x0 + w; bx++) {
                 dxt_block(SBITS(s) + (by * bw + bx) * bsize, fmt, t);
                 for (uint32_t k = 0; k < 16; k++) {
                     uint32_t x = bx * 4 + (k & 3), y = by * 4 + k / 4;
-                    if (x < w && y < h) o[y * w + x] = to_rgba(t[k]);
+                    if (x >= x0 && x < x0 + w && y >= y0 && y < y0 + h) o[(y - y0) * w + (x - x0)] = to_rgba(t[k]);
                 }
             }
         return;
     }
     default:
         for (uint32_t y = 0; y < h; y++)
-            for (uint32_t x = 0; x < w; x++) *o++ = to_rgba(texel(s, x, y));
+            for (uint32_t x = 0; x < w; x++) *o++ = to_rgba(texel(s, x0 + x, y0 + y));
     }
 }
+
+static void surface_rgba(uint32_t s, uint8_t* bytes) { surface_rgba_rect(s, 0, 0, SW(s), SH(s), bytes); }
 
 uint32_t r_texel(uint32_t surface, uint32_t x, uint32_t y) { return texel(surface, x, y); }
 
