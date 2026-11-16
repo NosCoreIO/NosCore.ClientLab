@@ -15,7 +15,7 @@
 enum { O_D3D = 1, O_DEVICE, O_TEXTURE, O_SURFACE, O_VB, O_IB, O_STATEBLOCK, O_MATSTACK, O_SWAPCHAIN, O_VDECL, O_QUERY };
 /* object layout: +0 vtbl +4 refs +8 kind +12 width +16 height +20 format +24 levels +28 data +32 pitch +36 size
    +40 surfaces (texture: array of level surfaces) +44 container +48 usage +52 pool +56 upload state +60 GetDC dc
-   +64 locked +68 priority +72 LOD +76 autogen filter; state block +40 block index; vertex declaration +28 elements
+   +64 locked +68 priority +72 LOD +76 autogen filter +80/+84/+88/+92 what changed since the WebGL upload (see changed); state block +40 block index; vertex declaration +28 elements
    +36 element count +20 equivalent FVF; query +20 type +24 issued */
 #define OBJ_SIZE 96
 
@@ -132,6 +132,7 @@ static uint32_t make_texture(uint32_t w, uint32_t h, uint32_t levels, uint32_t f
         M32(arr + 4 * n) = make_surface(lw, lh, fmt, t);
     M32(t + 40) = arr;
     M32(t + 56) = 1;
+    M32(t + 88) = 1;
     return t;
 }
 
@@ -564,15 +565,40 @@ static void fill_surface_desc(uint32_t s, uint32_t p) {
 }
 static void t_GetLevelDesc(CPU* c) { uint32_t s = level(THIS, ARG(1)); if (!s) { RET(0x8876086cu); return; } fill_surface_desc(s, ARG(2)); RET(0); }
 static void t_GetSurfaceLevel(CPU* c) { uint32_t s = level(THIS, ARG(1)); if (!s) { RET(0x8876086cu); return; } M32(s + 4)++; M32(ARG(2)) = s; RET(0); }
+/* Marks a surface changed. Its texture (the container, or a lone surface itself) remembers what the WebGL copy lacks:
+   +88 set when all of it must be sent again, else +80/+84 the changed part of level 0 (left | top << 16,
+   right | bottom << 16), so a client that redraws a little of a large texture each frame sends only that. +92 is the
+   size last sent (render_gl.inc). */
+static void changed(uint32_t s, const int32_t* r) {
+    uint32_t o = M32(s + 44) ? M32(s + 44) : s;
+    M32(s + 56) = 1;
+    if (o != s && M32(M32(o + 40)) != s) r = NULL;
+    if (M32(o + 56) == 2) {
+        M32(o + 88) = !r;
+        if (r) { M32(o + 80) = (uint32_t)r[0] | (uint32_t)r[1] << 16; M32(o + 84) = (uint32_t)r[2] | (uint32_t)r[3] << 16; }
+    } else if (!r) M32(o + 88) = 1;
+    else if (!M32(o + 88)) {
+        uint32_t a = M32(o + 80), b = M32(o + 84);
+        uint32_t l = a & 0xffff, t = a >> 16, rr = b & 0xffff, bb = b >> 16;
+        if ((uint32_t)r[0] < l) l = (uint32_t)r[0];
+        if ((uint32_t)r[1] < t) t = (uint32_t)r[1];
+        if ((uint32_t)r[2] > rr) rr = (uint32_t)r[2];
+        if ((uint32_t)r[3] > bb) bb = (uint32_t)r[3];
+        M32(o + 80) = l | t << 16; M32(o + 84) = rr | bb << 16;
+    }
+    M32(o + 56) = 1;
+}
 /* Points the locked rectangle at rect's top-left (whole blocks for DXT) and marks the surface locked. A read-only lock
    leaves the uploaded texture alone. */
 static uint32_t lock_surface(uint32_t s, uint32_t locked, uint32_t rect, uint32_t flags) {
     if (!locked) return D3DERR_INVALIDCALL;
     if (M32(s + 64)) return D3DERR_INVALIDCALL;
     uint32_t off = 0, f = M32(s + 20);
+    int32_t area[4];
     if (rect) {
         int32_t l = (int32_t)M32(rect), t = (int32_t)M32(rect + 4), r = (int32_t)M32(rect + 8), b = (int32_t)M32(rect + 12);
         if (l < 0 || t < 0 || l >= r || t >= b || (uint32_t)r > M32(s + 12) || (uint32_t)b > M32(s + 16)) return D3DERR_INVALIDCALL;
+        area[0] = l; area[1] = t; area[2] = r; area[3] = b;
         if (block_format(f)) off = (uint32_t)t / 4 * M32(s + 32) + (uint32_t)l / 4 * (f == FMT_DXT1 ? 8 : 16);
         else off = (uint32_t)t * M32(s + 32) + (uint32_t)l * fmt_bits(f) / 8;
     }
@@ -580,10 +606,7 @@ static uint32_t lock_surface(uint32_t s, uint32_t locked, uint32_t rect, uint32_
     M32(locked) = M32(s + 32);
     M32(locked + 4) = M32(s + 28) + off;
     M32(s + 64) = 1;
-    if (!(flags & 0x10)) {   /* D3DLOCK_READONLY */
-        M32(s + 56) = 1;
-        if (M32(s + 44)) M32(M32(s + 44) + 56) = 1;
-    }
+    if (!(flags & 0x10)) changed(s, rect ? area : NULL);   /* D3DLOCK_READONLY */
     return 0;
 }
 static uint32_t unlock_surface(uint32_t s) {
@@ -644,8 +667,7 @@ static void s_ReleaseDC(CPU* c) {
     gdi_delete_bitmap(hle_dc_delete(dc));
     r_write_back(s);
     M32(s + 60) = 0;
-    M32(s + 56) = 1;
-    if (M32(s + 44)) M32(M32(s + 44) + 56) = 1;
+    changed(s, NULL);
     RET(0);
 }
 static void b_Lock(CPU* c) {
@@ -751,8 +773,9 @@ static void t_SetAutoGenFilterType(CPU* c) {
     RET(0);
 }
 static void t_GetAutoGenFilterType(CPU* c) { RET(M32(THIS + 76)); }
-static void t_GenerateMipSubLevels(CPU* c) { if (M32(THIS + 48) & 0x400) M32(THIS + 56) = 1; }
-static void t_AddDirtyRect(CPU* c) { M32(THIS + 56) = 1; RET(0); }
+/* Every upload rebuilds the mip chain from level 0, so there is nothing to regenerate. */
+static void t_GenerateMipSubLevels(CPU* c) { (void)c; }
+static void t_AddDirtyRect(CPU* c) { changed(THIS, NULL); RET(0); }
 
 #define RESOURCE_METHODS \
     {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"GetDevice", 2, r_GetDevice}, \
@@ -784,9 +807,8 @@ static void pixel_store(uint32_t s, uint32_t x, uint32_t y, uint32_t p) {
     default: surface_store(s, x, y, p);
     }
 }
-static void touched(uint32_t s) {
-    M32(s + 56) = 1;
-    if (M32(s + 44)) M32(M32(s + 44) + 56) = 1;
+static void touched(uint32_t s, const int32_t* r) {
+    changed(s, r);
     r_write_back(s);
 }
 /* A RECT inside the surface, or the whole surface when rect is NULL: left, top, right, bottom. */
@@ -818,7 +840,8 @@ static void v_UpdateSurface(CPU* c) {
     if (x < 0 || y < 0 || x + w > (int32_t)M32(dst + 12) || y + h > (int32_t)M32(dst + 16) ||
         (block_format(M32(src + 20)) && ((r[0] | r[1] | x | y) & 3))) { RET(D3DERR_INVALIDCALL); return; }
     copy_bytes(src, r[0], r[1], w, h, dst, x, y);
-    touched(dst);
+    int32_t area[4] = {x, y, x + w, y + h};
+    touched(dst, area);
     RET(0);
 }
 /* Each destination level takes the source level of the same size. */
@@ -834,7 +857,7 @@ static void v_UpdateTexture(CPU* c) {
         if (!s) { RET(D3DERR_INVALIDCALL); return; }
         copy_bytes(s, 0, 0, (int32_t)M32(s + 12), (int32_t)M32(s + 16), d, 0, 0);
     }
-    M32(dst + 56) = 1;
+    changed(dst, NULL);
     RET(0);
 }
 static void v_GetRenderTargetData(CPU* c) {
@@ -843,7 +866,7 @@ static void v_GetRenderTargetData(CPU* c) {
         M32(dst + 20) != M32(rt + 20)) { RET(D3DERR_INVALIDCALL); return; }
     r_read_back(rt);
     copy_bytes(rt, 0, 0, (int32_t)M32(rt + 12), (int32_t)M32(rt + 16), dst, 0, 0);
-    M32(dst + 56) = 1;
+    changed(dst, NULL);
     RET(0);
 }
 /* The front buffer is the last presented frame, copied as A8R8G8B8 into the top-left of dst. */
@@ -854,7 +877,7 @@ static uint32_t front_buffer(uint32_t dst) {
     uint32_t h = M32(dst + 16) < M32(backbuffer + 16) ? M32(dst + 16) : M32(backbuffer + 16);
     for (uint32_t y = 0; y < h; y++)
         for (uint32_t x = 0; x < w; x++) pixel_store(dst, x, y, surface_pixel(backbuffer, x, y) | 0xff000000u);
-    M32(dst + 56) = 1;
+    changed(dst, NULL);
     return 0;
 }
 static void v_GetFrontBufferData(CPU* c) { RET(ARG(1) != 0 ? D3DERR_INVALIDCALL : front_buffer(ARG(2))); }
@@ -897,7 +920,7 @@ static void v_StretchRect(CPU* c) {
             pixel_store(dst, (uint32_t)(dr[0] + x), (uint32_t)(dr[1] + y), p);
         }
     free(px);
-    touched(dst);
+    touched(dst, dr);
     RET(0);
 }
 static void v_ColorFill(CPU* c) {
@@ -907,7 +930,7 @@ static void v_ColorFill(CPU* c) {
     if (r_on_gpu(s)) { r_fill(color, r[0], r[1], r[2] - r[0], r[3] - r[1]); RET(0); return; }
     for (int32_t y = r[1]; y < r[3]; y++)
         for (int32_t x = r[0]; x < r[2]; x++) pixel_store(s, (uint32_t)x, (uint32_t)y, color);
-    touched(s);
+    touched(s, r);
     RET(0);
 }
 
