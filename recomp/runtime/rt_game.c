@@ -5,6 +5,20 @@
 #include "rt.h"
 #include <string.h>
 
+/* Globals the code below uses. They move between client builds while the functions around them stay the same, so the
+   C# recompiler reads them from the build it compiles (GameOverrides.cs); these are the values of the build lift.py's
+   OVERRIDES were written against. */
+#ifndef RG_FDIV_CHECKED
+#define RG_FDIV_CHECKED 0x0079604fu
+#endif
+#ifndef RG_QUEUES
+#define RG_QUEUES 0x0091a2dcu
+#define RG_VISITED 0x0091a2e4u
+#define RG_STEP_X 0x007873b0u
+#define RG_STEP_Y 0x007873b8u
+#define RG_BACK 0x007873c0u
+#endif
+
 void f_0045d2e0_lifted(CPU*, uint32_t, uint32_t);
 
 /* Calls a lifted function from here, with ret_at standing in for the return address the original call pushes. */
@@ -41,7 +55,7 @@ static int ray_triangle(Vec3 orig, Vec3 dir, Vec3 v0, Vec3 a, Vec3 b, float* t) 
     float v = (float)vdot(dir, q);
     if (v < 0.0 || v != v || (double)u + v > det) return 0;
     /* The division helper first runs a one-off check for the Pentium FDIV bug, which records 1. */
-    if (M8(0x0079604fu) == 0) M8(0x0079604fu) = 1;
+    if (M8(RG_FDIV_CHECKED) == 0) M8(RG_FDIV_CHECKED) = 1;
     *t = (float)(vdot(e2, q) / det);
     return 1;
 }
@@ -71,7 +85,7 @@ static int grid_inside(int16_t x, int16_t y, int16_t w, int16_t h) { return x >=
    that moves. The queue bounds are 16-bit, as in the original. */
 void f_00490264(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {
     if (entry != 0x00490264u) { f_00490264_lifted(c, entry, ret); return; }
-    enum { QUEUES = 0x0091a2dcu, VISITED = 0x0091a2e4u, STEP_X = 0x007873b0u, STEP_Y = 0x007873b8u, BACK = 0x007873c0u };
+    enum { QUEUES = RG_QUEUES, VISITED = RG_VISITED, STEP_X = RG_STEP_X, STEP_Y = RG_STEP_Y, BACK = RG_BACK };
     uint32_t sp = c->esp, start = c->eax, goal = c->edx, grid = c->ecx, list = M32(sp + 4);
     uint8_t mask = M8(sp + 8);
     uint32_t res = 0;

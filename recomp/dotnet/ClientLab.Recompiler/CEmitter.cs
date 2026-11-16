@@ -20,6 +20,22 @@ public sealed partial class CEmitter
     public uint Entry => function.Entry;
     public bool UsesSeh => instructions.Any(i => i.WritesFsEsp);
     public int StructuredDispatchThreshold { get; set; } = 1024;
+    /// <summary>Set when runtime/rt_game.c defines f_&lt;entry&gt;: the lifted body is then f_&lt;entry&gt;_lifted, which the
+    /// hand-written one calls for mid-function entries.</summary>
+    public bool Replaced { get; set; }
+    private string Name => Replaced ? $"f_{function.Entry:x8}_lifted" : $"f_{function.Entry:x8}";
+
+    /// <summary>A short function that calls nothing and only jumps within itself: callers in the same file get it
+    /// inlined, which drops the call, the dispatch and the return-address check (the client's vector helpers and
+    /// container accessors are like this).</summary>
+    public bool Inlining { get; set; } = true;
+    public bool IsSmallLeaf => Inlining && !Replaced && !UsesSeh && instructions.Count <= 24 && instructions.All(i =>
+        i.Mnemonic is not ("call" or "int" or "int3" or "hlt" or "iretd") && !i.Mnemonic.StartsWith("rep") &&
+        !image.PacketCaptureSites.ContainsKey(i.Address) &&
+        (!(i.Mnemonic.StartsWith('j') || i.Mnemonic.StartsWith("loop")) || i.DirectTarget is { } target && addresses.Contains(target)));
+
+    /// <summary>A very short leaf: callers in other files get a static copy of it to inline as well.</summary>
+    public bool IsInlinable => IsSmallLeaf && instructions.Count <= 16;
 
     public static readonly Dictionary<string, string> Conditions = new()
     {
@@ -167,13 +183,13 @@ public sealed partial class CEmitter
         if (instructions.Any(instruction => image.PacketCaptureSites.ContainsKey(instruction.Address)))
             output.AppendLine("void port_capture_packet(uint32_t packet, int kind);\nvoid port_capture_login_packet(CPU* c);");
         output.AppendLine($"/* {function.Name.Replace("*/", "")} */");
-        output.AppendLine($"void f_{function.Entry:x8}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{");
+        output.AppendLine($"{(IsSmallLeaf ? "RT_LEAF " : "")}void {Name}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{");
         E((structured ? "volatile uint32_t tgt = entry; uint32_t t, a, b, r;" : "uint32_t tgt = entry, t, a, b, r;") + " uint64_t q; int ind = 0; (void)t; (void)a; (void)b; (void)r; (void)q;");
         if (FlagLiveness) E("uint32_t xCF, xZF, xSF, xOF, xPF; (void)xCF; (void)xZF; (void)xSF; (void)xOF; (void)xPF;");
         E("RT_TRACE(c, entry, ret);");
         if (UsesSeh)
         {
-            E($"RtAct act; act.fn = f_{function.Entry:x8}; act.guest_esp = c->esp; act.host_esp = c->host_esp;");
+            E($"RtAct act; act.fn = {Name}; act.guest_esp = c->esp; act.host_esp = c->host_esp;");
             E("if (rt_setjmp(act.jb)) { tgt = c->lj_target; ind = 0; rt_act_push(c, &act); goto dispatch; }");
             E("rt_act_push(c, &act);"); output.AppendLine("#define EXIT do { rt_act_pop(c, &act); return; } while (0)");
         }
