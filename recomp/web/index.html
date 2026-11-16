@@ -478,7 +478,9 @@
   });
 
   // Same event codes as pump_input in hle_user32.c.
-  const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7, dumpFrame: 8 };
+  const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7, dumpFrame: 8, profile: 9 };
+  // From DevTools: toggles the detailed profile lines of a running game.
+  window.toggleProfile = () => send(IN.profile, 0);
   let ring = null;
   function send(type, a, x = 0, y = 0, time = performance.now()) {
     if (!ring) return;
