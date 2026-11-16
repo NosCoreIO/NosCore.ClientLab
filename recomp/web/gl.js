@@ -7,7 +7,7 @@
 //   1 init w h | 2 texture id w h rgba | 3 lod id level | 4 list nverts ncmds verts(40 bytes each) cmds(44 words each)
 //   5 tnl mask words... [vertices] [indices] | 6 clear flags color z x y w h | 7 write x y w h rgba | 8 resize w h
 //   9 present
-let G = null, port = null;
+let G = null, port = null, commandPool = null;
 
 function report(gl) {
     const d = gl.getExtension('WEBGL_debug_renderer_info');
@@ -181,7 +181,7 @@ function init(w, h) {
     const align = gl.getParameter(gl.UNIFORM_BUFFER_OFFSET_ALIGNMENT) / 4, scratch = new Float32Array(BLOCK_FLOATS);
     const frame = { stride: Math.ceil(BLOCK_FLOATS / align) * align, ubo: new Float32Array(1 << 18), scratch, scratchInts: new Int32Array(scratch.buffer),
                     slot: new Int32Array(1 << 14), first: new Int32Array(1 << 14), vertices: new Uint8Array(1 << 22), draws: 0, slots: 0, stream: 0, next: 0 };
-    G = { canvas, gl, cpu, tnl, cur: cpu, vao: cpu.vao, vbo, vbs: new Map(), ibs: new Map(), textures: new Map(), lods: new Map(), w, h,
+    G = { canvas, gl, cpu, tnl, cur: cpu, vao: cpu.vao, vbo, vbs: new Map(), ibs: new Map(), textures: new Map(), lods: new Map(), mipDirty: new Set(), w, h,
           P, PF, Q, QF, frame, ubo: gl.createBuffer(), ring: gl.createBuffer(), boundSlot: -1,
           views: new Map(), prev: new Int32Array(41).fill(-1), tnlState: false, drawn: false, listRing: undefined };
     const wrap = (a) => a === 2 ? gl.MIRRORED_REPEAT : (a === 3 || a === 4) ? gl.CLAMP_TO_EDGE : gl.REPEAT;
@@ -212,9 +212,10 @@ function init(w, h) {
             gl.activeTexture(gl.TEXTURE0 + j);
             gl.bindTexture(gl.TEXTURE_2D, t);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, S(b) >= 2 ? gl.LINEAR : gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, S(b + 1) >= 2 ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, minFilter(gl, S(b + 1), S(b + 2)));
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap(S(b + 3)));
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap(S(b + 4)));
+            if (S(b + 2) || G.lods.get(id) > 0) ensureMipmaps(id);
         }
         if (state(18, 22)) {
             if (S(18)) {
@@ -243,6 +244,24 @@ function init(w, h) {
     };
 }
 
+// D3D separates the minification filter from whether/how mip levels are sampled.
+function minFilter(gl, min, mip) {
+    if (!mip) return min >= 2 ? gl.LINEAR : gl.NEAREST;
+    if (mip === 1) return min >= 2 ? gl.LINEAR_MIPMAP_NEAREST : gl.NEAREST_MIPMAP_NEAREST;
+    return min >= 2 ? gl.LINEAR_MIPMAP_LINEAR : gl.NEAREST_MIPMAP_LINEAR;
+}
+
+// The caller has bound this texture. Updates invalidate lower levels, but a
+// non-mipmapped draw never needs to rebuild them (notably the text scratchpad).
+function ensureMipmaps(id) {
+    if (!G.mipDirty.has(id)) return;
+    const gl = G.gl, level = G.lods.get(id) || 0;
+    if (level) gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 0);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    if (level) gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, level);
+    G.mipDirty.delete(id);
+}
+
 function texture(id, w, h, B, at) {
     const gl = G.gl;
     let t = G.textures.get(id);
@@ -250,7 +269,7 @@ function texture(id, w, h, B, at) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, B, at);
-    gl.generateMipmap(gl.TEXTURE_2D);
+    G.mipDirty.add(id);
     if (G.lods.has(id)) gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, G.lods.get(id));
     G.prev[12] = -1; G.prev[13] = -1;
     G.tnlState = false;
@@ -263,7 +282,7 @@ function textureRect(id, x, y, w, h, B, at) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RGBA, gl.UNSIGNED_BYTE, B, at);
-    gl.generateMipmap(gl.TEXTURE_2D);
+    G.mipDirty.add(id);
     G.prev[12] = -1; G.prev[13] = -1;
     G.tnlState = false;
 }
@@ -275,6 +294,7 @@ function lod(id, level) {
     if (!t) return;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, t);
+    if (level > 0) ensureMipmaps(id);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, level);
     G.prev[12] = -1;
     G.tnlState = false;
@@ -568,19 +588,18 @@ function uploadReport() {
         `${Math.round(t.pixels * 4 / load.frames / 1024)} KB`).join(', ');
 }
 
-function run(buffer) {
+function run(buffer, offset = 0, length = buffer.byteLength - offset) {
     const started = performance.now();
-    try { execute(buffer); } finally { load.busy += performance.now() - started; load.bytes += buffer.byteLength; }
+    try { execute(buffer, offset, length); } finally { load.busy += performance.now() - started; load.bytes += length; }
     reportLoad();
 }
 
-function execute(buffer) {
-    const W = new Int32Array(buffer), B = new Uint8Array(buffer), F32 = new Float32Array(buffer);
+function execute(buffer, offset = 0, length = buffer.byteLength - offset) {
+    const W = new Int32Array(buffer, offset, length / 4), B = new Uint8Array(buffer, offset, length), F32 = new Float32Array(buffer, offset, length / 4);
     if (G) frameData(W, 0);
-    for (let at = 0, last = performance.now(), op = 0; at < W.length;) {
-        const now = performance.now();
-        load.ops[op] += now - last;
-        last = now;
+    const detailed = !!globalThis.renderProfileDetailed;
+    for (let at = 0, last = detailed ? performance.now() : 0, op = 0; at < W.length;) {
+        if (detailed) { const now = performance.now(); load.ops[op] += now - last; last = now; }
         op = W[at++];
         if (op !== 1 && !G) return;
         switch (op) {
@@ -612,11 +631,28 @@ function execute(buffer) {
 }
 
 onmessage = (e) => {
+    if (e.data.type === 'profile') { globalThis.renderProfileDetailed = !!e.data.enabled; return; }
     if (e.data.type !== 'port') return;
     port = e.data.port;
     port.onmessage = (m) => {
         try {
             if (m.data instanceof ArrayBuffer) run(m.data);
+            else if (m.data.type === 'command-pool') {
+                const pool = m.data;
+                if (!(pool.states instanceof SharedArrayBuffer) || !(pool.bytes instanceof SharedArrayBuffer) ||
+                    pool.states.byteLength !== 12 || !Number.isInteger(pool.slotBytes) || pool.slotBytes <= 0 ||
+                    pool.slotBytes > 16 * 1024 * 1024 || (pool.slotBytes & 3) || pool.bytes.byteLength !== 3 * pool.slotBytes)
+                    throw Error('Invalid shared command pool');
+                commandPool = { states: new Int32Array(pool.states), bytes: pool.bytes, slotBytes: pool.slotBytes };
+            }
+            else if (m.data.type === 'commands') {
+                const pool = commandPool, { slot, bytes } = m.data;
+                if (!pool || !Number.isInteger(slot) || slot < 0 || slot >= 3 || !Number.isInteger(bytes) ||
+                    bytes <= 0 || bytes > pool.slotBytes || (bytes & 3) || Atomics.load(pool.states, slot) !== 2)
+                    throw Error('Invalid shared command span');
+                try { run(pool.bytes, slot * pool.slotBytes, bytes); }
+                finally { Atomics.store(pool.states, slot, 0); }
+            }
             else if (m.data.type === 'read') read(m.data);
         } catch (error) {
             postMessage({ type: 'log', text: 'FATAL: renderer thread: ' + (error.stack || error) });

@@ -1524,12 +1524,30 @@ static void mat_set(float* m, float a, float b, float cc, float d, float e, floa
     memcpy(m, t, 64);
 }
 /* D3DX stack semantics: Op multiplies the top on the right (M = M * X), OpLocal on the left (M = X * M). */
-static void ms_apply(CPU* c, const float* x, int local) {
+static void ms_apply_legacy(CPU* c, const float* x, int local) {
     uint32_t tmp = guest_alloc(64, 16), top = ms_top(THIS);
     memcpy(GPTR(tmp), x, 64);
     if (local) mat_mul(top, tmp, top);
     else mat_mul(top, top, tmp);
     guest_free(tmp);
+    RET(0);
+}
+static void ms_apply(CPU* c, const float* x, int local) {
+    uint32_t top = ms_top(THIS);
+    const float* a = local ? x : (const float*)GPTR(top);
+    const float* b = local ? (const float*)GPTR(top) : x;
+    // Keep the old arithmetic path for exceptional inputs, including its NaN
+    // payload behaviour. Ordinary transforms need no temporary guest object.
+    for (int k = 0; k < 16; k++)
+        if (!isfinite(a[k]) || !isfinite(b[k])) { ms_apply_legacy(c, x, local); return; }
+    float out[16];
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+            float sum = 0;
+            for (int k = 0; k < 4; k++) sum += a[4 * i + k] * b[4 * k + j];
+            out[4 * i + j] = sum;
+        }
+    memcpy(GPTR(top), out, sizeof out);
     RET(0);
 }
 static void translation(float* m, float x, float y, float z) { mat_set(m, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1); }
@@ -1551,10 +1569,42 @@ static void rotation_ypr(float* m, float yaw, float pitch, float roll) {
     for (int i = 0; i < 4; i++)
         for (int j = 0; j < 4; j++) { float s = 0; for (int k = 0; k < 4; k++) s += t[4 * i + k] * r[4 * k + j]; m[4 * i + j] = s; }
 }
-static void ms_Translate(CPU* c) { float m[16]; translation(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 0); }
-static void ms_TranslateLocal(CPU* c) { float m[16]; translation(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 1); }
-static void ms_Scale(CPU* c) { float m[16]; scaling(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 0); }
-static void ms_ScaleLocal(CPU* c) { float m[16]; scaling(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 1); }
+static void ms_affine(CPU* c, float x, float y, float z, int local, int scale) {
+    uint32_t top = ms_top(THIS);
+    const float* m = (const float*)GPTR(top);
+    int finite = isfinite(x) && isfinite(y) && isfinite(z);
+    for (int k = 0; finite && k < 16; k++) finite = isfinite(m[k]);
+    if (!finite) {
+        float factor[16];
+        if (scale) scaling(factor, x, y, z); else translation(factor, x, y, z);
+        ms_apply(c, factor, local); return;
+    }
+    float out[16], axis[4] = {x, y, z, 1};
+    if (scale) {
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++) out[4 * i + j] = m[4 * i + j] * axis[local ? i : j] + 0.0f;
+    } else if (local) {
+        for (int k = 0; k < 12; k++) out[k] = m[k] + 0.0f;
+        for (int j = 0; j < 4; j++) {
+            float sum = 0;
+            sum += x * m[j]; sum += y * m[4 + j]; sum += z * m[8 + j]; sum += m[12 + j];
+            out[12 + j] = sum;
+        }
+    } else {
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 3; j++) out[4 * i + j] = (m[4 * i + j] + 0.0f) + m[4 * i + 3] * axis[j];
+            out[4 * i + 3] = m[4 * i + 3] + 0.0f;
+        }
+    }
+    // The generic multiply starts its sums at +0, normalizing zero results.
+    // Keep that behavior explicitly rather than changing signed-zero bits.
+    memcpy(GPTR(top), out, sizeof out);
+    RET(0);
+}
+static void ms_Translate(CPU* c) { ms_affine(c, fa(ARG(1)), fa(ARG(2)), fa(ARG(3)), 0, 0); }
+static void ms_TranslateLocal(CPU* c) { ms_affine(c, fa(ARG(1)), fa(ARG(2)), fa(ARG(3)), 1, 0); }
+static void ms_Scale(CPU* c) { ms_affine(c, fa(ARG(1)), fa(ARG(2)), fa(ARG(3)), 0, 1); }
+static void ms_ScaleLocal(CPU* c) { ms_affine(c, fa(ARG(1)), fa(ARG(2)), fa(ARG(3)), 1, 1); }
 static void ms_RotateAxis(CPU* c) { float m[16]; uint32_t v = ARG(1); rotation_axis(m, MF32(v), MF32(v + 4), MF32(v + 8), fa(ARG(2))); ms_apply(c, m, 0); }
 static void ms_RotateAxisLocal(CPU* c) { float m[16]; uint32_t v = ARG(1); rotation_axis(m, MF32(v), MF32(v + 4), MF32(v + 8), fa(ARG(2))); ms_apply(c, m, 1); }
 static void ms_RotateYawPitchRoll(CPU* c) { float m[16]; rotation_ypr(m, fa(ARG(1)), fa(ARG(2)), fa(ARG(3))); ms_apply(c, m, 0); }

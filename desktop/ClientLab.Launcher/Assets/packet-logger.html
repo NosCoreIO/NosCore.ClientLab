@@ -8,17 +8,36 @@
 <script>
 const $=id=>document.getElementById(id);let cursor=0,rows=[],visible=[],selected=new Set(),selectionText='';
 const menu=$('context-menu'),list=$('packets');
+const nodes=new Map();let renderedSelection=new Set(),filterText='',sendVisible=true,receiveVisible=true;
 const stamp=e=>e.Timestamp.slice(11,23);
 const tagged=e=>`[${stamp(e)}] [${e.Connection}] [${e.Direction==='Send'?'Client':'Server'}] ${e.Raw}`;
 function closeMenu(){menu.hidden=true;}
-function selection(){for(const node of list.children)node.setAttribute('aria-selected',selected.has(Number(node.dataset.id)));}
+function selection(){
+ for(const id of renderedSelection)if(!selected.has(id))nodes.get(id)?.setAttribute('aria-selected','false');
+ for(const id of selected)if(!renderedSelection.has(id))nodes.get(id)?.setAttribute('aria-selected','true');
+ renderedSelection=new Set(selected);
+}
+function matches(e){return(e.Direction==='Send'?sendVisible:receiveVisible)&&(!filterText||e.Raw.toLowerCase().includes(filterText));}
+function makeNode(e){
+ const node=document.createElement('div');node.className='packet'+(e.Direction==='Receive'?' receive':'');node.dataset.id=e.Id;node.setAttribute('role','option');node.setAttribute('aria-selected',selected.has(e.Id));node.title=e.Timestamp;
+ const time=document.createElement('span');time.className='time';time.textContent=`[${stamp(e)}] `;const tag=document.createElement('span');tag.className='direction';tag.textContent=`[${e.Connection}] [${e.Direction==='Send'?'Client':'Server'}] `;
+ node.append(time,tag,document.createTextNode(e.Raw+'\n'));nodes.set(e.Id,node);return node;
+}
 function render(){
- const filter=$('filter').value.toLowerCase();visible=rows.filter(e=>(e.Direction==='Send'?$('send').checked:$('recv').checked)&&e.Raw.toLowerCase().includes(filter));
- const nodes=new Map(Array.from(list.children,node=>[Number(node.dataset.id),node])),ids=new Set(visible.map(e=>e.Id));
- for(const [id,node]of nodes)if(!ids.has(id))node.remove();
+ filterText=$('filter').value.toLowerCase();sendVisible=$('send').checked;receiveVisible=$('recv').checked;visible=rows.filter(matches);
+ const ids=new Set(visible.map(e=>e.Id));for(const[id,node]of nodes)if(!ids.has(id)){node.remove();nodes.delete(id);}
  let position=list.firstChild;
- for(const e of visible){let node=nodes.get(e.Id);if(!node){node=document.createElement('div');node.className='packet'+(e.Direction==='Receive'?' receive':'');node.dataset.id=e.Id;node.setAttribute('role','option');node.title=e.Timestamp;const time=document.createElement('span');time.className='time';time.textContent=`[${stamp(e)}] `;const tag=document.createElement('span');tag.className='direction';tag.textContent=`[${e.Connection}] [${e.Direction==='Send'?'Client':'Server'}] `;node.append(time,tag,document.createTextNode(e.Raw+'\n'));}if(node===position)position=position.nextSibling;else list.insertBefore(node,position);}
+ for(const e of visible){const node=nodes.get(e.Id)||makeNode(e);if(node===position)position=position.nextSibling;else list.insertBefore(node,position);}
  const retained=new Set(rows.map(e=>e.Id));selected=new Set([...selected].filter(id=>retained.has(id)));selection();
+}
+function append(entries){
+ rows.push(...entries);
+ const removed=rows.splice(0,Math.max(0,rows.length-10000));
+ for(const e of removed){nodes.get(e.Id)?.remove();nodes.delete(e.Id);selected.delete(e.Id);renderedSelection.delete(e.Id);}
+ if(removed.length){const last=removed.at(-1).Id;let count=0;while(count<visible.length&&visible[count].Id<=last)count++;visible.splice(0,count);}
+ const retained=rows.length?rows[0].Id:Infinity,fragment=document.createDocumentFragment();
+ for(const e of entries)if(e.Id>=retained&&matches(e)){visible.push(e);fragment.append(makeNode(e));}
+ list.append(fragment);
 }
 for(const id of ['send','recv','filter'])$(id).oninput=()=>{closeMenu();render();};
 function clear(){closeMenu();rows=[];selected.clear();render();}
@@ -33,5 +52,5 @@ function copyPackets(raw=false){return copy(visible.filter(e=>selected.has(e.Id)
 $('copy-packet').onclick=()=>copyPackets();$('copy-raw').onclick=()=>copyPackets(true);$('copy-selection').onclick=()=>copy(selectionText);$('copy-all').onclick=$('copy-visible').onclick=()=>copy(visible.map(tagged).join('\n'));
 $('select-all').onclick=()=>{selected=new Set(visible.map(e=>e.Id));selection();closeMenu();list.focus();};
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeMenu();list.focus();return;}if(!menu.hidden&&['ArrowDown','ArrowUp'].includes(e.key)){e.preventDefault();const items=Array.from(menu.querySelectorAll('button:not(:disabled)'));const index=items.indexOf(document.activeElement);items[(index+(e.key==='ArrowDown'?1:-1)+items.length)%items.length]?.focus();return;}if(e.target.closest('input,textarea'))return;if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='a'){e.preventDefault();selected=new Set(visible.map(e=>e.Id));selection();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='c'&&selected.size&&!window.getSelection()?.toString()){e.preventDefault();copyPackets();}});
-async function poll(){try{const response=await fetch('/packets?since='+cursor);if(!response.ok)throw Error('Capture unavailable ('+response.status+').');const data=await response.json();$('file').textContent=data.file||'Packet logging is disabled.';cursor=data.cursor;if(data.entries.length){rows.push(...data.entries);rows=rows.slice(-10000);render();}if(menu.hidden)$('status').textContent='Capturing · '+cursor+' packets';}catch(error){$('status').textContent=error.message;}finally{setTimeout(poll,500);}}poll();
+async function poll(){try{const response=await fetch('/packets?since='+cursor);if(!response.ok)throw Error('Capture unavailable ('+response.status+').');const data=await response.json();$('file').textContent=data.file||'Packet logging is disabled.';cursor=data.cursor;if(data.entries.length)append(data.entries);if(menu.hidden)$('status').textContent='Capturing · '+cursor+' packets';}catch(error){$('status').textContent=error.message;}finally{setTimeout(poll,500);}}poll();
 </script></html>
