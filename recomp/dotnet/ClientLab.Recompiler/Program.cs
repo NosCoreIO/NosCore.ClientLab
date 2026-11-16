@@ -4,10 +4,10 @@ using System.Text.Json;
 
 namespace NosCore.ClientLab.Recompiler;
 
-public static class Program
+public static partial class Program
 {
     // Change only when generated/runtime semantics require rebuilding existing clients.
-    public const int RuntimeRevision = 20;
+    public const int RuntimeRevision = 21;
     public static int Main(string[] args)
     {
         try
@@ -35,7 +35,7 @@ public static class Program
             }
             if (args.Length < 3)
             {
-                Console.Error.WriteLine("Usage: ClientLab.Recompiler <client.exe> <functions.txt> <output-dir> [--seeds file] [--allow-unsupported]");
+                Console.Error.WriteLine("Usage: ClientLab.Recompiler <client.exe> <functions.txt> <output-dir> [--seeds file] [--allow-unsupported] [--no-overrides]");
                 return 1;
             }
             var source = Path.GetFullPath(args[0]); var output = Path.GetFullPath(args[2]);
@@ -103,16 +103,25 @@ public static class Program
             foreach (var (owner, labels) in extraLabels)
                 foreach (var label in labels) callOwners.TryAdd(label, owner);
             Dictionary<uint, List<string>> chunks = []; Dictionary<uint, HashSet<uint>> callees = [];
+            Dictionary<uint, string> inlineCopies = [];
             HashSet<(uint Label, uint Owner)> table = []; List<string> unsupported = [];
             HashSet<uint> requiredTargets = [];
             var lifted = new byte[imageFile.Code.Length];
+            // --no-overrides lifts every function as it is, for comparing against the tuned output.
+            var tuned = !args.Contains("--no-overrides");
+            var (replaced, overrides, overridesReport) = tuned ? GameOverrides.Find(imageFile) : ([], null, "hand-written routines and inlining off");
+            replaced.IntersectWith(functions.Select(f => f.Entry));
+            if (overrides is not null && replaced.Count < 3) (replaced, overrides, overridesReport) = ([], null, "hand-written routines not used, their functions were not all discovered");
+            Console.WriteLine(overridesReport);
             foreach (var function in functions.OrderBy(f => f.Entry))
             {
                 var emitter = new CEmitter(imageFile, function, finalCoverage)
-                { ExtraLabels = extraLabels.GetValueOrDefault(function.Entry) ?? [], CallOwners = callOwners };
+                { ExtraLabels = extraLabels.GetValueOrDefault(function.Entry) ?? [], CallOwners = callOwners, Replaced = replaced.Contains(function.Entry), Inlining = tuned };
                 var text = emitter.Generate(); var key = function.Entry >> 15;
                 if (!chunks.TryGetValue(key, out var values)) { chunks[key] = values = []; callees[key] = []; }
                 values.Add(text); callees[key].UnionWith(emitter.Callees); unsupported.AddRange(emitter.Unsupported);
+                if (emitter.IsInlinable)
+                    inlineCopies[function.Entry] = text.Replace($"RT_LEAF void f_{function.Entry:x8}(", $"static RT_LEAF void f_{function.Entry:x8}_i(");
                 foreach (var label in emitter.Labels) table.Add((label, function.Entry));
                 for (var index = 0; index < emitter.Instructions.Count; index++)
                 {
@@ -152,10 +161,22 @@ public static class Program
             {
                 var filename = $"fn_{key << 15:x8}.c"; wanted.Add(filename);
                 var declarations = string.Join("", callees[key].Order().Select(target => $"void f_{target:x8}(CPU*, uint32_t, uint32_t);\n"));
-                WriteIfChanged(Path.Combine(output, filename), "#include \"rt.h\"\n\n" + declarations + "\n" + string.Join("\n\n", values));
+                var body = string.Join("\n\n", values);
+                // Leaves of this file are inlined already; short ones from other files get a static copy here.
+                var copied = callees[key].Where(target => target >> 15 != key && inlineCopies.ContainsKey(target)).Order().ToList();
+                if (copied.Count > 0)
+                {
+                    var inlined = copied.ToHashSet();
+                    body = EntryCall().Replace(body, match => inlined.Contains(Convert.ToUInt32(match.Groups[1].Value, 16)) ? $"f_{match.Groups[1].Value}_i(c, 0x{match.Groups[1].Value}u, " : match.Value);
+                    body = string.Join("\n\n", copied.Select(target => inlineCopies[target])) + "\n\n" + body;
+                }
+                WriteIfChanged(Path.Combine(output, filename), "#include \"rt.h\"\n\n" + declarations + "\n" + body);
             }
             foreach (var old in Directory.EnumerateFiles(output, "fn_*.c"))
                 if (!wanted.Contains(Path.GetFileName(old))) File.Delete(old);
+            var overridesFile = Path.Combine(output, "overrides.c");
+            if (overrides is not null) WriteIfChanged(overridesFile, overrides);
+            else if (File.Exists(overridesFile)) File.Delete(overridesFile);
             var labelsTable = new StringBuilder("#include \"rt.h\"\n\n");
             foreach (var owner in table.Select(pair => pair.Owner).Distinct().Order()) labelsTable.AppendLine($"void f_{owner:x8}(CPU*, uint32_t, uint32_t);");
             labelsTable.AppendLine($"\nconst uint32_t rt_label_count = {table.Count};\nconst RtLabel rt_labels[] = {{");
@@ -165,7 +186,7 @@ public static class Program
             WriteIfChanged(Path.Combine(output, "table.c"), labelsTable.ToString());
             var percentage = lifted.Sum(value => (long)value) * 100d / lifted.Length;
             var report = new { schema = 1, runtimeRevision = RuntimeRevision, validatedTargets = requiredTargets.Count, imageSha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(source))), entryPoint = imageFile.EntryPoint,
-                functionCount = functions.Count, labelCount = table.Count, coveragePercent = percentage, invalidCodeTargets = invalidTargets.Select(target => target.ToString("x8")).ToArray(), unsupported };
+                functionCount = functions.Count, labelCount = table.Count, overrides = overridesReport, coveragePercent = percentage, invalidCodeTargets = invalidTargets.Select(target => target.ToString("x8")).ToArray(), unsupported };
             WriteIfChanged(Path.Combine(output, "recompiler-report.json"), JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
             Console.WriteLine($"{functions.Count} functions, {table.Count} labels, {chunks.Count} files; coverage {percentage:F1}%; {unsupported.Count} unsupported instructions");
             foreach (var line in unsupported.Take(15)) Console.Error.WriteLine(line);
@@ -175,6 +196,10 @@ public static class Program
     }
 
     private sealed record SnippetCase(string Code, string Name, uint Address);
+
+    /// <summary>A direct call to a function's entry, as CEmitter writes it: "f_X(c, 0xXu, ".</summary>
+    [System.Text.RegularExpressions.GeneratedRegex(@"\bf_([0-9a-f]{8})\(c, 0x\1u, ")]
+    private static partial System.Text.RegularExpressions.Regex EntryCall();
 
     private static void WriteIfChanged(string path, string text)
     {

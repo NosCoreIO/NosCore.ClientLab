@@ -33,6 +33,7 @@ internal static class StructuredDispatchChecks
                 } CPU;
                 static uint32_t memory[1024];
                 #define RT_RESTRICT __restrict
+                #define RT_LEAF
                 #define RT_TRACE(c,e,r) ((void)0)
                 #define R32(i) c->regs[i]
                 #define R16(i) (*(uint16_t*)&c->regs[i])
