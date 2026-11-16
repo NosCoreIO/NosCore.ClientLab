@@ -16,6 +16,7 @@ static CPU* main_cpu;
 static int port_trace;
 int port_trace_methods;
 static int api_timing;
+void port_set_api_timing(int on) { api_timing = on; }
 /* These calls are inserted only at uniquely matched DeveloperTools cleartext sites.
    They observe registers/memory without changing the client's execution. */
 void port_capture_packet(uint32_t packet, int kind) {

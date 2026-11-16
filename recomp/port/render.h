@@ -52,3 +52,4 @@ void r_texture_lod(uint32_t tex, uint32_t lod);
 uint32_t r_texel(uint32_t surface, uint32_t x, uint32_t y);
 void r_prof_frame(void);
 void r_dump_next_frame(void);
+void r_toggle_profile(void);

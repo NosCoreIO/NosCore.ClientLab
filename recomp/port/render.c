@@ -741,6 +741,15 @@ static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n);
 static int dump_state;   /* 1: armed, dump from the next Present; 2: dumping this frame */
 static uint32_t dump_draws;
 void r_dump_next_frame(void) { dump_state = 1; }
+/* Switches the detailed profile (PORT_PROFILE=1 with PORT_PROFILE_API=1) on or off in a running game. */
+void r_toggle_profile(void) {
+    prof_detail = prof_detail <= 0;
+    port_set_api_timing(prof_detail);
+    prof_frames = prof_draw_calls = prof_vertices = 0;
+    prof_frames_ms = prof_draw = prof_upload = prof_submit = prof_present = prof_fetch = port_prof_net = 0;
+    fetch_t0 = prof_mark();
+    port_log("profile: detailed split %s", prof_detail ? "on" : "off");
+}
 
 static void dump_draw(uint32_t prim, Vtx* v, uint32_t n) {
     uint32_t tex = R.tex_obj[0], s = tex && M32(tex + 8) == 3 ? M32(M32(tex + 40)) : tex;
