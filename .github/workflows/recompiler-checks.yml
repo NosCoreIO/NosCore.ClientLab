@@ -1,0 +1,33 @@
+name: Client-free recompiler checks
+on:
+  pull_request:
+    paths:
+      - 'recomp/lift.py'
+      - 'recomp/runtime/**'
+      - 'recomp/difftest/**'
+      - '.github/workflows/recompiler-checks.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'recomp/lift.py'
+      - 'recomp/runtime/**'
+      - 'recomp/difftest/**'
+      - '.github/workflows/recompiler-checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: recompiler-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  synthetic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install capstone unicorn pefile
+      - name: Check instruction semantics without client content
+        run: python recomp/difftest/difftest.py --synthetic "$RUNNER_TEMP/clientlab-difftest" --cases 64
