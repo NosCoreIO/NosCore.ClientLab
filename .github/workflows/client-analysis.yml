@@ -25,9 +25,12 @@ jobs:
         run: python3 tools/fetch-client-exe.py "$RUNNER_TEMP/client" >> "$GITHUB_OUTPUT"
       - name: Check for existing analysis
         id: check
+        env:
+          BUILD: ${{ steps.client.outputs.build }}
+          MD5: ${{ steps.client.outputs.md5 }}
         run: |
-          if [ -s "symbols/${{ steps.client.outputs.md5 }}/ghidra-functions.txt" ]; then
-            echo "Client build ${{ steps.client.outputs.build }} (${{ steps.client.outputs.md5 }}) is already analysed."
+          if [ -s "symbols/$MD5/ghidra-functions.txt" ]; then
+            echo "Client build $BUILD ($MD5) is already analysed."
             echo "needed=false" >> "$GITHUB_OUTPUT"
           else
             echo "needed=true" >> "$GITHUB_OUTPUT"
@@ -47,16 +50,20 @@ jobs:
       - name: Analyse the client
         if: steps.check.outputs.needed == 'true'
         shell: pwsh
-        run: ./tools/analyze-client.ps1 -ClientExe '${{ steps.client.outputs.exe }}' -WorkDir "$env:RUNNER_TEMP/analysis" -GhidraDir "$env:RUNNER_TEMP/$env:GHIDRA_DIR"
+        env:
+          CLIENT_EXE: ${{ steps.client.outputs.exe }}
+        run: ./tools/analyze-client.ps1 -ClientExe "$env:CLIENT_EXE" -WorkDir "$env:RUNNER_TEMP/analysis" -GhidraDir "$env:RUNNER_TEMP/$env:GHIDRA_DIR"
       - name: Commit the analysis
         if: steps.check.outputs.needed == 'true'
+        env:
+          BUILD: ${{ steps.client.outputs.build }}
+          md5: ${{ steps.client.outputs.md5 }}
         run: |
-          md5='${{ steps.client.outputs.md5 }}'
           test -s "symbols/$md5/ghidra-functions.txt"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add "symbols/$md5"
-          git commit -m "Add Ghidra analysis for NosTale client build ${{ steps.client.outputs.build }} ($md5)"
+          git commit -m "Add Ghidra analysis for NosTale client build $BUILD ($md5)"
           for attempt in 1 2 3; do
             git pull --rebase origin main && git push origin HEAD:main && exit 0
             sleep 10

@@ -4,6 +4,7 @@ is analysed, never committed."""
 import hashlib
 import json
 import pathlib
+import re
 import sys
 import urllib.request
 
@@ -32,7 +33,10 @@ def main():
         raise SystemExit("NostaleClientX.exe does not match the manifest")
     exe = target / "NostaleClientX.exe"
     exe.write_bytes(data)
-    print(f"build={manifest.get('build', '')}")
+    build = str(manifest.get("build", ""))
+    if not re.fullmatch(r"[0-9A-Za-z._-]{1,64}", build):
+        raise SystemExit("The manifest has an unexpected build number")
+    print(f"build={build}")
     print(f"md5={hashlib.md5(data).hexdigest()}")
     print(f"exe={exe}")
 
