@@ -123,7 +123,13 @@ int gdi_bitmap_object(uint32_t h, uint32_t size, uint32_t out) {
     return (int)want;
 }
 
-/* GetDIBits / SetDIBits / SetDIBitsToDevice copy rows straight through; formats are assumed to match. */
+static uint32_t bmp_rows(Bmp* b) { return (uint32_t)(b->h < 0 ? -b->h : b->h); }
+/* Image row y (0 = top) in the bitmap's own memory. */
+static uint32_t bmp_row(Bmp* b, uint32_t y) { return b->bits + (b->h < 0 ? y : bmp_rows(b) - 1 - y) * b->stride; }
+/* DIB scan line s of a buffer described by bmi as an image row: scan 0 is the bottom row unless biHeight < 0. */
+static uint32_t dib_scan_row(Bmp* b, uint32_t bmi, uint32_t s) { return (int32_t)M32(bmi + 8) < 0 ? s : bmp_rows(b) - 1 - s; }
+
+/* GetDIBits / SetDIBits: formats are assumed to match; rows follow the orientation the caller's BITMAPINFO asks for. */
 static void g_GetDIBits(CPU* c) {
     Bmp* b = bmp_get(ARG(1));
     uint32_t start = ARG(2), lines = ARG(3), bits = ARG(4), bmi = ARG(5);
@@ -137,33 +143,40 @@ static void g_GetDIBits(CPU* c) {
         return;
     }
     for (uint32_t i = 0; i < b->ncolors && M16(bmi + 14) <= 8; i++) M32(bmi + 40 + 4 * i) = b->colors[i];
-    uint32_t rows = (uint32_t)(b->h < 0 ? -b->h : b->h);
+    uint32_t rows = bmp_rows(b);
     if (start + lines > rows) lines = rows > start ? rows - start : 0;
-    memcpy(GPTR(bits), GPTR(b->bits + start * b->stride), lines * b->stride);
+    for (uint32_t i = 0; i < lines; i++)
+        memcpy(GPTR(bits + i * b->stride), GPTR(bmp_row(b, dib_scan_row(b, bmi, start + i))), b->stride);
     RET(lines);
 }
 static void g_SetDIBits(CPU* c) {
     Bmp* b = bmp_get(ARG(1));
-    uint32_t start = ARG(2), lines = ARG(3), bits = ARG(4);
-    if (!b) { RET(0); return; }
-    uint32_t rows = (uint32_t)(b->h < 0 ? -b->h : b->h);
+    uint32_t start = ARG(2), lines = ARG(3), bits = ARG(4), bmi = ARG(5);
+    if (!b || !bmi) { RET(0); return; }
+    uint32_t rows = bmp_rows(b);
     if (start + lines > rows) lines = rows > start ? rows - start : 0;
-    memcpy(GPTR(b->bits + start * b->stride), GPTR(bits), lines * b->stride);
+    for (uint32_t i = 0; i < lines; i++)
+        memcpy(GPTR(bmp_row(b, dib_scan_row(b, bmi, start + i))), GPTR(bits + i * b->stride), b->stride);
     RET(lines);
+}
+/* GetBitmapBits / SetBitmapBits use device-dependent layout: top-down rows padded to a WORD. */
+static uint32_t bitmap_bits(Bmp* b, uint32_t buffer, uint32_t n, int write) {
+    uint32_t pitch = ((uint32_t)(b->w < 0 ? -b->w : b->w) * b->bpp + 15) / 16 * 2, done = 0;
+    for (uint32_t y = 0; y < bmp_rows(b) && done < n; y++) {
+        uint32_t k = n - done < pitch ? n - done : pitch;
+        if (write) memcpy(GPTR(bmp_row(b, y)), GPTR(buffer + done), k);
+        else memcpy(GPTR(buffer + done), GPTR(bmp_row(b, y)), k);
+        done += k;
+    }
+    return done;
 }
 static void g_GetBitmapBits(CPU* c) {
     Bmp* b = bmp_get(ARG(0));
-    if (!b) { RET(0); return; }
-    uint32_t n = ARG(1) < b->size ? ARG(1) : b->size;
-    memcpy(GPTR(ARG(2)), GPTR(b->bits), n);
-    RET(n);
+    RET(b && ARG(2) ? bitmap_bits(b, ARG(2), ARG(1), 0) : 0);
 }
 static void g_SetBitmapBits(CPU* c) {
     Bmp* b = bmp_get(ARG(0));
-    if (!b) { RET(0); return; }
-    uint32_t n = ARG(1) < b->size ? ARG(1) : b->size;
-    memcpy(GPTR(b->bits), GPTR(ARG(2)), n);
-    RET(n);
+    RET(b && ARG(2) ? bitmap_bits(b, ARG(2), ARG(1), 1) : 0);
 }
 
 static const Hle gdi[] = {

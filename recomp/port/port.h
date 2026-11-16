@@ -49,6 +49,8 @@ const char* hle_module_name(uint32_t handle);
 int port_is_web(void);
 void port_host_path(const char* guest, char* out, size_t n);
 void port_log(const char* fmt, ...);
+void port_capture_packet(uint32_t packet, int kind);
+void port_capture_login_packet(CPU* c);
 void port_fatal(const char* fmt, ...);
 
 uint32_t guest_alloc(uint32_t size, uint32_t align);
@@ -125,4 +127,3 @@ void hle_d3d9_register(void);
 void hle_cursor_override(const uint8_t* rgba, int w, int h, int hx, int hy);
 void hle_cursor_restore(void);
 void web_present(uint32_t surface);
-void web_frame_wait(void);

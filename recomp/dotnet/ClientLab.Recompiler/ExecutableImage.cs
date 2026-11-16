@@ -13,6 +13,8 @@ public sealed class ExecutableImage
     public uint CodeStart { get; }
     public uint CodeEnd => CodeStart + (uint)Code.Length;
     public byte[] Code { get; }
+    private IReadOnlyDictionary<uint, int>? packetHooks;
+    public IReadOnlyDictionary<uint, int> PacketCaptureSites => packetHooks ??= PacketHooks.Find(this);
     public Dictionary<uint, uint> RelocationSlots { get; } = [];
     public HashSet<uint> RelocationTargets { get; } = [];
     private readonly Dictionary<uint, X86Instruction?> decoded = [];

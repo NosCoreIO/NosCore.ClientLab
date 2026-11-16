@@ -1,0 +1,64 @@
+name: Client analysis
+# NosTale patches weekly. When the official NostaleClientX.exe has no analysis under symbols/<md5>/, run Ghidra on it
+# and commit the function ranges and seeds to main, where launchers fetch them. Only metadata is committed: never the
+# executable or anything generated from its code.
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: client-analysis
+  cancel-in-progress: false
+env:
+  GHIDRA_TAG: Ghidra_12.0.4_build
+  GHIDRA_DIR: ghidra_12.0.4_PUBLIC
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch the current client executable
+        id: client
+        run: python3 tools/fetch-client-exe.py "$RUNNER_TEMP/client" >> "$GITHUB_OUTPUT"
+      - name: Check for existing analysis
+        id: check
+        run: |
+          if [ -s "symbols/${{ steps.client.outputs.md5 }}/ghidra-functions.txt" ]; then
+            echo "Client build ${{ steps.client.outputs.build }} (${{ steps.client.outputs.md5 }}) is already analysed."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-java@v4
+        if: steps.check.outputs.needed == 'true'
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Ghidra
+        if: steps.check.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GHIDRA_TAG" --repo NationalSecurityAgency/ghidra --pattern 'ghidra_*_PUBLIC_*.zip' --dir "$RUNNER_TEMP"
+          unzip -q "$RUNNER_TEMP"/ghidra_*_PUBLIC_*.zip -d "$RUNNER_TEMP"
+      - name: Analyse the client
+        if: steps.check.outputs.needed == 'true'
+        shell: pwsh
+        run: ./tools/analyze-client.ps1 -ClientExe '${{ steps.client.outputs.exe }}' -WorkDir "$env:RUNNER_TEMP/analysis" -GhidraDir "$env:RUNNER_TEMP/$env:GHIDRA_DIR"
+      - name: Commit the analysis
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          md5='${{ steps.client.outputs.md5 }}'
+          test -s "symbols/$md5/ghidra-functions.txt"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "symbols/$md5"
+          git commit -m "Add Ghidra analysis for NosTale client build ${{ steps.client.outputs.build }} ($md5)"
+          for attempt in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && exit 0
+            sleep 10
+          done
+          exit 1

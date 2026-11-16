@@ -16,6 +16,8 @@ public sealed class X86Instruction
     public string Mnemonic { get; }
     public string Text { get; }
     public X86Operand[] Operands { get; }
+    /// <summary>The arithmetic flags the instruction reads, as CEmitter flag bits (CF 1, ZF 2, SF 4, OF 8, PF 16).</summary>
+    public int FlagsRead { get; }
     public uint? DirectTarget => Operands.FirstOrDefault() is { Kind: OperandKind.Immediate } operand ? (uint)operand.Immediate : null;
     public bool IsFsPush => Mnemonic == "push" && Operands.FirstOrDefault() is { Kind: OperandKind.Memory, Segment: Register.FS };
     public bool WritesFsEsp => Mnemonic == "mov" && Operands.Length == 2 && Operands[0] is { Kind: OperandKind.Memory, Segment: Register.FS } && Operands[1].Register == Register.ESP;
@@ -35,6 +37,9 @@ public sealed class X86Instruction
         formatter.Format(instruction, output);
         Text = output.Value;
         Operands = Enumerable.Range(0, instruction.OpCount).Select(index => ConvertOperand(instruction, index)).ToArray();
+        var read = instruction.RflagsRead;
+        FlagsRead = ((read & RflagsBits.CF) != 0 ? 1 : 0) | ((read & RflagsBits.ZF) != 0 ? 2 : 0) | ((read & RflagsBits.SF) != 0 ? 4 : 0) |
+            ((read & RflagsBits.OF) != 0 ? 8 : 0) | ((read & RflagsBits.PF) != 0 ? 16 : 0);
     }
 
     private static X86Operand ConvertOperand(Instruction instruction, int index)

@@ -11,9 +11,19 @@ self.audioDone = new Int32Array(new SharedArrayBuffer(128 * 4));
 self.pasteBuf = new Int32Array(new SharedArrayBuffer(8 + 2 * 65536));
 // The page counts the frames it has shown here (one per display refresh at most); Present stays two frames ahead.
 self.vsync = new Int32Array(new SharedArrayBuffer(4));
-// The page's canvas, when it could hand it over: WebGL draws into it directly and Present yields to show each frame.
-self.onmessage = (e) => { if (e.data.type === 'canvas') self.pageCanvas = e.data.canvas; };
 postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone, paste: self.pasteBuf, vsync: self.vsync });
+
+// The page's renderer worker (gl.js) does the WebGL calls; its port arrives right after start, and the game waits
+// for it because this worker stops receiving messages once the game runs.
+let renderer = null;
+self.onmessage = (e) => {
+  if (e.data?.type !== 'renderer') return;
+  self.glPort = e.data.port;
+  const start = renderer;
+  renderer = true;
+  if (typeof start === 'function') start();
+};
+const whenRenderer = (start) => { if (renderer === true) start(); else renderer = start; };
 
 // Game files are fetched on demand in 256 KB chunks with synchronous range requests (the worker never yields, so it
 // cannot wait on anything asynchronous), and each chunk is kept once read. The client reads its archives at scattered
@@ -94,6 +104,60 @@ function mountGameFile(FS, dir, name, url, size) {
   node.node_ops = { ...fileNode, setattr: (n, attr) => { materialise(n); return fileNode.setattr(n, attr); } };
 }
 
+// Keep the game's own INI representation. The C# host stores it outside patched
+// game versions, so desktop and browser launches restore exactly the same bytes.
+function installGameSettings(FS) {
+  const path = '/c:/nostale/config.ini', endpoint = '/game-settings/config.ini';
+  const isSettings = name => typeof name === 'string' && name.replace(/\\/g, '/').toLowerCase() === path;
+  const report = text => postMessage({ type: 'log', text });
+  try {
+    const request = new XMLHttpRequest();
+    request.open('GET', endpoint, false);
+    request.responseType = 'arraybuffer';
+    request.send();
+    // Older standalone game hosts still work without the persistence extension.
+    if (request.getResponseHeader('X-ClientLab-Settings') !== 'enabled') return;
+    if (request.status === 200) {
+      if (FS.analyzePath(path).exists) FS.unlink(path);
+      FS.writeFile(path, new Uint8Array(request.response));
+    } else if (request.status !== 404) {
+      report('Game settings could not be restored; using the available client defaults.');
+    }
+  } catch (error) {
+    report('Game settings could not be restored; using the available client defaults.');
+    return;
+  }
+  let lastSaved = null;
+  const save = () => {
+    try {
+      const bytes = FS.readFile(path);
+      if (lastSaved && bytes.length === lastSaved.length && bytes.every((value, index) => value === lastSaved[index])) return;
+      const request = new XMLHttpRequest();
+      request.open('POST', endpoint, false);
+      request.setRequestHeader('Content-Type', 'application/octet-stream');
+      request.send(bytes);
+      if (request.status !== 204) throw new Error('Settings save failed');
+      lastSaved = bytes.slice();
+    } catch (error) { report('Game settings could not be saved. Check Activity and the data folder permissions.'); }
+  };
+  const close = FS.close;
+  FS.close = function(stream) {
+    let changed = false;
+    try { changed = (stream.flags & 3) !== 0 && isSettings(FS.getPath(stream.node)); } catch (error) { }
+    const result = close.call(FS, stream);
+    if (changed) save();
+    return result;
+  };
+  const rename = FS.rename;
+  FS.rename = function(from, to) {
+    const result = rename.call(FS, from, to);
+    let changed = isSettings(to);
+    try { changed ||= isSettings(FS.getPath(FS.lookupPath(to).node)); } catch (error) { }
+    if (changed) save();
+    return result;
+  };
+}
+
 function mountGame(FS) {
   const xhr = new XMLHttpRequest();
   xhr.open('GET', '/game-index.json', false);
@@ -109,6 +173,7 @@ function mountGame(FS) {
     FS.mkdirTree(dir);
     mountGameFile(FS, dir, name, `/game/${encodeURI(f.path)}?v=${f.mtime}`, f.size);
   }
+  installGameSettings(FS);
   postMessage({ type: 'log', text: `mounted ${files.length} game files` });
 }
 
@@ -135,12 +200,14 @@ self.Module = {
   }],
   onRuntimeInitialized() {
     mountGame(Module.FS);
-    try {
-      Promise.resolve(Module.callMain([`C:/Nostale/${params.get('exe') || 'NosCore.exe'}`, 'gf', params.get('region') || '0']))
-        .catch((e) => postMessage({ type: 'log', text: `exited: ${e}` }));
-    } catch (e) {
-      postMessage({ type: 'log', text: `exited: ${e}` });
-    }
+    whenRenderer(() => {
+      try {
+        Promise.resolve(Module.callMain([`C:/Nostale/${params.get('exe') || 'NosCore.exe'}`, 'gf', params.get('region') || '0']))
+          .catch((e) => postMessage({ type: 'log', text: `exited: ${e}` }));
+      } catch (e) {
+        postMessage({ type: 'log', text: `exited: ${e}` });
+      }
+    });
   },
 };
 

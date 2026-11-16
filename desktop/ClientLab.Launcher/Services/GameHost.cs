@@ -25,34 +25,60 @@ public sealed class GameHost : IAsyncDisposable
     private readonly string gameDir;
     private readonly string clientExe;
     private readonly string provider;
+    private readonly string privateServerHost;
+    private readonly Dictionary<int, int> privatePortRemap = [];
     private readonly string authority;
     private readonly string originUrl;
+    private readonly Action<string>? log;
+    private readonly GameSettingsStore? gameSettings;
+    private readonly PacketCapture? packets;
+    private readonly string settingsImportDirectory;
     private CancellationTokenSource? loop;
 
     public string Url { get; }
 
-    private GameHost(string root, JsonObject active, JsonObject settings)
+    private GameHost(string root, JsonObject active, JsonObject settings, Action<string>? log, GameSettingsStore? gameSettings)
     {
+        this.log = log;
+        this.gameSettings = gameSettings;
+        settingsImportDirectory = settings["import_dir"]?.GetValue<string>() ?? "";
         webDir = Path.Combine(root, "recomp", "web");
         buildDir = Path.GetFullPath(active["runtime"]!.GetValue<string>());
         gameDir = Path.GetFullPath(active["client"]!.GetValue<string>());
         clientExe = Path.GetFullPath(active["executable"]!.GetValue<string>());
         provider = settings["provider"]?.GetValue<string>() ?? "gameforge";
+        privateServerHost = settings["private_server_host"]?.GetValue<string>() ?? "";
+        foreach (var mapping in (settings["private_port_remap"]?.GetValue<string>() ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var pair = mapping.Split('=');
+            if (pair.Length != 2 || !int.TryParse(pair[0], out var from) || !int.TryParse(pair[1], out var to) || from is < 1 or > 65535 || to is < 1 or > 65535)
+                throw new InvalidOperationException("Private-server port mappings must look like 4000=4000,5000=5000.");
+            privatePortRemap[from] = to;
+        }
         if (provider == "gameforge") auth = new GameforgeAuthentication(settings);
         var port = FreeLoopbackPort();
         Url = $"http://127.0.0.1:{port}/";
         authority = $"127.0.0.1:{port}";
         originUrl = $"http://127.0.0.1:{port}";
         listener.Prefixes.Add(Url);
+        if (settings["packet_logger"]?.GetValue<string>() == "true" && gameSettings is not null)
+        {
+            packets = new PacketCapture(Path.GetDirectoryName(Path.GetDirectoryName(gameSettings.FilePath))!);
+            log?.Invoke("Packet logger attached. Log: " + packets.FilePath);
+        }
     }
 
-    public static Task<GameHost> StartAsync(string root, JsonObject active, JsonObject settings)
+    public static async Task<GameHost> StartAsync(string root, JsonObject active, JsonObject settings, Action<string>? log = null, GameSettingsStore? gameSettings = null)
     {
-        var host = new GameHost(root, active, settings);
-        host.listener.Start();
-        host.loop = new CancellationTokenSource();
-        _ = host.AcceptAsync(host.loop.Token);
-        return Task.FromResult(host);
+        var host = new GameHost(root, active, settings, log, gameSettings);
+        try
+        {
+            host.listener.Start();
+            host.loop = new CancellationTokenSource();
+            _ = host.AcceptAsync(host.loop.Token);
+            return host;
+        }
+        catch { await host.DisposeAsync(); throw; }
     }
 
     private static int FreeLoopbackPort()
@@ -84,19 +110,90 @@ public sealed class GameHost : IAsyncDisposable
             // relay must only answer our own page — otherwise it is an SSRF primitive. Three layers, none of which
             // the real Chromium/CEF client trips:
             //  - Host: a DNS-rebinding page reaches us under its own hostname, not our loopback authority.
-            //  - Sec-Fetch-Site: a forbidden header JS cannot forge; cross-site requests (including no-cors <img>
-            //    GETs that send no Origin) carry "cross-site", while our page sends "same-origin"/"none".
+            //  - Sec-Fetch-Site: a forbidden header JS cannot forge, and required (fail closed). Cross-site requests,
+            //    including no-cors <img> GETs that send no Origin, carry "cross-site"; our page sends "same-origin"/"none".
             //  - Origin: blocks cross-origin fetches that do send one.
+            // The browser-mode launcher opens the page from its own loopback port: a same-site top-level navigation to
+            // "/" is allowed, since a navigation cannot read the response.
             if (!string.Equals(context.Request.Headers["Host"], authority, StringComparison.OrdinalIgnoreCase))
             { Reply(context, 403); return; }
             var site = context.Request.Headers["Sec-Fetch-Site"];
-            if (site is not null && site is not ("same-origin" or "none"))
+            var pageNavigation = site == "same-site" && context.Request.HttpMethod == "GET" && context.Request.Url!.AbsolutePath is "/" or "/packet-log" &&
+                context.Request.Headers["Sec-Fetch-Mode"] == "navigate" && context.Request.Headers["Sec-Fetch-Dest"] == "document";
+            if (site is not ("same-origin" or "none") && !pageNavigation)
             { Reply(context, 403); return; }
             var origin = context.Request.Headers["Origin"];
             if (origin is not null && !string.Equals(origin, originUrl, StringComparison.Ordinal))
             { Reply(context, 403); return; }
             var path = Uri.UnescapeDataString(context.Request.Url!.AbsolutePath);
-            if (path.StartsWith("/net/", StringComparison.Ordinal)) { await NetAsync(context, path[5..]); return; }
+            if (path == "/packet-log" && context.Request.HttpMethod == "GET")
+            {
+                using var page = typeof(GameHost).Assembly.GetManifestResourceStream("PacketLogger.html")!;
+                context.Response.ContentType = "text/html; charset=utf-8";
+                await page.CopyToAsync(context.Response.OutputStream); return;
+            }
+            if (path == "/packets")
+            {
+                if (packets is null) { Reply(context, 404); return; }
+                if (context.Request.HttpMethod == "GET")
+                {
+                    long.TryParse(context.Request.QueryString["since"], out var since);
+                    context.Response.ContentType = "application/json";
+                    Reply(context, 200, System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(packets.Snapshot(since)), "application/json"); return;
+                }
+                if (context.Request.HttpMethod != "POST" || context.Request.ContentLength64 is < 0 or > 524288) { Reply(context, 400); return; }
+                using var buffer = new MemoryStream();
+                await context.Request.InputStream.CopyToAsync(buffer);
+                if (buffer.Length > 524288) { Reply(context, 413); return; }
+                var packet = JsonNode.Parse(buffer.ToArray())!;
+                packets.Add(packet["kind"]!.GetValue<int>(), packet["raw"]!.GetValue<string>(), packet["timestamp"]!.GetValue<DateTimeOffset>());
+                Reply(context, 204); return;
+            }
+            if (path == "/game-settings/config.ini")
+            {
+                if (gameSettings is null) { Reply(context, 404); return; }
+                context.Response.Headers["X-ClientLab-Settings"] = "enabled";
+                if (context.Request.HttpMethod == "GET")
+                {
+                    try
+                    {
+                        var bytes = await gameSettings.ReadAsync([settingsImportDirectory, gameDir]);
+                        Reply(context, bytes is null ? 404 : 200, bytes); return;
+                    }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                    {
+                        log?.Invoke("Game settings could not be restored. The existing settings file has been kept.");
+                        throw;
+                    }
+                }
+                if (context.Request.HttpMethod != "POST") { Reply(context, 405); return; }
+                if (context.Request.ContentLength64 is < 0 or > GameSettingsStore.MaximumBytes) { Reply(context, 413); return; }
+                using var settingsBytes = new MemoryStream();
+                await context.Request.InputStream.CopyToAsync(settingsBytes);
+                if (settingsBytes.Length > GameSettingsStore.MaximumBytes) { Reply(context, 413); return; }
+                try { await gameSettings.WriteAsync(settingsBytes.ToArray()); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    log?.Invoke("Game settings could not be saved. Check the data folder's write permissions.");
+                    throw;
+                }
+                Reply(context, 204); return;
+            }
+            if (path == "/game/log")
+            {
+                if (context.Request.HttpMethod != "POST" || context.Request.ContentLength64 is < 0 or > 16384) { Reply(context, 400); return; }
+                using var reader = new StreamReader(context.Request.InputStream);
+                var text = await reader.ReadToEndAsync();
+                if (text.Length > 8192) { Reply(context, 413); return; }
+                log?.Invoke("Game: " + text);
+                Reply(context, 204); return;
+            }
+            if (path.StartsWith("/net/", StringComparison.Ordinal))
+            {
+                if (context.Request.HttpMethod != "POST") { Reply(context, 405); return; }
+                await NetAsync(context, path[5..]);
+                return;
+            }
             if (path is "/auth/login" or "/auth/challenge" or "/auth/launch" or "/auth/launch-code")
             { await AuthAsync(context, path); return; }
             if (path == "/auth-code") { Reply(context, 404); return; }
@@ -153,6 +250,7 @@ public sealed class GameHost : IAsyncDisposable
                 "/auth/launch" => await auth.LaunchAsync(payload, DefaultUserAgent),
                 _ => await auth.LaunchAsync(payload, DefaultUserAgent, codeOnly: true),
             };
+            if (result["code"] is { } code) result["code"] = GameforgeAuthentication.ClientTicket(code.GetValue<string>());
             ReplyJson(context, 200, result);
         }
         catch (GameforgeAuthentication.GameforgeException error)
@@ -173,7 +271,13 @@ public sealed class GameHost : IAsyncDisposable
         {
             if (op == "connect")
             {
-                var id = await relay.ConnectAsync(query["host"], int.Parse(query["port"]));
+                var host = query["host"]; var port = int.Parse(query["port"]);
+                if (provider == "noscore")
+                {
+                    if (privateServerHost.Length > 0) host = privateServerHost;
+                    if (privatePortRemap.TryGetValue(port, out var mapped)) port = mapped;
+                }
+                var id = await relay.ConnectAsync(host, port);
                 Reply(context, 200, Encoding.ASCII.GetBytes(id.ToString()), "text/plain");
                 return;
             }
@@ -270,7 +374,7 @@ public sealed class GameHost : IAsyncDisposable
     private string? Resolve(string path)
     {
         if (path is "/" or "/index.html") return Path.Combine(webDir, "index.html");
-        if (path == "/worker.js") return Path.Combine(webDir, "worker.js");
+        if (path is "/worker.js" or "/gl.js") return Path.Combine(webDir, path[1..]);
         if (path.StartsWith("/build/", StringComparison.Ordinal))
             return Contained(buildDir, path["/build/".Length..]);
         if (path.StartsWith("/game/", StringComparison.Ordinal))
@@ -325,6 +429,7 @@ public sealed class GameHost : IAsyncDisposable
         listener.Close();
         await relay.DisposeAsync();
         auth?.Dispose();
+        packets?.Dispose();
         loop?.Dispose();
     }
 
@@ -344,10 +449,13 @@ public sealed class GameHost : IAsyncDisposable
         {
             var client = new TcpClient();
             await client.ConnectAsync(host, port).WaitAsync(TimeSpan.FromSeconds(5));
-            // Unguessable IDs: a 63-bit random handle can't be enumerated to hijack another page's connection.
-            var id = BitConverter.ToInt64(RandomNumberGenerator.GetBytes(8)) & long.MaxValue;
             var connection = new Connection(client);
-            connections[id] = connection;
+            // js_net_connect returns an EM_JS int and the guest stores a signed int.
+            // Larger IDs are truncated (and >53-bit IDs also lose JS precision), so
+            // the subsequent send/receive requests cannot find their connection.
+            long id;
+            do { id = RandomNumberGenerator.GetInt32(1, int.MaxValue); }
+            while (!connections.TryAdd(id, connection));
             _ = connection.ReadLoopAsync();
             return id;
         }

@@ -6,6 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
     <AssemblyName>ClientLab</AssemblyName>
+    <ApplicationIcon>Assets/noscore.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <RootNamespace>NosCore.ClientLab.Launcher</RootNamespace>
     <Version>0.1.0</Version>
     <PublishTrimmed>false</PublishTrimmed>
@@ -20,10 +22,14 @@
   </ItemGroup>
   <ItemGroup>
     <AvaloniaResource Include="Assets/**" />
+    <EmbeddedResource Include="Assets/gameforge-verification.js" LogicalName="GameforgeVerification.js" />
+    <EmbeddedResource Include="Assets/browser-launcher.html" LogicalName="BrowserLauncher.html" />
+    <EmbeddedResource Include="Assets/packet-logger.html" LogicalName="PacketLogger.html" />
+    <EmbeddedResource Include="Assets/noscore.png" LogicalName="LauncherLogo.png" />
     <ProjectReference Include="../../recomp/dotnet/ClientLab.Recompiler/ClientLab.Recompiler.csproj" />
     <EmbeddedResource Include="../../recomp/port/*.c;../../recomp/port/*.h;../../recomp/port/*.inc" LogicalName="Source/recomp/port/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../recomp/runtime/*.c;../../recomp/runtime/*.h" LogicalName="Source/recomp/runtime/%(Filename)%(Extension)" />
-    <EmbeddedResource Include="../../recomp/web/index.html;../../recomp/web/worker.js" LogicalName="Source/recomp/web/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../recomp/web/index.html;../../recomp/web/worker.js;../../recomp/web/gl.js" LogicalName="Source/recomp/web/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../symbols/**/*.txt" LogicalName="Source/symbols/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

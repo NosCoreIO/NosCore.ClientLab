@@ -1,6 +1,28 @@
 # NosCore.ClientLab status
 
-Last updated 2026-10-26.
+Last updated 2026-11-16 (desktop migration notes; earlier runtime results retain their dates).
+
+### Desktop migration investigation (2026-11-16)
+
+The existing Ghidra/Python/WebAssembly build against NosCore is the working gameplay
+baseline, including the remote Playwright runs. Do not replace its verified behavior
+with an untested discovery-only pipeline. The legacy lifter, portable runtime, renderer,
+and worker remain available.
+
+The C# launcher introduced in `b653ff3` discarded Ghidra function bodies: it wrote an
+empty `functions.txt` and passed only entry seeds. The established Python coordinator
+runs Ghidra with `-processor x86:LE:32:default -cspec borlanddelphi` and passes the full
+exported ranges to the lifter. The C# handoff now preserves exact-build committed
+`ghidra-functions.txt` ranges. Newly downloaded builds must not reuse another MD5's map.
+The known NosCore map is preserved alongside the current client's map. For the current
+client, supplemental entry metadata retains functions found by default x86 analysis
+that Borland-mode analysis misses. A regression check covers disconnected function
+bodies that cannot be recovered from entry seeds alone.
+
+The current official executable (MD5 `375c21aa740123dc73c566d033c96780`) is a different
+image from the known NosCore baseline below. Its entry-seed-only C# build passed the
+earlier missing-function addresses but then failed with a WebAssembly memory bounds
+error before rendering. Gameplay parity with the baseline is not yet established.
 
 **Goal:** the NosTale client running in a browser, for automated NosCore testing. Readable decompiled source is not a goal.
 **Ground rule:** no client content is ever committed. Users bring their own client, and all generated code, Ghidra and IDR databases, and builds stay in `C:\tools\re\work`.

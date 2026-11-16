@@ -6,6 +6,8 @@ namespace NosCore.ClientLab.Recompiler;
 
 public static class Program
 {
+    // Change only when generated/runtime semantics require rebuilding existing clients.
+    public const int RuntimeRevision = 18;
     public static int Main(string[] args)
     {
         try
@@ -51,7 +53,9 @@ public static class Program
                 functions.AddRange(discovery.Discover(functions, seeds));
             }
             (functions, var extraLabels) = discovery.AbsorbGaps(functions);
-            for (var pass = 0; pass < 3; pass++)
+            // Fresh client builds have no Ghidra function list. Follow call chains to a fixed point,
+            // rather than stopping after three levels and silently omitting reachable functions.
+            while (true)
             {
                 functions = functions.OrderBy(f => f.Entry).ToList();
                 var covered = FunctionDiscovery.Coverage(functions);
@@ -60,11 +64,18 @@ public static class Program
                 {
                     var emitter = new CEmitter(imageFile, function, covered);
                     var addresses = emitter.Instructions.Select(i => i.Address).ToHashSet();
-                    foreach (var instruction in emitter.Instructions)
+                    for (var index = 0; index < emitter.Instructions.Count; index++)
                     {
+                        var instruction = emitter.Instructions[index];
                         owners.TryAdd(instruction.Address, function.Entry);
                         if ((instruction.Mnemonic == "call" || instruction.Mnemonic.StartsWith('j') || instruction.Mnemonic.StartsWith("loop")) && instruction.DirectTarget is { } target &&
                             (instruction.Mnemonic == "call" || !addresses.Contains(target))) calls.Add(target);
+                        // Discovery can split a shared tail between functions. The emitter transfers
+                        // such fallthroughs through rt_jump, so their destinations need exported labels.
+                        if (instruction.Mnemonic is not ("jmp" or "ret" or "int3") &&
+                            (index + 1 == emitter.Instructions.Count || emitter.Instructions[index + 1].Address != instruction.Next))
+                            calls.Add(instruction.Next);
+                        foreach (var destination in imageFile.JumpTable(instruction)) calls.Add(destination);
                         if (instruction.Mnemonic == "push" && instruction.DirectTarget is { } handler && imageFile.ContainsCode(handler) && imageFile.Decode(instruction.Next)?.IsFsPush == true)
                             foreach (var entry in discovery.HandlerEntries(handler)) calls.Add(entry);
                     }
@@ -82,7 +93,9 @@ public static class Program
                 }
                 Console.WriteLine($"{extraLabels.Values.Sum(set => set.Count)} mid-function labels, {seeds.Count} uncovered call targets");
                 if (seeds.Count == 0) break;
-                functions.AddRange(discovery.Discover(functions, seeds.Order()));
+                var discovered = discovery.Discover(functions, seeds.Order());
+                if (discovered.Count == 0) break;
+                functions.AddRange(discovered);
             }
             Directory.CreateDirectory(output);
             var finalCoverage = FunctionDiscovery.Coverage(functions);
@@ -91,6 +104,7 @@ public static class Program
                 foreach (var label in labels) callOwners.TryAdd(label, owner);
             Dictionary<uint, List<string>> chunks = []; Dictionary<uint, HashSet<uint>> callees = [];
             HashSet<(uint Label, uint Owner)> table = []; List<string> unsupported = [];
+            HashSet<uint> requiredTargets = [];
             var lifted = new byte[imageFile.Code.Length];
             foreach (var function in functions.OrderBy(f => f.Entry))
             {
@@ -100,10 +114,39 @@ public static class Program
                 if (!chunks.TryGetValue(key, out var values)) { chunks[key] = values = []; callees[key] = []; }
                 values.Add(text); callees[key].UnionWith(emitter.Callees); unsupported.AddRange(emitter.Unsupported);
                 foreach (var label in emitter.Labels) table.Add((label, function.Entry));
-                foreach (var instruction in emitter.Instructions)
+                for (var index = 0; index < emitter.Instructions.Count; index++)
+                {
+                    var instruction = emitter.Instructions[index];
+                    if ((instruction.Mnemonic == "call" || instruction.Mnemonic.StartsWith('j') || instruction.Mnemonic.StartsWith("loop")) && instruction.DirectTarget is { } target && imageFile.ContainsCode(target)) requiredTargets.Add(target);
+                    if (instruction.Mnemonic is not ("jmp" or "ret" or "int3") &&
+                        (index + 1 == emitter.Instructions.Count || emitter.Instructions[index + 1].Address != instruction.Next) && imageFile.ContainsCode(instruction.Next)) requiredTargets.Add(instruction.Next);
+                    requiredTargets.UnionWith(imageFile.JumpTable(instruction));
                     if (instruction.Address >= imageFile.CodeStart && instruction.Next <= imageFile.CodeEnd)
                         Array.Fill(lifted, (byte)1, (int)(instruction.Address - imageFile.CodeStart), instruction.Length);
+                }
             }
+            var exported = table.Select(pair => pair.Label).ToHashSet();
+            // Speculative relocation discovery can decode embedded data until an invalid x86
+            // byte sequence. Preserve the real illegal-instruction behavior if it is reached;
+            // do not mistake it for valid code or silently allow a missing dispatch target.
+            var invalidTargets = requiredTargets.Except(exported).Where(target => imageFile.Decode(target) is null).Order().ToArray();
+            foreach (var target in invalidTargets)
+            {
+                var key = target >> 15;
+                if (!chunks.TryGetValue(key, out var values)) { chunks[key] = values = []; callees[key] = []; }
+                values.Add($"void f_{target:x8}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{ rt_unimpl(c, 0x{target:x8}u, \"invalid x86 instruction\"); }}\n");
+                table.Add((target, target)); exported.Add(target);
+                unsupported.Add($"{target:x8}: invalid x86 instruction reached by speculative discovery");
+            }
+            var missingTargets = requiredTargets.Except(exported).Order().ToArray();
+            if (missingTargets.Length > 0)
+            {
+                File.WriteAllText(Path.Combine(output, "control-flow-errors.json"), JsonSerializer.Serialize(new {
+                    targets = missingTargets, functions, extraLabels
+                }));
+                throw new InvalidDataException("Known control-flow targets have no compiled dispatch label: " + string.Join(", ", missingTargets.Take(20).Select(address => address.ToString("x8"))));
+            }
+            Console.WriteLine($"Validated {requiredTargets.Count} known control-flow destinations.");
             var wanted = new HashSet<string>();
             foreach (var (key, values) in chunks)
             {
@@ -121,8 +164,8 @@ public static class Program
             labelsTable.AppendLine("};"); labelsTable.AppendLine($"const uint32_t rt_code_lo = 0x{imageFile.CodeStart:x8}u, rt_code_hi = 0x{imageFile.CodeEnd:x8}u;");
             WriteIfChanged(Path.Combine(output, "table.c"), labelsTable.ToString());
             var percentage = lifted.Sum(value => (long)value) * 100d / lifted.Length;
-            var report = new { schema = 1, imageSha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(source))), entryPoint = imageFile.EntryPoint,
-                functionCount = functions.Count, labelCount = table.Count, coveragePercent = percentage, unsupported };
+            var report = new { schema = 1, runtimeRevision = RuntimeRevision, validatedTargets = requiredTargets.Count, imageSha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(source))), entryPoint = imageFile.EntryPoint,
+                functionCount = functions.Count, labelCount = table.Count, coveragePercent = percentage, invalidCodeTargets = invalidTargets.Select(target => target.ToString("x8")).ToArray(), unsupported };
             WriteIfChanged(Path.Combine(output, "recompiler-report.json"), JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
             Console.WriteLine($"{functions.Count} functions, {table.Count} labels, {chunks.Count} files; coverage {percentage:F1}%; {unsupported.Count} unsupported instructions");
             foreach (var line in unsupported.Take(15)) Console.Error.WriteLine(line);

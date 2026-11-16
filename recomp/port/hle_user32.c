@@ -2466,6 +2466,9 @@ static void u_MessageBoxA(CPU* c) {
     const char* text = ARG(1) ? GSTR(ARG(1)) : "";
     const char* caption = ARG(2) ? GSTR(ARG(2)) : "Error";
     port_log("MessageBoxA \"%s\": %s", caption, text);
+    /* There is no Chromium Embedded here (LoadLibrary refuses libcef.dll), and the client only reports that and
+       carries on: answer OK without showing it, as the native host does. */
+    if (strstr(text, "libcef")) { RET(1); return; }
     size_t cap = strlen(text) * 6 + strlen(caption) * 6 + 128;
     char* json = malloc(cap);
     size_t n = (size_t)snprintf(json, cap, "{\"text\":");

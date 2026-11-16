@@ -58,6 +58,96 @@ The full story, every gotcha found so far, and how to continue are in [docs/STAT
 
 ## Quick start
 
+### C# desktop launcher (experimental)
+
+The native Avalonia launcher embeds the game in Chromium. Installation, patch downloads,
+the x86-to-C recompiler, compilation orchestration, and the local game host are written
+in C#. Emscripten still uses a private Python runtime internally. The existing browser
+startup below remains available.
+
+```powershell
+dotnet run --project desktop/ClientLab.Launcher -- --data-dir C:/dev/ClientLab-data
+```
+
+Requires .NET 10 for development. Opening the launcher checks for game updates. It
+downloads or imports changed files and recompiles only when the executable changes
+or a complete runtime is missing. Missing build tools are set up only when compilation
+is needed. UI releases and asset-only patches reuse the compiled runtime.
+Sign-in remains available while preparation runs; Play launches the prepared runtime.
+Play opens a separate NosTale window with an aspect-correct game surface. Browser login
+controls and debug panes are hidden there; startup errors are forwarded to Activity.
+Game audio/display preferences use the client's original `Config.ini` format and persist
+across desktop/browser launches and client updates. Existing settings are imported from
+the selected installation on first use. Settings includes Music, Sound effects,
+3D sound and Full screen controls; see [Game preferences](docs/GAME-SETTINGS.md).
+Settings also offers an opt-in packet logger window with timestamped, live-readable
+JSONL files; see [Packet logger](docs/PACKET-LOGGER.md).
+Runtime compatibility revisions trigger a one-time rebuild when recompiler fixes require
+it, even if the official executable is unchanged. UI-only updates still reuse that build.
+Gameforge mode uses the latest official patch manifest and reuses matching files from
+an installation chosen in Settings. NosCore mode keeps the existing local-install flow.
+Verified file sizes and timestamps are recorded against the official manifest, so an
+unchanged patch skips repeated checksums and copies. Only network transfers are labelled downloads.
+Unchanged complete builds are reused; each new build attempt has its own output directory
+so retries never overwrite generated C files that another process has mapped.
+Completed compilation objects are cached by source, headers, flags and compiler identity,
+so cancelled attempts can reuse their finished work. Larger source chunks start first;
+compilation uses up to eight workers according to CPU and memory availability, with
+file counts and elapsed time shown during preparation.
+Very large functions use structured dispatch to keep WebAssembly compilation practical.
+Function discovery combines exact-build Ghidra-generated function ranges with the C#
+recompiler's relocation, call-graph, and Delphi initializer discovery. The maps are
+bundled as metadata; players do not need Ghidra or Java installed. An unknown executable
+requires a compatibility update containing its Ghidra analysis; the launcher preserves
+the previous runtime instead of building from incomplete discovery. Patching and
+recompilation run in C# using the matching metadata. New builds are experimental.
+Desktop Gameforge sign-in runs the official live
+identity script in the embedded browser, sharing one collector through sign-in and
+launch verification. It uses a registered installation ID from Settings, Windows, or
+an existing identity file. Live Windows validation covers proof-of-work, sign-in,
+account lookup, iovation verification, and successful launch-code issuance (HTTP 201).
+Recompiled-game compatibility and macOS/Linux end-to-end execution remain experimental.
+The official script's device identifier and vector are preserved across changing loopback
+ports, with existing identifiers migrated from the configured identity file. Collection
+uses a properly sized verification view; native feature encoding and fixed-length JSON
+framing match the official launcher. Image CAPTCHA and MFA answers are entered in the
+launcher. Proof-of-work challenges run through Gameforge's official hosted widget in
+the embedded browser, then resume sign-in with fresh identity data. Failed or cancelled
+work never advances sign-in, and repeated challenges have a bounded retry count.
+The sign-in page offers Remember me: credentials use Windows Credential Manager,
+macOS Keychain, or a Linux Secret Service keyring (`secret-tool` from libsecret-tools).
+They are restored on startup; signing out or disabling Remember me removes the saved
+entry. Windows vault operations are tested; macOS/Linux vaults need platform validation.
+
+To create a single executable, run PowerShell 7 **on the target operating system**:
+
+```powershell
+./desktop/publish.ps1 -Runtime win-x64 -Version 0.1.0
+# Other targets: linux-x64, osx-x64, osx-arm64
+# A directory containing just ClientLab.exe (build intermediates stay under desktop/obj):
+./desktop/publish.ps1 -Runtime win-x64 -OutputDirectory ./dist/ClientLab-win -ExecutableName ClientLab.exe -SkipChecksum
+```
+
+The executable bundles the launcher, .NET and Chromium, and extracts them into the
+user's local application-data directory on first use. It imports or downloads game
+files locally; releases contain no game executable, assets, generated client C/WASM,
+credentials or device identities. `--verify-payload` checks extraction without opening
+the UI. The desktop release workflow builds each target on its own OS and creates a
+draft GitHub release for `launcher-v*` tags. No release is published automatically.
+Linux/macOS game execution and unsigned macOS distribution still need platform testing.
+Image-drop CAPTCHA verification supports dragging one of the four supplied icons onto
+the target, or clicking its numbered button. Rejected answers refresh the complete image
+set; old drags cannot submit against a refreshed challenge. Other challenge types are
+identified before image requests and reported explicitly.
+The launcher uses NosCore branding and fetches NosTale artwork directly from the CDN
+linked by the official landing page. News and event cards use Gameforge's own English
+product-news API, its 444×250 card images and its official fallback artwork. Left/right
+controls slide through the full feed, four cards per page; images load as pages are viewed. Artwork
+and news are cached locally; network failures do not
+block updates or sign-in. The NosTale image is not included in the repository or releases.
+
+### Existing browser workflow
+
 Requirements: Windows, Python 3 (`pip install capstone pefile`), [Emscripten](https://emscripten.org) in
 `C:\tools\emsdk`, Ghidra 12 with Java 21 (for the first decompilation), a NosCore server, and the NosCore-patched
 client (`NosCore.exe`; symbols here are for MD5 `51bbff3ec09d67c8425f88d74c6d5df5`).

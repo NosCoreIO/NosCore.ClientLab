@@ -9,31 +9,39 @@ namespace NosCore.ClientLab.Launcher.Services;
 public sealed class LauncherCoordinator : IAsyncDisposable
 {
     private readonly object gate = new();
-    private readonly HttpClient http = new() { Timeout = TimeSpan.FromMinutes(5) };
+    private readonly HttpClient http;
     private readonly string root;
     private readonly string directory;
     private JsonObject settings;
+    private readonly AsyncLocal<JsonObject?> taskSettings = new();
     private readonly JsonObject state;
     private JsonObject? manifest;
     private CancellationTokenSource? cancellation;
     private Task? job;
-    private Process? process;
     private GameHost? game;
     private string? launchCode;
     private string? launchInstallationId;
+    private int downloadedFiles;
     public string? GameUrl { get; private set; }
+    public string DataDirectory => directory;
     // The launcher recompiles with the committed per-build symbols plus the recompiler's own relocation and
     // call-graph discovery, so only the WebAssembly compiler is needed on this machine; Ghidra stays a dev tool.
     private static readonly string[] ToolKeys = ["emcc"];
 
-    public LauncherCoordinator(string sourceRoot, string dataDirectory)
+    public LauncherCoordinator(string sourceRoot, string dataDirectory, HttpMessageHandler? handler = null)
     {
+        http = handler is null ? new HttpClient() : new HttpClient(handler);
+        http.Timeout = TimeSpan.FromMinutes(5);
         root = sourceRoot; directory = dataDirectory;
         Directory.CreateDirectory(directory);
         settings = ReadJson("settings.json") ?? new JsonObject();
         foreach (var key in new[] { "import_dir", "identity_file", "installation_id", "python", "ghidra", "java", "emcc" })
             if (!settings.ContainsKey(key)) settings[key] = "";
         settings["provider"] ??= "gameforge";
+        settings["private_auth_url"] ??= "https://127.0.0.1:7001";
+        settings["private_server_host"] ??= "";
+        settings["private_port_remap"] ??= "";
+        settings["packet_logger"] ??= "false";
         if (Setting("import_dir").Length == 0 && DetectInstall() is { Length: > 0 } detected) settings["import_dir"] = detected;
         state = new JsonObject { ["busy"] = false, ["stage"] = "idle", ["progress"] = 0d,
             ["message"] = "Make yourself at home.", ["logs"] = new JsonArray(), ["running"] = false,
@@ -52,7 +60,21 @@ public sealed class LauncherCoordinator : IAsyncDisposable
     }
 
     private JsonObject? ReadJson(string name) => File.Exists(Path.Combine(directory, name)) ? JsonNode.Parse(File.ReadAllText(Path.Combine(directory, name)))?.AsObject() : null;
-    private string Setting(string key) => settings[key]?.GetValue<string>() ?? "";
+
+    // The game picks its resolution from its own settings; the window opens at the last one it reported.
+    public (int Width, int Height)? LastGameResolution()
+    {
+        try
+        {
+            var saved = ReadJson("game-window.json");
+            return saved?["width"]?.GetValue<int>() is int w and >= 320 && saved["height"]?.GetValue<int>() is int h and >= 240 ? (w, h) : null;
+        }
+        catch (Exception) { return null; }
+    }
+
+    public void RememberGameResolution(int width, int height) =>
+        SaveJson(Path.Combine(directory, "game-window.json"), new JsonObject { ["width"] = width, ["height"] = height });
+    private string Setting(string key) => (taskSettings.Value ?? settings)[key]?.GetValue<string>() ?? "";
     private void SaveJson(string path, JsonNode value)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -82,48 +104,85 @@ public sealed class LauncherCoordinator : IAsyncDisposable
     public void Status(string stage, string message, double progress = 0)
     { lock (gate) { state["stage"] = stage; state["message"] = message; state["progress"] = progress; } }
     public void Progress(double progress) { lock (gate) state["progress"] = progress; }
+    public Task<GameOptions> ReadGameOptionsAsync()
+    {
+        var snapshot = Snapshot();
+        return new GameSettingsStore(directory).ReadOptionsAsync([
+            snapshot["settings"]?["import_dir"]?.GetValue<string>() ?? "",
+            snapshot["active"]?["client"]?.GetValue<string>() ?? ""]);
+    }
+
+    public Task SaveGameOptionsAsync(GameOptions options)
+    {
+        lock (gate)
+            if (game is not null) throw new InvalidOperationException("Close the game before changing its settings.");
+        return new GameSettingsStore(directory).UpdateOptionsAsync(options, [Setting("import_dir")]);
+    }
     public void SaveSettings(JsonObject values)
     {
         lock (gate)
         {
-            if (state["busy"]!.GetValue<bool>() || game is not null) throw new InvalidOperationException("Close the game or wait for the current task before changing settings.");
+            var next = settings.DeepClone().AsObject();
             foreach (var key in settings.Select(pair => pair.Key).ToArray())
-                if (values.TryGetPropertyValue(key, out var value)) settings[key] = value?.GetValue<string>().Trim() ?? "";
-            if (Setting("provider") is not ("gameforge" or "noscore")) throw new InvalidOperationException("Unknown sign-in provider.");
-            SaveJson(Path.Combine(directory, "settings.json"), settings);
+                if (values.TryGetPropertyValue(key, out var value)) next[key] = value?.GetValue<string>().Trim() ?? "";
+            if (next["provider"]?.GetValue<string>() is not ("gameforge" or "noscore")) throw new InvalidOperationException("Unknown sign-in provider.");
+            SaveJson(Path.Combine(directory, "settings.json"), next);
+            settings = next;
         }
     }
     public void Start(string action)
     {
-        if (action is not ("check" or "prepare" or "tools")) throw new InvalidOperationException("Unknown task.");
+        if (action is not ("check" or "prepare" or "tools" or "startup")) throw new InvalidOperationException("Unknown task.");
         lock (gate)
         {
             if (state["busy"]!.GetValue<bool>() || game is not null) throw new InvalidOperationException("Finish the current task or close the game first.");
             state["busy"] = true; state["error"] = null;
             cancellation = new CancellationTokenSource(); var token = cancellation.Token;
+            var preparationSettings = settings.DeepClone().AsObject();
             job = Task.Run(async () =>
             {
+                taskSettings.Value = preparationSettings;
                 try
                 {
+                    Status("checking", "Checking for updates…");
+                    using var lease = await BuildWorkspace.AcquireLeaseAsync(directory, token);
+                    if (action is "prepare" or "startup" && ReadJson("active.json") is { } latest)
+                        lock (gate) state["active"] = latest;
                     if (action == "check") await CheckAsync(token);
-                    else if (action == "prepare") await PrepareAsync(token);
+                    else if (action is "prepare" or "startup") await PrepareAsync(token);
                     else
                     {
-                        var tools = await ToolchainInstaller.InstallAsync(directory, this, token);
-                        lock (gate) { foreach (var item in tools) settings[item.Key] = item.Value; SaveJson(Path.Combine(directory, "settings.json"), settings); }
+                        await EnsureToolsAsync(token);
                         Status("idle", "Build tools are ready.", 1);
                     }
                 }
                 catch (OperationCanceledException) { Status("idle", "Task cancelled. Your previous build is still available."); }
                 catch (Exception error) { Log(error.Message); lock (gate) state["error"] = error.Message; Status("error", "This step needs attention."); }
-                finally { lock (gate) state["busy"] = false; }
+                finally { taskSettings.Value = null; lock (gate) state["busy"] = false; }
             }, CancellationToken.None);
         }
     }
     public void Cancel()
     {
         cancellation?.Cancel();
-        try { if (process is { HasExited: false }) process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+    }
+
+    public async Task CancelAndWaitAsync()
+    {
+        Task? pending;
+        lock (gate) { cancellation?.Cancel(); pending = job; }
+        if (pending is not null) await pending;
+    }
+
+    public async Task StartAndWaitAsync(string action)
+    {
+        Start(action);
+        var pending = job!;
+        var token = cancellation!.Token;
+        await pending;
+        token.ThrowIfCancellationRequested();
+        lock (gate)
+            if (state["error"]?.GetValue<string>() is { } error) throw new InvalidOperationException(error);
     }
 
     public async Task RunAsync(string executable, IEnumerable<string> arguments, CancellationToken token, Dictionary<string, string>? environment = null)
@@ -134,10 +193,21 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         if (environment is not null) foreach (var item in environment) info.Environment[item.Key] = item.Value;
         Log("Running " + Path.GetFileName(executable));
         using var child = Process.Start(info) ?? throw new InvalidOperationException("Could not start " + executable);
-        process = child;
+        // Every compiler has its own registration: compilation runs several children in parallel.
+        // Disposing Process alone does not terminate it when cancellation interrupts output draining.
+        using var registration = token.Register(() =>
+        {
+            try { if (!child.HasExited) child.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+        });
         async Task Drain(StreamReader stream) { while (await stream.ReadLineAsync(token) is { } line) Log(line); }
-        await Task.WhenAll(Drain(child.StandardOutput), Drain(child.StandardError), child.WaitForExitAsync(token));
-        process = null; token.ThrowIfCancellationRequested();
+        try { await Task.WhenAll(Drain(child.StandardOutput), Drain(child.StandardError), child.WaitForExitAsync(token)); }
+        finally
+        {
+            if (token.IsCancellationRequested) await child.WaitForExitAsync(CancellationToken.None);
+        }
+        token.ThrowIfCancellationRequested();
         if (child.ExitCode != 0) throw new InvalidOperationException($"{Path.GetFileName(executable)} exited with code {child.ExitCode}. Open Activity for details.");
     }
 
@@ -148,6 +218,63 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             throw new InvalidDataException("The patch manifest contains an unsafe file path.");
         return value;
     }
+    public const string PatchBaseUrl = "http://patches.gameforge.com";
+    public const string AnalysisUrl ="https://raw.githubusercontent.com/NosCoreIO/NosCore.ClientLab/main/symbols/";
+    private static readonly string[] AnalysisFiles = ["ghidra-functions.txt", "ghidra-seeds.txt"];
+
+    private static bool HasAnalysis(string symbols)
+    {
+        var functions = Path.Combine(symbols, "ghidra-functions.txt");
+        return File.Exists(functions) && NosCore.ClientLab.Recompiler.FunctionDiscovery.ReadFunctions(functions).Count > 0;
+    }
+
+    /// <summary>The analysis for an exact client executable (its MD5): bundled with this launcher, fetched earlier, or
+    /// fetched now from the repository, where a scheduled workflow commits it for every client patch.</summary>
+    public async Task<string?> AnalysisDirectoryAsync(string buildId, CancellationToken token)
+    {
+        var bundled = Path.Combine(root, "symbols", buildId);
+        if (HasAnalysis(bundled)) return bundled;
+        var fetched = Path.Combine(directory, "symbols", buildId);
+        if (!HasAnalysis(fetched)) await DownloadAnalysisAsync(buildId, fetched, token);
+        return HasAnalysis(fetched) ? fetched : null;
+    }
+
+    /// <summary>Downloads the analysis metadata (function ranges and seeds, no client bytes) committed for this exact
+    /// executable. Leaves nothing behind when it is not there yet or the download fails.</summary>
+    private async Task DownloadAnalysisAsync(string buildId, string target, CancellationToken token)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(buildId, "^[0-9a-f]{32}$")) return;
+        Status("analysing", "Fetching the analysis for this client version…");
+        var staging = target + ".download";
+        try
+        {
+            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            Directory.CreateDirectory(staging);
+            foreach (var file in AnalysisFiles)
+            {
+                using var response = await http.GetAsync(AnalysisUrl + buildId + "/" + file, HttpCompletionOption.ResponseHeadersRead, token);
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    if (file != AnalysisFiles[0]) continue;
+                    Log($"No published analysis for client build {buildId} yet.");
+                    return;
+                }
+                response.EnsureSuccessStatusCode();
+                if (response.Content.Headers.ContentLength > 32L * 1024 * 1024) throw new InvalidDataException("The published analysis is unexpectedly large.");
+                await File.WriteAllBytesAsync(Path.Combine(staging, file), await response.Content.ReadAsByteArrayAsync(token), token);
+            }
+            if (!HasAnalysis(staging)) throw new InvalidDataException("The published analysis contains no functions.");
+            if (Directory.Exists(target)) Directory.Delete(target, recursive: true);
+            Directory.Move(staging, target);
+            Log($"Using the published analysis for client build {buildId}.");
+        }
+        catch (Exception error) when (error is HttpRequestException or InvalidDataException or IOException)
+        {
+            Log($"Could not fetch the analysis for client build {buildId}: {error.Message}");
+        }
+        finally { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); }
+    }
+
     private static async Task<string> HashAsync(string path, string algorithm, CancellationToken token)
     {
         await using var file = File.OpenRead(path);
@@ -176,7 +303,10 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             entries.Add(new JsonObject { ["file"] = name, ["sha1"] = checksum, ["path"] = path, ["size"] = size });
         }
         if (entries.Count == 0) throw new InvalidDataException("Gameforge returned an empty patch manifest.");
-        var id = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(entries.ToJsonString())))[..20];
+        // CDN paths and manifest ordering can change without any game file changing.
+        var content = new JsonArray(entries.OrderBy(item => item!["file"]!.GetValue<string>(), StringComparer.Ordinal)
+            .Select(item => (JsonNode)new JsonObject { ["file"] = item!["file"]!.GetValue<string>(), ["sha1"] = item["sha1"]!.GetValue<string>(), ["size"] = item["size"]!.GetValue<long>() }).ToArray());
+        var id = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content.ToJsonString())))[..20];
         manifest = new JsonObject { ["id"] = id, ["build"] = response["build"]?.ToString() ?? id, ["entries"] = entries };
         SaveJson(Path.Combine(directory, "latest.json"), manifest);
         var total = entries.Sum(item => item!["size"]!.GetValue<long>());
@@ -201,10 +331,15 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             File.Copy(imported, temporary, overwrite: true);
         else
         {
-            using var response = await http.GetAsync("https://patches.gameforge.com" + entry["path"]!.GetValue<string>(), HttpCompletionOption.ResponseHeadersRead, token);
+            Status("downloading", "Downloading " + name);
+            // The patch CDN's certificate does not cover patches.gameforge.com, so like the official launcher this uses
+            // plain HTTP; every file is checked against the SHA-1 of the manifest, which comes over HTTPS.
+            using var response = await http.GetAsync(PatchBaseUrl + entry["path"]!.GetValue<string>(), HttpCompletionOption.ResponseHeadersRead, token);
             response.EnsureSuccessStatusCode();
             await using var output = File.Create(temporary);
             await response.Content.CopyToAsync(output, token);
+            downloadedFiles++;
+            Log("Downloaded " + name);
         }
         if (new FileInfo(temporary).Length != size || await HashAsync(temporary, "sha1", token) != digest)
             throw new InvalidDataException($"Checksum mismatch for {name}. The downloaded file was not installed.");
@@ -213,19 +348,20 @@ public sealed class LauncherCoordinator : IAsyncDisposable
 
     private async Task PrepareAsync(CancellationToken token)
     {
-        if (!ToolKeys.All(key => File.Exists(Setting(key)) || Directory.Exists(Setting(key)))) throw new InvalidOperationException("Set up build tools first.");
+        downloadedFiles = 0;
         string version, client, pinned, buildVersionId, buildLabel;
         // The runtime targets the NosCore-patched client; fall back to the stock executable only if it is absent.
-        var installExe = Setting("import_dir").Length > 0
+        var installExe = Setting("provider") == "noscore" && Setting("import_dir").Length > 0
             ? new[] { "NosCore.exe", "NostaleClientX.exe" }.Select(name => Path.Combine(Setting("import_dir"), name)).FirstOrDefault(File.Exists)
             : null;
         if (installExe is not null)
         {
             // Install mode: build and play straight from the existing local NosTale install; no Gameforge download.
-            Status("downloading", "Using your installed NosTale files…");
+            Status("installing", "Using your installed NosTale files…");
             buildVersionId = (await HashAsync(installExe, "sha1", token))[..16];
             buildLabel = "installed-" + buildVersionId[..6];
-            version = Path.Combine(directory, "versions", buildVersionId); Directory.CreateDirectory(version);
+            if (await CanReuseBuildAsync(buildVersionId, token)) { Status("ready", "Your game is up to date.", 1); return; }
+            version = BuildWorkspace.Create(Path.Combine(directory, "versions", buildVersionId));
             client = Setting("import_dir");
             pinned = Path.Combine(version, "compiled-client.exe"); File.Copy(installExe, pinned, overwrite: true);
         }
@@ -234,18 +370,49 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             // Download mode: fetch the client from Gameforge (needs a reachable patch host).
             await CheckAsync(token);
             buildVersionId = manifest!["id"]!.GetValue<string>(); buildLabel = manifest["build"]!.GetValue<string>();
-            version = Path.Combine(directory, "versions", buildVersionId);
-            client = Path.Combine(version, "client"); Directory.CreateDirectory(client);
+            // A complete current runtime can be reused on startup; failed/partial builds are never selected.
+            if (await CanReuseBuildAsync(buildVersionId, token))
+            { Status("ready", "Your game is up to date.", 1); return; }
+            var versionDirectory = Path.Combine(directory, "versions", buildVersionId);
+            client = Path.Combine(versionDirectory, "client"); Directory.CreateDirectory(client);
             var entries = manifest["entries"]!.AsArray(); var total = Math.Max(1, entries.Sum(item => item!["size"]!.GetValue<long>())); long completed = 0;
+            if (VerifiedClientFiles.IsCurrent(client, buildVersionId, entries))
+                Log($"All {entries.Count} game files are already verified; no download or patch is needed.");
+            else
+            {
+            var checkedFiles = 0;
             foreach (var entry in entries)
             {
-                token.ThrowIfCancellationRequested(); Status("downloading", "Preparing " + entry!["file"]!.GetValue<string>(), completed / (double)total);
-                var source = await DownloadAsync(entry, token); var target = Path.Combine(client, entry["file"]!.GetValue<string>());
+                token.ThrowIfCancellationRequested(); Status("checking", $"Checking game files: {++checkedFiles}/{entries.Count}", completed / (double)total);
+                var target = Path.Combine(client, entry!["file"]!.GetValue<string>());
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                if (!File.Exists(target) || await HashAsync(target, "sha1", token) != entry["sha1"]!.GetValue<string>())
-                { File.Copy(source, target + ".installing", overwrite: true); File.Move(target + ".installing", target, overwrite: true); }
+                if (!File.Exists(target) || new FileInfo(target).Length != entry["size"]!.GetValue<long>() || await HashAsync(target, "sha1", token) != entry["sha1"]!.GetValue<string>())
+                {
+                    var source = await DownloadAsync(entry, token);
+                    Status("installing", "Preparing local game files…", completed / (double)total);
+                    File.Copy(source, target + ".installing", overwrite: true); File.Move(target + ".installing", target, overwrite: true);
+                }
                 completed += entry["size"]!.GetValue<long>();
             }
+            VerifiedClientFiles.MarkVerified(client, buildVersionId, entries);
+            Log($"Verified {entries.Count} game files; downloaded {downloadedFiles} files. The rest were already present or reused locally.");
+            }
+            var executable = Path.Combine(client, "NostaleClientX.exe");
+            // Asset-only patches still install, but do not invalidate compiled machine code.
+            JsonObject? previous;
+            lock (gate) previous = state["active"]?.DeepClone().AsObject();
+            if (previous is not null && await CanReuseBuildAsync(previous["id"]!.GetValue<string>(), token) &&
+                await HashAsync(executable, "sha256", token) == previous["executable_sha256"]!.GetValue<string>())
+            {
+                previous["id"] = buildVersionId; previous["build"] = buildLabel; previous["client"] = client;
+                SaveJson(Path.Combine(versionDirectory, "build.json"), previous);
+                SaveJson(Path.Combine(directory, "active.json"), previous);
+                lock (gate) state["active"] = previous;
+                Log("Game files updated; the executable is unchanged, so the compiled runtime was reused.");
+                Status("ready", "Your game is up to date.", 1);
+                return;
+            }
+            version = BuildWorkspace.Create(versionDirectory);
             pinned = Path.Combine(version, "compiled-client.exe"); File.Copy(Path.Combine(client, "NostaleClientX.exe"), pinned, overwrite: true);
         }
         var image = new NosCore.ClientLab.Recompiler.ExecutableImage(pinned);
@@ -255,7 +422,10 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         // Seeds come from the symbols committed for this exact build; the recompiler adds the rest through its own
         // relocation and call-graph discovery. No Ghidra/Java analysis runs here (that stays a dev-only pipeline).
         var seedAddresses = new List<string> { image.EntryPoint.ToString("x8") };
-        var symbolsDirectory = Path.Combine(root, "symbols", buildId);
+        var symbolsDirectory = await AnalysisDirectoryAsync(buildId, token) ?? throw new InvalidOperationException(
+            $"This client version (build {buildId}) has not been analysed for ClientLab yet. It usually is within a few hours of a patch; the previous prepared game has been kept.");
+        var ghidraFunctions = Path.Combine(symbolsDirectory, "ghidra-functions.txt");
+        await EnsureToolsAsync(token);
         if (Directory.Exists(symbolsDirectory))
         {
             foreach (var file in Directory.EnumerateFiles(symbolsDirectory, "*.txt"))
@@ -267,13 +437,19 @@ public sealed class LauncherCoordinator : IAsyncDisposable
                 }
             Log($"Using committed symbols for client build {buildId} ({seedAddresses.Count} seeds).");
         }
-        else
-            Log($"No committed symbols for client build {buildId}; relying on automatic discovery.");
-        var functions = Path.Combine(version, "functions.txt"); await File.WriteAllTextAsync(functions, "", token);
+        // Preserve the complete Ghidra bodies, including discontiguous ranges, as the
+        // established Python pipeline does. Entry seeds alone lose this information.
+        var functions = Path.Combine(version, "functions.txt");
+        File.Copy(ghidraFunctions, functions, overwrite: true);
+        Log("Using full Ghidra function ranges for this exact client build.");
         var seeds = Path.Combine(version, "seeds.txt");
         await File.WriteAllTextAsync(seeds, string.Join('\n', seedAddresses.Distinct()) + "\n", token);
         var generated = Path.Combine(version, "generated"); Status("translating", "Translating the client with the C# recompiler…");
-        await RunAsync(Environment.ProcessPath!, ["--recompile", pinned, functions, generated, "--seeds", seeds, "--allow-unsupported"], token);
+        var recompilerArguments = new List<string>();
+        if (string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath), "dotnet", StringComparison.OrdinalIgnoreCase))
+            recompilerArguments.Add(Path.Combine(AppContext.BaseDirectory, "ClientLab.dll"));
+        recompilerArguments.AddRange(["--recompile", pinned, functions, generated, "--seeds", seeds, "--allow-unsupported"]);
+        await RunAsync(Environment.ProcessPath!, recompilerArguments, token);
         var report = JsonNode.Parse(File.ReadAllText(Path.Combine(generated, "recompiler-report.json")))!;
         if (report["imageSha256"]!.GetValue<string>() != digest) throw new InvalidDataException("Recompiler image hash does not match the selected client.");
         var unsupported = report["unsupported"]!.AsArray().Count;
@@ -283,10 +459,39 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         await WasmCompiler.BuildAsync(root, generated, build, Setting("emcc"), this, token);
         var record = new JsonObject { ["id"] = buildVersionId, ["build"] = buildLabel,
             ["executable_sha256"] = digest, ["client"] = client, ["executable"] = pinned, ["runtime"] = build,
-            ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["unsupported_sites"] = unsupported };
+            ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["unsupported_sites"] = unsupported,
+            ["runtime_revision"] = NosCore.ClientLab.Recompiler.Program.RuntimeRevision };
         SaveJson(Path.Combine(version, "build.json"), record); SaveJson(Path.Combine(directory, "active.json"), record);
         lock (gate) state["active"] = record;
         Status("ready", "Your build is ready to launch.", 1);
+    }
+
+    private async Task EnsureToolsAsync(CancellationToken token)
+    {
+        if (ToolKeys.All(key => File.Exists(Setting(key)) || Directory.Exists(Setting(key)))) return;
+        var tools = await ToolchainInstaller.InstallAsync(directory, this, token);
+        lock (gate)
+        {
+            foreach (var item in tools)
+            {
+                var previous = Setting(item.Key);
+                if (settings[item.Key]?.GetValue<string>() == previous) settings[item.Key] = item.Value;
+                if (taskSettings.Value is { } snapshot) snapshot[item.Key] = item.Value;
+            }
+            SaveJson(Path.Combine(directory, "settings.json"), settings);
+        }
+    }
+
+    private async Task<bool> CanReuseBuildAsync(string id, CancellationToken token)
+    {
+        JsonNode? active;
+        lock (gate) active = state["active"]?.DeepClone();
+        return active?["id"]?.GetValue<string>() == id &&
+            active["runtime_revision"]?.GetValue<int>() == NosCore.ClientLab.Recompiler.Program.RuntimeRevision &&
+            active["executable"]?.GetValue<string>() is { } executable && File.Exists(executable) &&
+            active["runtime"]?.GetValue<string>() is { } runtime &&
+            new[] { "nostale.js", "nostale.wasm" }.All(file => File.Exists(Path.Combine(runtime, file)) && new FileInfo(Path.Combine(runtime, file)).Length > 0) &&
+            await HashAsync(executable, "sha256", token) == active["executable_sha256"]?.GetValue<string>();
     }
 
     public async Task<string> LaunchAsync()
@@ -300,7 +505,13 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         }
         if (await HashAsync(active["executable"]!.GetValue<string>(), "sha256", default) != active["executable_sha256"]!.GetValue<string>())
             throw new InvalidDataException("The client executable changed. Prepare a matching runtime before playing.");
-        game = await GameHost.StartAsync(root, active, settings);
+        if (Setting("packet_logger") == "true")
+        {
+            var sites = NosCore.ClientLab.Recompiler.PacketHooks.Find(new NosCore.ClientLab.Recompiler.ExecutableImage(active["executable"]!.GetValue<string>()));
+            if (sites.Count != 3) throw new InvalidOperationException("This client does not match all packet logger hooks. Disable packet logging to play, or update its analysis.");
+            Log("DeveloperTools packet hooks: " + string.Join(", ", sites.Select(site => $"{site.Value}@{site.Key:x8}")));
+        }
+        game = await GameHost.StartAsync(root, active, settings, Log, new GameSettingsStore(directory));
         if (launchCode is { Length: > 0 })
         {
             // Signed in natively: hand the game the launch code through the page URL; no browser login needed.
@@ -308,15 +519,22 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             if (launchInstallationId is { Length: > 0 }) GameUrl += "&NC_INSTALLATION_ID=" + Uri.EscapeDataString(launchInstallationId);
         }
         else GameUrl = game.Url + (Setting("provider") == "gameforge" ? "?login=gameforge" : "");
+        if (Setting("packet_logger") == "true") GameUrl += (GameUrl.Contains('?') ? "&" : "?") + "PORT_PACKET_LOG=1";
         lock (gate) state["running"] = true;
         return GameUrl;
     }
 
-    public GameforgeSignIn CreateSignIn() => new(settings);
+    public string GameforgeInstallationId { get { using var auth = new GameforgeAuthentication(settings); return auth.InstallationId; } }
+    public GameforgeSignIn CreateSignIn(IGameforgeIdentity? identity = null) => new(settings, identity);
+    public GameforgeBrowserIdentity CreateBrowserIdentity() => new(GameforgeInstallationId, directory, Setting("identity_file"));
 
     public void UseLaunchCode(string code, string? installationId)
     {
-        lock (gate) { launchCode = code; launchInstallationId = installationId; }
+        lock (gate)
+        {
+            launchCode = Setting("provider") == "gameforge" ? GameforgeAuthentication.ClientTicket(code) : code;
+            launchInstallationId = installationId;
+        }
     }
 
     public void ClearLaunchCode() { lock (gate) { launchCode = null; launchInstallationId = null; } }

@@ -7,7 +7,7 @@ using System.Text.Json.Nodes;
 
 namespace NosCore.ClientLab.Launcher.Services;
 
-public sealed class GameforgeIdentity
+public sealed class GameforgeIdentity : IGameforgeIdentity
 {
     private readonly JsonArray fields;
     private static readonly JsonSerializerOptions JsonOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };

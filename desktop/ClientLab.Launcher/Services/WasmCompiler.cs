@@ -1,3 +1,8 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
+
 namespace NosCore.ClientLab.Launcher.Services;
 
 internal static class WasmCompiler
@@ -5,21 +10,68 @@ internal static class WasmCompiler
     public static async Task BuildAsync(string root, string generated, string output, string compiler, LauncherCoordinator app, CancellationToken token)
     {
         var runtime = Path.Combine(root, "recomp/runtime"); var port = Path.Combine(root, "recomp/port");
-        var sources = Directory.GetFiles(generated, "*.c").Concat([Path.Combine(runtime, "rt.c")]).Concat(Directory.GetFiles(port, "*.c")).Order().ToArray();
-        var objects = Path.Combine(Path.GetDirectoryName(output)!, "obj"); Directory.CreateDirectory(objects); Directory.CreateDirectory(output);
-        var dependencies = Directory.GetFiles(port).Concat(Directory.GetFiles(runtime)).Where(path => Path.GetExtension(path) is ".h" or ".inc").ToArray();
-        var dependencyTime = dependencies.Max(File.GetLastWriteTimeUtc);
-        var completed = 0;
-        await Parallel.ForEachAsync(sources, new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount - 1, 1, 4), CancellationToken = token }, async (source, cancellation) =>
+        var sources = Directory.GetFiles(generated, "*.c").Concat([Path.Combine(runtime, "rt.c")]).Concat(Directory.GetFiles(port, "*.c"))
+            .OrderByDescending(path => new FileInfo(path).Length).ThenBy(path => path, StringComparer.Ordinal).ToArray();
+        Directory.CreateDirectory(output);
+        static string[] Headers(string directory) => Directory.GetFiles(directory).Where(path => Path.GetExtension(path) is ".h" or ".inc").ToArray();
+        string[] runtimeHeaders = Headers(runtime), portHeaders = Headers(port);
+        string[] compileFlags = ["-O2", "-w", "-c", "-sSUPPORT_LONGJMP=0"];
+        async Task<string> IdentityAsync(IEnumerable<string> dependencies)
         {
-            var obj = Path.Combine(objects, Path.GetFileNameWithoutExtension(source) + ".o");
-            if (!File.Exists(obj) || File.GetLastWriteTimeUtc(obj) < File.GetLastWriteTimeUtc(source) || File.GetLastWriteTimeUtc(obj) < dependencyTime)
-                await app.RunAsync(compiler, ["-O2", "-w", "-c", "-sSUPPORT_LONGJMP=0", "-I", runtime, "-I", port, source, "-o", obj], cancellation);
-            var done = Interlocked.Increment(ref completed); app.Progress(done / (double)sources.Length);
+            using var fingerprint = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            fingerprint.AppendData(Encoding.UTF8.GetBytes("wasm-objects-v1\0" + string.Join(' ', compileFlags) + "\0" + Path.GetFullPath(compiler) + "\0" +
+                System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier + "\0" + Environment.GetEnvironmentVariable("EMCC_CFLAGS")));
+            foreach (var dependency in dependencies.Order(StringComparer.Ordinal).Prepend(compiler))
+            {
+                fingerprint.AppendData(Encoding.UTF8.GetBytes(Path.GetFileName(dependency) + "\0"));
+                await using var input = File.OpenRead(dependency);
+                fingerprint.AppendData(await SHA256.HashDataAsync(input, token));
+            }
+            return Convert.ToHexStringLower(fingerprint.GetHashAndReset());
+        }
+        // Generated code includes only rt.h, so its objects (nearly all of the compile time) survive changes to the
+        // portable host's headers, such as the renderer; host objects depend on both sets of headers.
+        var cacheRoot = Path.Combine(app.DataDirectory, "cache", "wasm-objects");
+        var gameCache = new CompilationCache(cacheRoot, await IdentityAsync(runtimeHeaders));
+        var hostCache = new CompilationCache(cacheRoot, await IdentityAsync(portHeaders.Concat(runtimeHeaders)));
+        var generatedRoot = Path.GetFullPath(generated) + Path.DirectorySeparatorChar;
+        var memory = GC.GetGCMemoryInfo();
+        var budget = Math.Max(0, memory.TotalAvailableMemoryBytes - memory.MemoryLoadBytes);
+        var workers = Math.Clamp(Math.Min(Environment.ProcessorCount - 2, (int)(budget / (3L * 1024 * 1024 * 1024))), 1, 8);
+        var objects = new ConcurrentDictionary<string, string>();
+        var completed = 0; var reused = 0;
+        var elapsed = Stopwatch.StartNew();
+        using var heartbeat = new CancellationTokenSource();
+        var progress = Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(heartbeat.Token))
+                    app.Status("compiling", $"Preparing game: {Volatile.Read(ref completed)}/{sources.Length} files · {(int)elapsed.Elapsed.TotalMinutes}:{elapsed.Elapsed.Seconds:00}", .9 * Volatile.Read(ref completed) / sources.Length);
+            }
+            catch (OperationCanceledException) { }
         });
-        app.Status("compiling", "Linking the embedded game runtime…");
+        app.Log($"Compiling {sources.Length} files with {workers} workers; completed objects are cached across build attempts.");
+        try
+        {
+            await Parallel.ForEachAsync(sources, new ParallelOptions { MaxDegreeOfParallelism = workers, CancellationToken = token }, async (source, cancellation) =>
+            {
+                var watch = Stopwatch.StartNew();
+                var cache = Path.GetFullPath(source).StartsWith(generatedRoot, StringComparison.OrdinalIgnoreCase) ? gameCache : hostCache;
+                var result = await cache.GetOrCompileAsync(source, (obj, ct) => app.RunAsync(compiler,
+                    compileFlags.Concat(["-I", runtime, "-I", port, source, "-o", obj]), ct), cancellation);
+                objects[source] = result.Path;
+                if (result.Reused) Interlocked.Increment(ref reused);
+                app.Log($"{(result.Reused ? "Reused" : "Compiled")} {Path.GetFileName(source)} ({watch.Elapsed.TotalSeconds:F1}s)");
+                Interlocked.Increment(ref completed);
+            });
+        }
+        finally { heartbeat.Cancel(); await progress; }
+        app.Log($"Reused {reused} cached files; compiled {sources.Length - reused} files in {elapsed.Elapsed.TotalSeconds:F0}s.");
+        app.Status("compiling", "Finishing game preparation…", .9);
         string[] flags = ["-O2", "-sGLOBAL_BASE=536870912", "-sINITIAL_MEMORY=1024MB", "-sALLOW_MEMORY_GROWTH=1", "-sMAXIMUM_MEMORY=2048MB", "-sSTACK_SIZE=64MB", "-sEXIT_RUNTIME=1", "-sSUPPORT_LONGJMP=0", "-sENVIRONMENT=worker", "-sFORCE_FILESYSTEM=1", "-sINVOKE_RUN=0", "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV"];
-        var arguments = flags.Concat(sources.Select(source => Path.Combine(objects, Path.GetFileNameWithoutExtension(source) + ".o"))).Concat(["-o", Path.Combine(output, "nostale.js")]);
+        var arguments = flags.Concat(sources.Order(StringComparer.Ordinal).Select(source => objects[source])).Concat(["-o", Path.Combine(output, "nostale.js")]);
         var responseFile = Path.Combine(Path.GetDirectoryName(output)!, "link.rsp");
         await File.WriteAllLinesAsync(responseFile, arguments.Select(value => "\"" + value.Replace('\\', '/').Replace("\"", "\\\"") + "\""), token);
         await app.RunAsync(compiler, ["@" + responseFile], token);

@@ -29,7 +29,7 @@ public sealed class FunctionDiscovery(ExecutableImage image)
 
     public static Func<uint, bool> Coverage(IEnumerable<FunctionDefinition> functions)
     {
-        var ranges = functions.SelectMany(f => f.Ranges).OrderBy(r => r.Start).ThenBy(r => r.End).ToArray();
+        var ranges = ToRanges(functions.SelectMany(f => f.Ranges).Select(r => new KeyValuePair<uint, uint>(r.Start, r.End))).ToArray();
         return address =>
         {
             var lo = 0; var hi = ranges.Length;
@@ -129,7 +129,12 @@ public sealed class FunctionDiscovery(ExecutableImage image)
                 (operand.Register == Register.EAX || operand.Kind == OperandKind.Memory && operand.Base == Register.ESP && operand.Displacement == 4)) return true;
             if (first.Mnemonic == "push" && first.Operands[0].Register == Register.EBP && second.Mnemonic == "mov" && second.Operands is [{ Register: Register.EBP }, { Register: Register.ESP }]) return true;
             if (first.Mnemonic == "push" && first.Operands[0].Register is Register.EBX or Register.ESI or Register.EDI && second.Mnemonic is "push" or "mov" or "add" or "sub" or "xor") return true;
-            if ((IsSane(first.Mnemonic) || first.Mnemonic.StartsWith('f')) && first.Text.Contains("a", StringComparison.Ordinal))
+            // Delphi leaf methods can start with operations on argument registers, including
+            // memory operands based on them. Inspect operands rather than letters in the mnemonic.
+            static bool ArgumentRegister(Register register) => register is Register.EAX or Register.EDX or Register.ECX or Register.AL or Register.AX;
+            if ((IsSane(first.Mnemonic) || first.Mnemonic.StartsWith('f')) &&
+                first.Operands.Any(operand => operand.Kind == OperandKind.Register && ArgumentRegister(operand.Register) ||
+                    operand.Kind == OperandKind.Memory && (ArgumentRegister(operand.Base) || ArgumentRegister(operand.Index))))
             {
                 var address = target;
                 for (var count = 0; count < 24; count++)
@@ -159,6 +164,14 @@ public sealed class FunctionDiscovery(ExecutableImage image)
         foreach (var target in image.RelocationTargets.Order())
         {
             if (stored.Contains(target) || covered(target) || !Shape(target)) continue;
+            // Delphi unit initialization/finalization callbacks may be long straight-line
+            // routines. Their guard skips directly to RET when the unit counter is settled;
+            // requiring a terminal within the first 24 sequential instructions loses them.
+            var first = image.Decode(target);
+            var guard = first is null ? null : image.Decode(first.Next);
+            if (first is { Mnemonic: "sub", Operands: [{ Kind: OperandKind.Memory, Base: Register.None, Index: Register.None }, { Kind: OperandKind.Immediate, Immediate: 1 }] } &&
+                guard is { Mnemonic: "jae", DirectTarget: { } exit } && image.Decode(exit)?.Mnemonic == "ret")
+            { result.Add(target); continue; }
             var address = target;
             for (var count = 0; count < 24; count++)
             {

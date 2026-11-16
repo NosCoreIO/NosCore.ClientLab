@@ -244,7 +244,6 @@ static void u_GetMonitorInfoA(CPU* c) {
     RET(1);
 }
 static void g_GetCurrentPositionEx(CPU* c) { if (ARG(1)) { M32(ARG(1)) = 0; M32(ARG(1) + 4) = 0; } RET(1); }
-static void g_GetBitmapBits(CPU* c) { if (ARG(2)) memset(GPTR(ARG(2)), 0, ARG(1)); RET(ARG(1)); }
 static uint32_t gdi_misc_next = 0x00280000u;
 static void g_NewHandle(CPU* c) { RET(gdi_misc_next += 4); }
 static void w_timeGetDevCaps(CPU* c) { if (ARG(0)) { M32(ARG(0)) = 1; M32(ARG(0) + 4) = 1000000; } RET(0); }
@@ -259,16 +258,25 @@ static void s_one(CPU* c) { RET(1); }
 static void s_GetAuthSessionTicket(CPU* c) {
     const char* code = getenv("_NC_AUTH_CODE");
     uint32_t buf = ARG(0), size = ARG(1), psize = ARG(2);
-    if (!code || !*code || !buf) {
+    if (!code || !*code || !buf || !size) {
         port_log("auth ticket requested but none is available");
         if (psize) M32(psize) = 0;
         RET(0);
         return;
     }
     uint32_t n = (uint32_t)strlen(code);
-    if (n > size) n = size;
+    if (n >= size) {
+        port_log("auth ticket buffer is too small");
+        if (psize) M32(psize) = 0;
+        RET(0);
+        return;
+    }
     port_log("auth ticket handed to the client (%u chars)", n);
     memcpy(GPTR(buf), code, n);
+    // This wrapper is consumed as text by the client. Its buffer may contain
+    // old bytes beyond the ticket; terminate it rather than append garbage to
+    // the NoS0577 token (the length out-parameter still excludes the NUL).
+    M8(buf + n) = 0;
     if (psize) M32(psize) = n;
     RET(1);
 }
@@ -677,7 +685,6 @@ static const Hle misc[] = {
     {"user32.dll", "MonitorFromRect", 2, u_MonitorFrom},
     {"user32.dll", "GetMonitorInfoA", 2, u_GetMonitorInfoA},
     {"gdi32.dll", "GetCurrentPositionEx", 2, g_GetCurrentPositionEx},
-    {"gdi32.dll", "GetBitmapBits", 3, g_GetBitmapBits},
     {"gdi32.dll", "CreatePenIndirect", 1, g_NewHandle},
     {"gdi32.dll", "CreateHalftonePalette", 1, g_NewHandle},
     {"winmm.dll", "timeGetDevCaps", 2, w_timeGetDevCaps},
