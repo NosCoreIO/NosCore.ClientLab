@@ -382,10 +382,7 @@ static void present_frame(void) {
     }
     r_prof_frame();
     if (++frames % 300 == 1) port_log("Present frame %u", frames);
-    if (!r_gl_present()) {
-        web_present(backbuffer);
-        web_frame_wait();
-    }
+    if (!r_gl_present()) web_present(backbuffer);
     if (shot_dir && (frames == 1 || frames % 600 == 0)) {
         char path[400];
         snprintf(path, sizeof path, "%s/frame_%06u.bmp", shot_dir, frames);
@@ -662,6 +659,7 @@ static void b_Lock(CPU* c) {
 static void b_Unlock(CPU* c) {
     if (!M32(THIS + 64)) { RET(D3DERR_INVALIDCALL); return; }
     M32(THIS + 64)--;
+    M32(THIS + 56) = 0;   /* contents may have changed: the GPU copy (render_gl.inc) is refreshed at the next draw */
     RET(0);
 }
 static void b_GetDesc(CPU* c) { memset(GPTR(ARG(1)), 0, 24); M32(ARG(1)) = M32(THIS + 20); M32(ARG(1) + 20) = M32(THIS + 36); RET(0); }

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NosTale Recomp</title>
+<script>if(new URLSearchParams(location.search).get('desktop')==='1'){document.documentElement.classList.add('desktop');document.title='NosTale';}</script>
 <style>
   :root { --bg: #101014; --fg: #d8d8e0; --muted: #8a8a96; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
@@ -53,6 +54,14 @@
   .menu li .mark { position: absolute; left: 8px; }
   .menu li .acc { margin-left: auto; }
   .menu li.sub::after { content: '\25B8'; position: absolute; right: 8px; }
+  html.desktop, html.desktop body { width:100%;height:100%;overflow:hidden;background:#000; }
+  .desktop #game { position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:0;gap:0; }
+  .desktop #open-gameforge-login, .desktop #status, .desktop #log { display:none; }
+  .desktop #stage { flex:none;max-width:none; }
+  .desktop canvas { display:block;width:100%;height:100%;max-width:none; }
+  #startup-error { display:none;position:fixed;inset:0;z-index:30;place-items:center;background:#10191eeF;color:#edf5f0;padding:32px;box-sizing:border-box;text-align:center; }
+  .desktop.failed #startup-error { display:grid; }
+  #startup-error p { color:#b1c2bd;max-width:420px; }
 </style>
 </head>
 <body>
@@ -89,19 +98,42 @@
   <div id="status">starting…</div>
   <div id="log"></div>
 </main>
-<script src="https://gameforge.com/tra/game1.js"></script>
+<section id="startup-error"><div><h1>NosTale could not start</h1><p>Close this window and open Activity in ClientLab for the error details.</p></div></section>
+<script>if(!document.documentElement.classList.contains('desktop'))document.write('<script src="https://gameforge.com/tra/game1.js"></'+'script>');</script>
 <script>
   const canvas = document.getElementById('screen');
-  // The worker draws straight into this canvas when the browser can hand it over (it yields once per frame for that).
-  // Otherwise the software renderer sends each frame's pixels, and WebGL writes them into one of four shared slots and
-  // sends its index.
-  let ctx = null, slots = null, owner = null, image = null;
-  // The game's screen size: a canvas handed to the worker no longer reports its own.
-  let screenW = canvas.width, screenH = canvas.height;
+  const desktop = new URLSearchParams(location.search).get('desktop') === '1';
+  if (desktop) {
+    document.documentElement.classList.add('desktop');
+    document.title = 'NosTale';
+    // Whole device pixels per game pixel whenever the window allows it, at a device-pixel-aligned position, so small
+    // text (HP/MP, chat) stays sharp; a smooth downscale only when the game is larger than the window.
+    const fit = () => {
+      const dpr = devicePixelRatio || 1;
+      const room = Math.min(innerWidth * dpr / canvas.width, innerHeight * dpr / canvas.height);
+      const scale = room >= 1 ? Math.floor(room) : room;
+      const width = Math.floor(canvas.width * scale), height = Math.floor(canvas.height * scale);
+      const stage = document.getElementById('stage');
+      stage.style.position = 'absolute';
+      stage.style.width = `${width / dpr}px`;
+      stage.style.height = `${height / dpr}px`;
+      stage.style.left = `${Math.max(0, Math.floor((innerWidth * dpr - width) / 2)) / dpr}px`;
+      stage.style.top = `${Math.max(0, Math.floor((innerHeight * dpr - height) / 2)) / dpr}px`;
+      canvas.style.imageRendering = scale >= 2 ? 'pixelated' : 'auto';
+    };
+    addEventListener('resize', fit);
+    new MutationObserver(fit).observe(canvas, { attributes:true, attributeFilter:['width','height'] });
+    fit();
+  }
+  // The software renderer sends pixels (2D context); WebGL sends bitmaps, which a bitmaprenderer takes without a copy.
+  let ctx = null, bitmaps = null;
   const status = document.getElementById('status');
   const log = document.getElementById('log');
-  let worker = null;
+  let worker = null, renderer = null, packetSends = Promise.resolve();
   let frames = 0, last = performance.now();
+  let startupFailed = false;
+  // Read by the desktop game window for its title (frames shown per second) and to size itself to the game.
+  function publishStats(now, w, h) { window.gameStats = { fps: Math.round(frames * 1000 / (now - last)), w, h }; }
   // Appending to textContent per line is quadratic; lines are batched per frame and the pane keeps the last 1000.
   const LOG_LINES = 1000;
   let lines = [], pending = [], flushQueued = false;
@@ -121,48 +153,42 @@
   const queued = [];
   let shownCount = null;
   function showFrame() {
-    const f = window.frameStats, slot = queued.shift();
+    const f = window.frameStats, bmp = queued.shift();
     f.refreshes++;
-    // A slot the worker is writing is skipped: it posts that slot again once the newer frame is in it.
-    if (slot !== undefined && Atomics.compareExchange(owner, slot, 0, 1) === 0) {
-      if (canvas.width !== image.width || canvas.height !== image.height) { canvas.width = screenW = image.width; canvas.height = screenH = image.height; }
-      ctx = ctx || canvas.getContext('2d');
-      image.data.set(slots[slot]);
-      Atomics.store(owner, slot, 0);
-      ctx.putImageData(image, 0, 0);
+    if (bmp) {
+      if (canvas.width !== bmp.width || canvas.height !== bmp.height) { canvas.width = bmp.width; canvas.height = bmp.height; }
+      bitmaps = bitmaps || canvas.getContext('bitmaprenderer');
+      bitmaps.transferFromImageBitmap(bmp);
       f.shown++;
       frames++;
       Atomics.add(shownCount, 0, 1);
       Atomics.notify(shownCount, 0);
       const now = performance.now();
-      if (now - last > 1000) { status.textContent = `${canvas.width}x${canvas.height}, ${frames} frames/s shown (WebGL)`; frames = 0; last = now; }
+      if (now - last > 1000) { publishStats(now, canvas.width, canvas.height); status.textContent = `${canvas.width}x${canvas.height}, ${frames} frames/s shown (WebGL)`; frames = 0; last = now; }
     } else if (f.shown) f.repeated++;
     requestAnimationFrame(showFrame);
   }
   function handleWorkerMessage(e) {
     const m = e.data;
     if (m.type === 'frame') {
-      if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = screenW = m.w; canvas.height = screenH = m.h; }
+      if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = m.w; canvas.height = m.h; }
       ctx = ctx || canvas.getContext('2d');
       ctx.putImageData(new ImageData(new Uint8ClampedArray(m.data.buffer), m.w, m.h), 0, 0);
       frames++;
       const now = performance.now();
-      if (now - last > 1000) { status.textContent = `${m.w}x${m.h}, ${frames} frames/s shown`; frames = 0; last = now; }
-    } else if (m.type === 'shown') {
-      screenW = m.w; screenH = m.h;
-      // Uncapped, the worker presents faster than the display refreshes, so those frames are counted apart.
-      if (m.uncapped) window.frameStats.presented = (window.frameStats.presented || 0) + m.frames;
-      else window.frameStats.shown += m.frames;
-      status.textContent = `${m.w}x${m.h}, ${m.frames} frames/s ${m.uncapped ? 'presented' : 'shown'} (WebGL, direct)`;
-    } else if (m.type === 'slots') {
-      slots = m.slots.map((b) => new Uint8Array(b));
-      owner = m.owner;
-      image = new ImageData(m.w, m.h);
-      queued.length = 0;
-    } else if (m.type === 'pixels') {
-      queued.push(m.slot);
-      while (queued.length > 2) { queued.shift(); window.frameStats.overwritten++; }
+      if (now - last > 1000) { publishStats(now, m.w, m.h); status.textContent = `${m.w}x${m.h}, ${frames} frames/s shown`; frames = 0; last = now; }
+    } else if (m.type === 'bitmap') {
+      queued.push(m.bmp);
+      while (queued.length > 2) { queued.shift().close(); window.frameStats.overwritten++; }
     } else if (m.type === 'log') {
+        if (desktop && (/FATAL:|Worker failed:|exited: (?:RuntimeError|Error|TypeError)/.test(m.text) || startupFailed)) {
+        startupFailed = true;
+        document.documentElement.classList.add('failed');
+        fetch('/game/log', { method:'POST', headers:{'Content-Type':'text/plain'}, body:String(m.text).slice(0,8192) }).catch(() => {});
+      } else if (desktop && m.text.startsWith('profile:')) {
+        // Periodic frame-time breakdown, so a frame-rate drop in game can be diagnosed from the launcher's Activity.
+        fetch('/game/log', { method:'POST', headers:{'Content-Type':'text/plain'}, body:m.text.slice(0,8192) }).catch(() => {});
+      }
       pending.push(m.text);
       window.allLog.push(m.text);
       if (!flushQueued) { flushQueued = true; requestAnimationFrame(flushLog); }
@@ -192,6 +218,8 @@
       navigator.clipboard?.writeText(m.text).catch(() => { });
     } else if (m.type === 'open-url') {
       window.open(m.url, '_blank', 'noopener');
+    } else if (m.type === 'packet') {
+      packetSends = packetSends.then(() => fetch('/packets', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(m)})).then(response=>{if(!response.ok)throw Error('Packet log write failed: '+response.status);}).catch(error=>console.error(error.message));
     } else if (m.type === 'sound') {
       sound(m);
     } else if (m.type === 'splash') {
@@ -214,6 +242,14 @@
     if (installationId) params.set('NC_INSTALLATION_ID', installationId);
     worker = new Worker('/worker.js' + (params.size ? `?${params}` : ''));
     worker.onmessage = handleWorkerMessage;
+    // WebGL runs on its own thread (gl.js): the game worker posts it each frame's commands over this channel, and it
+    // posts the finished frames here like the game worker used to.
+    if (renderer) renderer.terminate();
+    renderer = new Worker('/gl.js');
+    renderer.onmessage = handleWorkerMessage;
+    const channel = new MessageChannel();
+    renderer.postMessage({ type: 'port', port: channel.port2 }, [channel.port2]);
+    worker.postMessage({ type: 'renderer', port: channel.port1 }, [channel.port1]);
     worker.onerror = (event) => {
       status.textContent = 'Game startup failed. See the log below.';
       handleWorkerMessage({ data: { type: 'log', text: `Worker failed: ${event.message || 'unable to load the game build'}` } });
@@ -234,7 +270,7 @@
     (async () => {
       while (conn.open) {
         let r;
-        try { r = await fetch(`/net/recv?id=${id}&wait=1`); } catch { await sleep(100); continue; }
+        try { r = await fetch(`/net/recv?id=${id}&wait=1`, { method: 'POST' }); } catch { await sleep(100); continue; }
         if (r.status === 410 || r.status === 404) break;
         const bytes = new Uint8Array(await r.arrayBuffer());
         for (let off = 0; off < bytes.length;) {
@@ -392,7 +428,7 @@
   }
   function popupMenu(d, done) {
     if (autoDismiss) { window.allLog.push('popup menu dismissed'); done(0); return; }
-    const scale = stage.getBoundingClientRect().width / screenW;
+    const scale = stage.getBoundingClientRect().width / canvas.width;
     const open = [];
     const close = (v) => { for (const ul of open) ul.remove(); document.removeEventListener('mousedown', outside, true); done(v); };
     const outside = (e) => { if (!open.some((ul) => ul.contains(e.target))) close(0); };
@@ -455,7 +491,7 @@
   }
   function pos(e) {
     const r = canvas.getBoundingClientRect();
-    return [Math.round((e.clientX - r.left) * screenW / r.width), Math.round((e.clientY - r.top) * screenH / r.height)];
+    return [Math.round((e.clientX - r.left) * canvas.width / r.width), Math.round((e.clientY - r.top) * canvas.height / r.height)];
   }
   canvas.addEventListener('mousemove', (e) => send(IN.move, 0, ...pos(e), e.timeStamp));
   canvas.addEventListener('mousedown', (e) => { canvas.focus(); send(IN.down, e.button, ...pos(e), e.timeStamp); e.preventDefault(); });

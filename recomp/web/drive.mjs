@@ -44,7 +44,8 @@ let page, profiler;
 const attachWorker = async () => {
   const cdp = await browser.newBrowserCDPSession();
   const { targetInfos } = await cdp.send('Target.getTargets');
-  const worker = targetInfos.find((t) => t.type === 'worker');
+  // --profile-worker gl.js samples the renderer thread instead of the game.
+  const worker = targetInfos.find((t) => t.type === 'worker' && t.url.includes(arg('--profile-worker', 'worker.js')));
   const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: worker.targetId, flatten: false });
   const waiting = new Map();
   let next = 1;

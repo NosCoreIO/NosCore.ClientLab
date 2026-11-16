@@ -45,7 +45,10 @@ public sealed partial class CEmitter
         }
         if (m is "fcom" or "fcomp" or "fcompp" or "fucom" or "fucomp" or "fucompp" or "ficom" or "ficomp" or "ftst")
         {
-            var source = m == "ftst" ? "0.0" : ops.Length == 0 ? "ST(1)" : ops[0].Kind == OperandKind.Memory ? Value(ops[0]) : $"ST({St(ops[0])})";
+            // Iced exposes the implicit ST(0) as the first operand for register
+            // comparisons. Capstone (used by the original lifter) exposes only ST(i).
+            // Comparing with ops[0] therefore compared ST(0) with itself forever.
+            var source = m == "ftst" ? "0.0" : ops.Length == 0 ? "ST(1)" : ops[^1].Kind == OperandKind.Memory ? Value(ops[^1]) : $"ST({St(ops[^1])})";
             E($"rt_fcom(c, ST(0), {source});");
             if (m.EndsWith("pp")) E("FPOP(); FPOP();"); else if (m.EndsWith('p')) E("FPOP();"); return;
         }

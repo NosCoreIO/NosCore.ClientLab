@@ -216,7 +216,7 @@ class Launcher:
         if imported and imported.is_file() and imported.stat().st_size == entry["size"] and file_hash(imported, "sha1") == entry["sha1"]:
             shutil.copyfile(imported, temporary)
         else:
-            url = "https://patches.gameforge.com" + entry["path"]
+            url = "http://patches.gameforge.com" + entry["path"]  # the CDN certificate does not cover this host; SHA-1 checked below
             request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(request, timeout=90) as response, temporary.open("wb") as output:
                 for chunk in iter(lambda: response.read(1024 * 1024), b""):
@@ -334,7 +334,8 @@ class Launcher:
                 self.game_server = None
                 raise RuntimeError("The game server could not start. Check the installation identity and game.log.")
             try:
-                with urllib.request.urlopen(base + "build/nostale.js", timeout=1) as response:
+                probe = urllib.request.Request(base + "build/nostale.js", headers={"Sec-Fetch-Site": "none"})
+                with urllib.request.urlopen(probe, timeout=1) as response:
                     if response.status == 200:
                         break
             except OSError:

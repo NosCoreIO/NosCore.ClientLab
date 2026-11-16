@@ -7,7 +7,6 @@ import argparse
 import base64
 import hashlib
 import http.server
-import itertools
 import json
 import mimetypes
 import os
@@ -44,9 +43,9 @@ class Relay:
 
     IDLE_SECONDS = 20
 
-    def __init__(self, remap):
+    def __init__(self, remap, host=None):
         self.remap = remap
-        self.ids = itertools.count(1)
+        self.host = host
         self.conns = {}
         self.lock = threading.Lock()
         threading.Thread(target=self._reaper, daemon=True).start()
@@ -64,13 +63,18 @@ class Relay:
 
     def connect(self, host, port):
         port = self.remap.get(port, port)
-        s = socket.create_connection((host, port), timeout=5)
+        s = socket.create_connection((self.host or host, port), timeout=5)
         s.settimeout(None)
-        cid = next(self.ids)
+        # Unguessable handles: a page cannot enumerate IDs to read or hijack another page's connection.
+        # The worker stores this in an EM_JS signed int. Keep the handle positive
+        # and exactly representable through JS and WebAssembly, like the original relay.
+        cid = secrets.randbelow(0x7FFFFFFF) + 1
         lock = threading.Lock()
         conn = {"sock": s, "buf": bytearray(), "closed": False, "lock": lock, "ready": threading.Condition(lock),
                 "seen": time.monotonic()}
         with self.lock:
+            while cid in self.conns:
+                cid = secrets.randbelow(0x7FFFFFFF) + 1
             self.conns[cid] = conn
         threading.Thread(target=self._reader, args=(conn,), daemon=True).start()
         return cid
@@ -363,7 +367,9 @@ def gameforge_thin_code(token, account_id, installation_id, gsid, code_blackbox)
     code = result.get("code")
     if not code:
         raise RuntimeError(f"Gameforge did not return a launch code: {result}")
-    return code
+    # The official NoS0577 token is the UTF-8 code represented as hexadecimal.
+    # Private-server codes from fetch_auth_code keep their established raw format.
+    return code.encode("utf-8").hex().upper()
 
 
 def make_handler(game, build, relay, auth, client_exe=None):
@@ -387,8 +393,8 @@ def make_handler(game, build, relay, auth, client_exe=None):
             path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
             if path in ("/", "/index.html"):
                 return os.path.join(HERE, "index.html")
-            if path == "/worker.js":
-                return os.path.join(HERE, "worker.js")
+            if path in ("/worker.js", "/gl.js"):
+                return os.path.join(HERE, path[1:])
             if path.startswith("/build/"):
                 return os.path.join(build, path[len("/build/"):])
             if path.startswith("/game/"):
@@ -453,7 +459,27 @@ def make_handler(game, build, relay, auth, client_exe=None):
                 return self.reply_json(401, {"error": "Gameforge rejected those credentials."})
             return self.reply_json(502, {"error": str(error)})
 
+        def allowed(self):
+            """Answer only our own page. Other browsers on this machine can reach loopback, and the relay would let
+            any site open sockets from here: reject a rebinding Host, a missing or cross-site Sec-Fetch-Site (no-cors
+            <img>/form requests send no Origin), and a foreign Origin."""
+            port = self.server.server_address[1]
+            hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            if self.headers.get("Host", "").lower() not in hosts:
+                return False
+            site = self.headers.get("Sec-Fetch-Site")
+            # A launcher on another loopback port opens the page with a same-site top-level navigation, which cannot read
+            # the response.
+            page_navigation = (site == "same-site" and self.command == "GET" and urllib.parse.urlparse(self.path).path == "/"
+                               and self.headers.get("Sec-Fetch-Mode") == "navigate" and self.headers.get("Sec-Fetch-Dest") == "document")
+            if site not in ("same-origin", "none") and not page_navigation:
+                return False
+            origin = self.headers.get("Origin")
+            return origin is None or origin in {f"http://{host}" for host in hosts}
+
         def net(self, url):
+            if self.command != "POST":
+                return self.reply(405)
             q = urllib.parse.parse_qs(url.query)
             op = url.path[len("/net/"):]
             try:
@@ -474,7 +500,16 @@ def make_handler(game, build, relay, auth, client_exe=None):
             self.reply(404)
 
         def serve(self, head):
+            if not self.allowed():
+                return self.reply(403)
             url = urllib.parse.urlparse(self.path)
+            if url.path == "/game/log":
+                # The desktop page forwards startup failures and periodic frame-time lines, as it does to the launcher.
+                length = int(self.headers.get("Content-Length", 0))
+                if self.command != "POST" or not 0 <= length <= 16384:
+                    return self.reply(400)
+                print("game:", self.rfile.read(length).decode("utf-8", "replace")[:8192], flush=True)
+                return self.reply(204)
             if url.path.startswith("/net/"):
                 return self.net(url)
             if url.path in ("/auth/login", "/auth/challenge", "/auth/launch", "/auth/launch-code"):
@@ -655,6 +690,7 @@ def main():
                     help="Gameforge launcher User-Agent")
     ap.add_argument("--remap", action="append", default=[], metavar="FROM=TO",
                     help="relay the client's connections to port FROM to port TO instead")
+    ap.add_argument("--host", help="relay every client connection to this host, e.g. 127.0.0.1 for a local NosCore")
     a = ap.parse_args()
     a.auth_provider = a.auth_provider or ("noscore" if a.user else "gameforge")
     a.gf_installation_id = a.gf_installation_id or windows_gameforge_installation_id()
@@ -685,7 +721,7 @@ def main():
         ap.error(f"game directory does not exist: {a.game}")
     if not os.path.isfile(os.path.join(a.build, "nostale.js")):
         ap.error(f"browser build not found in {a.build}; build with compile_all.py --web")
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(a.game, a.build, Relay(remap), auth, a.client_exe))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(a.game, a.build, Relay(remap, a.host), auth, a.client_exe))
     print(f"http://127.0.0.1:{a.port}/  (game: {a.game})")
     server.serve_forever()
 

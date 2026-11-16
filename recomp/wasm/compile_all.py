@@ -78,7 +78,7 @@ def main():
         out = os.path.join(web_dir, "nostale.js")
         web = [f for f in LINK if not f.startswith("-sNODERAWFS")] + [
             "-sENVIRONMENT=worker", "-sFORCE_FILESYSTEM=1", "-sINVOKE_RUN=0",
-            "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV", "-sJSPI"]
+            "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ENV"]
         # Keeps function names in the wasm for CPU profiles (drive.mjs --cpuprofile); the code is unchanged.
         if a.profiling:
             web.append("--profiling-funcs")

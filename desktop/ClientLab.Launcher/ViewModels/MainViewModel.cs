@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Avalonia.Media.Imaging;
+using Avalonia;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -15,9 +17,42 @@ public partial class MainViewModel : ObservableObject
     private JsonObject state = new();
     private bool polling;
     private bool loadedSettings;
+    private CredentialStore? credentialStore;
     public event Action<string>? GameRequested;
+    public Func<Task<IGameforgeIdentity>>? IdentityRequested { get; set; }
 
     [ObservableProperty] private string currentPage = "library";
+    [ObservableProperty] private Bitmap? artwork;
+    public bool HasArtwork => Artwork is not null;
+    public ObservableCollection<NewsCard> News { get; } = [];
+    public ObservableCollection<NewsPage> NewsPages { get; } = [];
+    public record NewsPage(IReadOnlyList<NewsCard> Items);
+    [ObservableProperty] private int newsPageIndex;
+    public bool CanPageNews => NewsPages.Count > 1;
+    public bool CanPreviousNews => NewsPageIndex > 0;
+    public bool CanNextNews => NewsPageIndex + 1 < NewsPages.Count;
+    public string NewsPageLabel => $"{NewsPageIndex + 1} / {NewsPages.Count}";
+    partial void OnNewsPageIndexChanged(int value)
+    {
+        OnPropertyChanged(nameof(NewsPageLabel));
+        OnPropertyChanged(nameof(CanPreviousNews)); OnPropertyChanged(nameof(CanNextNews));
+        if (value >= 0 && value < NewsPages.Count)
+            foreach (var card in NewsPages[value].Items) _ = LoadNewsImageAsync(card);
+    }
+    [RelayCommand] private void PreviousNews() { if (CanPreviousNews) NewsPageIndex--; }
+    [RelayCommand] private void NextNews() { if (CanNextNews) NewsPageIndex++; }
+    public partial class NewsCard(NewsEntry entry) : ObservableObject
+    {
+        public NewsEntry Entry => entry;
+        public string Title => entry.Title;
+        public string Url => entry.Url;
+        public string Category => entry.Category;
+        public string Date => entry.Date;
+        [ObservableProperty] private Bitmap? image;
+        public bool LoadingImage { get; set; }
+    }
+    public bool HasNews => News.Count > 0;
+    partial void OnArtworkChanged(Bitmap? value) => OnPropertyChanged(nameof(HasArtwork));
     [ObservableProperty] private string message = "Getting things ready…";
     [ObservableProperty] private string notice = "";
     [ObservableProperty] private bool busy = true;
@@ -38,6 +73,55 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string javaPath = "";
     [ObservableProperty] private string emccPath = "";
     [ObservableProperty] private bool useGameforge = true;
+    [ObservableProperty] private bool gameMusic = true;
+    [ObservableProperty] private bool gameSoundEffects = true;
+    [ObservableProperty] private bool gameSpatialSound = true;
+    [ObservableProperty] private bool gameFullScreen;
+    [ObservableProperty] private bool packetLogger;
+    [ObservableProperty] private string gamePreferencesStatus = "Changes are saved automatically for the next game launch.";
+    private bool loadingGameOptions;
+    private Task gameOptionsSave = Task.CompletedTask;
+    private Exception? gameOptionsSaveError;
+    partial void OnGameMusicChanged(bool value) => SaveGamePreferenceChange();
+    partial void OnGameSoundEffectsChanged(bool value) => SaveGamePreferenceChange();
+    partial void OnGameSpatialSoundChanged(bool value) => SaveGamePreferenceChange();
+    partial void OnGameFullScreenChanged(bool value) => SaveGamePreferenceChange();
+
+    private void SaveGamePreferenceChange()
+    {
+        if (loadingGameOptions || !Initialized || Coordinator is null) return;
+        var options = new GameOptions(GameMusic, GameSoundEffects, GameSpatialSound, GameFullScreen);
+        GamePreferencesStatus = "Saving game preferences…";
+        gameOptionsSave = SaveAfterAsync(gameOptionsSave, options);
+    }
+
+    private async Task SaveAfterAsync(Task previous, GameOptions options)
+    {
+        try
+        {
+            await previous;
+            await Coordinator!.SaveGameOptionsAsync(options);
+            gameOptionsSaveError = null;
+            GamePreferencesStatus = "Saved. Applies on the next game launch.";
+        }
+        catch (Exception error)
+        {
+            gameOptionsSaveError = error;
+            GamePreferencesStatus = "Game preferences were not saved: " + error.Message;
+            Notice = GamePreferencesStatus;
+        }
+    }
+
+    public async Task FlushGamePreferencesAsync()
+    {
+        await gameOptionsSave;
+        if (gameOptionsSaveError is not null) throw new IOException("Game preferences could not be saved. Retry the setting before launching.", gameOptionsSaveError);
+    }
+    [ObservableProperty] private string privateAuthUrl = "https://127.0.0.1:7001";
+    [ObservableProperty] private string privateServerHost = "";
+    [ObservableProperty] private string privatePortRemap = "";
+    private string? privatePassword;
+    public string AccountLabel => UseGameforge ? "Email address" : "Account name";
 
     public string Device => OperatingSystem.IsWindows() ? "Windows" : OperatingSystem.IsMacOS() ? "macOS" : "Linux";
     public string DataDirectory => Program.DataDirectory;
@@ -47,12 +131,17 @@ public partial class MainViewModel : ObservableObject
     public bool HasNotice => !string.IsNullOrWhiteSpace(Notice);
     public bool IsIndeterminate => Busy && Progress <= 0;
     public bool CanAct => Initialized && !Busy;
+    public bool CanPrimary => Initialized && !SignInBusy && !SignInVisible && (ShowCredentials || !Busy);
+    public bool ShowCredentials => !SignedIn;
+    public string WelcomeMessage => SignedIn ? "You're all set. Your next adventure is just a click away." : UseGameforge ? "Sign in with Gameforge and pick up where you left off." : "Your NosCore adventure, all in one place. Ready when you are.";
     public bool CanCheck => CanAct && !Running;
+    public bool CanSaveSettings => Initialized;
+    public bool CanSelectMode => Initialized && !Running && !SignInBusy;
     public bool CanPlayCurrent => CanAct && HasBuild;
     private bool UpdateAvailable => state["remote"]?["id"]?.GetValue<string>() is { } remote && remote != state["active"]?["id"]?.GetValue<string>();
     private bool HasGameFolder => !string.IsNullOrWhiteSpace(state["settings"]?["import_dir"]?.GetValue<string>());
-    public string ActionLabel => Running ? "Resume game" : HasBuild && !UpdateAvailable ? "Play NosTale" : !ToolsReady ? "Set up build tools" : HasGameFolder ? "Build & play" : state["remote"] is null ? "Check for updates" : "Update & prepare";
-    public string StatusLabel => Busy ? Stage : Running ? "Game is running" : HasBuild ? "Ready to play" : "Let's get you set up";
+    public string ActionLabel => SignInBusy ? "Signing in…" : ShowCredentials ? "Sign in  →" : Busy ? "Updating game…" : Running ? "Resume game  →" : HasBuild ? "Play NosTale  →" : "Retry game update  →";
+    public string StatusLabel => Busy ? Stage : Running ? "Game is running" : HasBuild ? "Ready to play" : "Ready for your adventure";
 
     partial void OnCurrentPageChanged(string value)
     {
@@ -68,7 +157,7 @@ public partial class MainViewModel : ObservableObject
 
     private void NotifyActions()
     {
-        foreach (var name in new[] { nameof(CanAct), nameof(CanCheck), nameof(CanPlayCurrent), nameof(ActionLabel), nameof(StatusLabel), nameof(IsIndeterminate) })
+        foreach (var name in new[] { nameof(CanAct), nameof(CanPrimary), nameof(CanCheck), nameof(CanSaveSettings), nameof(CanSelectMode), nameof(CanPlayCurrent), nameof(ActionLabel), nameof(StatusLabel), nameof(IsIndeterminate), nameof(ShowCredentials), nameof(WelcomeMessage) })
             OnPropertyChanged(name);
     }
 
@@ -76,13 +165,70 @@ public partial class MainViewModel : ObservableObject
     {
         try
         {
+            _ = LoadArtworkAsync();
+            _ = LoadNewsAsync();
             Message = "Preparing your workspace…";
             var root = await Task.Run(SourceAssets.Resolve);
             Coordinator = new LauncherCoordinator(root, Program.DataDirectory);
+            try { await LoadGameOptionsAsync(); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            { Notice = "Game preferences could not be loaded: " + error.Message; }
+            UseGameforge = Coordinator.Snapshot()["settings"]!["provider"]!.GetValue<string>() == "gameforge";
+            credentialStore = new CredentialStore(UseGameforge ? Program.DataDirectory : Path.Combine(Program.DataDirectory, "private-server"));
+            try
+            {
+                var saved = await Task.Run(() => credentialStore.ReadAsync());
+                if (saved is not null) { SignInEmail = saved.Email; SignInPassword = saved.Password; }
+            }
+            catch (Exception) { Notice = "Your saved account could not be loaded. You can still sign in."; }
             Initialized = true;
+            Coordinator.Start("startup");
             await RefreshAsync();
         }
         catch (Exception error) { Notice = error.Message; Busy = false; Message = "ClientLab could not start."; }
+    }
+
+    private async Task LoadArtworkAsync()
+    {
+        try
+        {
+            if (await LauncherArtwork.LoadAsync(Program.DataDirectory) is { } bytes)
+                Artwork = new Bitmap(new MemoryStream(bytes));
+        }
+        catch (Exception) { } // The local illustration remains available offline.
+    }
+
+    private async Task LoadNewsAsync()
+    {
+        foreach (var item in await OfficialNews.LoadAsync(Program.DataDirectory))
+        {
+            News.Add(new NewsCard(item));
+        }
+        foreach (var page in News.Chunk(4)) NewsPages.Add(new NewsPage(page));
+        OnPropertyChanged(nameof(CanPageNews)); OnPropertyChanged(nameof(NewsPageLabel));
+        OnNewsPageIndexChanged(NewsPageIndex);
+        OnPropertyChanged(nameof(HasNews));
+    }
+
+    private async Task LoadNewsImageAsync(NewsCard card)
+    {
+        if (card.Image is not null || card.LoadingImage) return;
+        card.LoadingImage = true;
+        try
+        {
+            if (await OfficialNews.LoadImageAsync(card.Entry, Program.DataDirectory) is { } bytes)
+                card.Image = new Bitmap(new MemoryStream(bytes));
+        }
+        catch (Exception) { }
+        finally { card.LoadingImage = false; }
+    }
+
+    [RelayCommand]
+    private void OpenNews(string? url)
+    {
+        if (url is null || !OfficialNews.IsOfficialLink(url)) return;
+        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
+        catch (Exception) { Notice = "Your browser could not open the news page."; }
     }
 
     public Task RefreshAsync()
@@ -99,7 +245,7 @@ public partial class MainViewModel : ObservableObject
             Message = state["message"]?.GetValue<string>() ?? "Ready";
             Stage = state["stage"]?.GetValue<string>() switch
             {
-                "checking" => "Checking for updates", "downloading" => "Downloading game files", "analysing" => "Preparing client",
+                "checking" => "Checking game files", "downloading" => "Downloading game files", "installing" => "Preparing local files", "analysing" => "Preparing client",
                 "translating" => "Translating client", "compiling" => "Compiling runtime", "tools" => "Setting up tools", _ => "Ready"
             };
             Progress = (state["progress"]?.GetValue<double>() ?? 0) * 100;
@@ -116,6 +262,10 @@ public partial class MainViewModel : ObservableObject
                 IdentityFile = settings["identity_file"]!.GetValue<string>();
                 InstallationId = settings["installation_id"]!.GetValue<string>();
                 UseGameforge = settings["provider"]!.GetValue<string>() == "gameforge";
+                PrivateAuthUrl = settings["private_auth_url"]!.GetValue<string>();
+                PrivateServerHost = settings["private_server_host"]!.GetValue<string>();
+                PrivatePortRemap = settings["private_port_remap"]!.GetValue<string>();
+                PacketLogger = settings["packet_logger"]?.GetValue<string>() == "true";
                 PythonPath = settings["python"]!.GetValue<string>(); GhidraPath = settings["ghidra"]!.GetValue<string>();
                 JavaPath = settings["java"]!.GetValue<string>(); EmccPath = settings["emcc"]!.GetValue<string>();
                 loadedSettings = true;
@@ -129,7 +279,25 @@ public partial class MainViewModel : ObservableObject
 
     public static string FormatBytes(long bytes) => bytes >= 1024L * 1024 * 1024 ? $"{bytes / (1024d * 1024 * 1024):0.0} GB" : $"{bytes / (1024d * 1024):0.0} MB";
 
-    [RelayCommand] private void Navigate(string page) => CurrentPage = page;
+    [RelayCommand] private async Task NavigateAsync(string page)
+    {
+        CurrentPage = page;
+        if (page == "settings") await ExecuteAsync(LoadGameOptionsAsync);
+    }
+
+    private async Task LoadGameOptionsAsync()
+    {
+        if (Coordinator is null) return;
+        await FlushGamePreferencesAsync();
+        var options = await Coordinator.ReadGameOptionsAsync();
+        loadingGameOptions = true;
+        try
+        {
+            GameMusic = options.Music; GameSoundEffects = options.SoundEffects;
+            GameSpatialSound = options.SpatialSound; GameFullScreen = options.FullScreen;
+        }
+        finally { loadingGameOptions = false; }
+    }
 
     private async Task ExecuteAsync(Func<Task> action)
     {
@@ -141,19 +309,65 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private Task PrimaryAsync() => ExecuteAsync(async () =>
     {
-        if (!CanAct) return;
-        if (Running || HasBuild && !UpdateAvailable) { await PlayAsync(); return; }
-        Coordinator!.Start(!ToolsReady ? "tools" : HasGameFolder || state["remote"] is not null ? "prepare" : "check");
+        if (!CanPrimary) return;
+        if (Running) { await PlayAsync(); return; }
+        if (ShowCredentials)
+        {
+            if (string.IsNullOrWhiteSpace(SignInEmail) || string.IsNullOrEmpty(SignInPassword))
+                throw new InvalidOperationException("Enter your account and password to continue.");
+            await SaveFormCredentialsAsync();
+            if (!UseGameforge)
+            {
+                SignInBusy = true;
+                try
+                {
+                    await PrivateServerAuthentication.SignInAsync(PrivateAuthUrl, SignInEmail, SignInPassword);
+                    privatePassword = SignInPassword; SignInPassword = ""; SignedInAs = SignInEmail;
+                }
+                finally { SignInBusy = false; }
+                return;
+            }
+            await CreateSignInAsync();
+            await SignInSubmitAsync();
+            return;
+        }
+        if (!HasBuild || UpdateAvailable)
+        {
+            await Coordinator!.StartAndWaitAsync("startup");
+            await RefreshAsync();
+        }
+        await PlayAsync();
     });
 
     [RelayCommand]
-    private Task CheckUpdatesAsync() => ExecuteAsync(() => { Coordinator!.Start("check"); return Task.CompletedTask; });
+    private Task CheckUpdatesAsync() => ExecuteAsync(() => { Coordinator!.Start("startup"); return Task.CompletedTask; });
 
     [RelayCommand]
     private Task PlayCurrentAsync() => ExecuteAsync(PlayAsync);
 
     private async Task PlayAsync()
     {
+        await FlushGamePreferencesAsync();
+        if (!Running && !UseGameforge && privatePassword is not null)
+            Coordinator!.UseLaunchCode(await PrivateServerAuthentication.SignInAsync(PrivateAuthUrl, SignedInAs, privatePassword), null);
+        if (!Running && signIn is not null && selectedAccountId is { } accountId)
+        {
+            // Request the one-use code after compilation, immediately before launching.
+            SignInBusy = true;
+            try
+            {
+                var expired = false;
+                try { await signIn.ChooseAccountAsync(accountId); }
+                catch (GameforgeAuthentication.SessionExpiredException) { expired = true; }
+                if (expired)
+                {
+                    if (!await RenewSignInAsync(accountId)) throw new GameforgeAuthentication.SessionExpiredException();
+                    await signIn!.ChooseAccountAsync(accountId);
+                }
+                Coordinator!.UseLaunchCode(signIn!.LaunchCode!, signIn.InstallationId);
+            }
+            finally { SignInBusy = false; }
+        }
         var url = await Coordinator!.LaunchAsync();
         var uri = new Uri(url);
         if (uri.Host != "127.0.0.1" || uri.Scheme != "http") throw new InvalidOperationException("Unexpected game server address.");
@@ -164,20 +378,23 @@ public partial class MainViewModel : ObservableObject
     private Task CancelAsync() => ExecuteAsync(() => { Coordinator!.Cancel(); return Task.CompletedTask; });
 
     [RelayCommand]
-    private Task SaveSettingsAsync() => ExecuteAsync(() =>
+    private Task SaveSettingsAsync() => ExecuteAsync(async () =>
     {
         Coordinator!.SaveSettings(new JsonObject
         {
             ["import_dir"] = ImportDirectory, ["identity_file"] = IdentityFile,
             ["installation_id"] = InstallationId, ["provider"] = UseGameforge ? "gameforge" : "noscore",
+            ["private_auth_url"] = PrivateAuthUrl, ["private_server_host"] = PrivateServerHost, ["private_port_remap"] = PrivatePortRemap,
+            ["packet_logger"] = PacketLogger ? "true" : "false",
             ["python"] = PythonPath, ["ghidra"] = GhidraPath, ["java"] = JavaPath, ["emcc"] = EmccPath,
         });
-        Notice = "Settings saved.";
-        return Task.CompletedTask;
+        await FlushGamePreferencesAsync();
+        Notice = "Settings saved. Launch options apply to the next game session; file and tool changes apply to the next preparation.";
     });
 
     // --- Native Gameforge sign-in ---
     private GameforgeSignIn? signIn;
+    private string? selectedAccountId;
     public ObservableCollection<AccountItem> SignInAccounts { get; } = [];
     public record AccountItem(string Id, string Name);
 
@@ -185,6 +402,7 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private bool signInBusy;
     [ObservableProperty] private string signInEmail = "";
     [ObservableProperty] private string signInPassword = "";
+    [ObservableProperty] private bool rememberCredentials = true;
     [ObservableProperty] private string signInOtp = "";
     [ObservableProperty] private string signInCaptchaAnswer = "";
     [ObservableProperty] private string signInError = "";
@@ -192,6 +410,23 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private Bitmap? captchaPrompt;
     [ObservableProperty] private Bitmap? captchaIcons;
     [ObservableProperty] private Bitmap? captchaTarget;
+    public ObservableCollection<CaptchaChoice> CaptchaChoices { get; } = [];
+    public record CaptchaChoice(int Number, CroppedBitmap Image, Guid Revision);
+    public Guid CaptchaRevision { get; private set; }
+
+    [RelayCommand]
+    private async Task ChooseCaptchaAsync(CaptchaChoice choice)
+    {
+        if (SignInBusy || !StageCaptcha || choice.Revision != CaptchaRevision) return;
+        SignInCaptchaAnswer = choice.Number.ToString();
+        await SignInSubmitAsync();
+    }
+
+    public Task DropCaptchaAsync(int number, Guid revision)
+    {
+        var choice = CaptchaChoices.FirstOrDefault(item => item.Number == number && item.Revision == revision);
+        return choice is null ? Task.CompletedTask : ChooseCaptchaAsync(choice);
+    }
 
     public bool SignedIn => !string.IsNullOrEmpty(SignedInAs);
     public bool CanSignIn => UseGameforge && !SignedIn;
@@ -199,27 +434,108 @@ public partial class MainViewModel : ObservableObject
     public bool StageOtp => signIn?.Stage == SignInStage.NeedOtp;
     public bool StageCaptcha => signIn?.Stage == SignInStage.NeedCaptcha;
     public bool StageAccounts => signIn?.Stage == SignInStage.ChooseAccount;
-    public bool SignInSubmitVisible => StageCredentials || StageOtp || StageCaptcha;
+    public bool SignInSubmitVisible => StageCredentials || StageOtp;
     public string SignInSubmitLabel => signIn?.Stage switch { SignInStage.NeedOtp => "Verify code", SignInStage.NeedCaptcha => "Submit answer", _ => "Sign in" };
     public bool HasSignInError => !string.IsNullOrEmpty(SignInError);
 
-    partial void OnSignedInAsChanged(string value) { OnPropertyChanged(nameof(SignedIn)); OnPropertyChanged(nameof(CanSignIn)); }
+    partial void OnSignedInAsChanged(string value) { OnPropertyChanged(nameof(SignedIn)); OnPropertyChanged(nameof(CanSignIn)); NotifyActions(); }
+    partial void OnSignInBusyChanged(bool value) => NotifyActions();
+    partial void OnSignInVisibleChanged(bool value) => NotifyActions();
+    partial void OnRememberCredentialsChanged(bool value) { if (!value) _ = SaveFormCredentialsAsync(); }
     partial void OnSignInErrorChanged(string value) => OnPropertyChanged(nameof(HasSignInError));
-    partial void OnUseGameforgeChanged(bool value) => OnPropertyChanged(nameof(CanSignIn));
+    partial void OnUseGameforgeChanged(bool value) { OnPropertyChanged(nameof(CanSignIn)); OnPropertyChanged(nameof(AccountLabel)); NotifyActions(); }
 
     [RelayCommand]
-    private void OpenSignIn()
+    private Task SelectModeAsync(string mode) => ExecuteAsync(async () =>
+    {
+        if (!CanSelectMode || mode == (UseGameforge ? "gameforge" : "noscore")) return;
+        await Coordinator!.CancelAndWaitAsync();
+        Coordinator!.SaveSettings(new JsonObject { ["provider"] = mode });
+        signIn?.Dispose(); signIn = null; selectedAccountId = null; privatePassword = null;
+        Coordinator.ClearLaunchCode(); SignedInAs = ""; SignInVisible = false; SignInError = "";
+        UseGameforge = mode == "gameforge";
+        SignInEmail = ""; SignInPassword = "";
+        credentialStore = new CredentialStore(UseGameforge ? Program.DataDirectory : Path.Combine(Program.DataDirectory, "private-server"));
+        var saved = await credentialStore.ReadAsync();
+        if (saved is not null) { SignInEmail = saved.Email; SignInPassword = saved.Password; }
+        Coordinator.Start("startup");
+    });
+
+    private async Task SaveFormCredentialsAsync()
+    {
+        if (credentialStore is null) return;
+        try
+        {
+            if (RememberCredentials) await Task.Run(() => credentialStore.SaveAsync(SignInEmail.Trim(), SignInPassword));
+            else await Task.Run(() => credentialStore.DeleteAsync());
+        }
+        catch (Exception) { Notice = "Your account could not be saved to the system credential store."; }
+    }
+
+    [RelayCommand]
+    private async Task SignOutAsync()
+    {
+        signIn?.Dispose(); signIn = null; selectedAccountId = null;
+        privatePassword = null;
+        Coordinator?.ClearLaunchCode(); SignedInAs = ""; SignInError = "";
+        SignInEmail = ""; SignInPassword = ""; SignInOtp = "";
+        try { if (credentialStore is not null) await Task.Run(() => credentialStore.DeleteAsync()); }
+        catch (Exception) { Notice = "Your saved account could not be removed from the system credential store."; }
+        RefreshSignIn();
+    }
+
+    [RelayCommand]
+    private async Task OpenSignInAsync()
     {
         SignInError = "";
         try
         {
-            signIn?.Dispose();
-            signIn = Coordinator!.CreateSignIn();
+            await CreateSignInAsync();
             SignInEmail = ""; SignInPassword = ""; SignInOtp = ""; SignInCaptchaAnswer = ""; SignInAccounts.Clear();
             SignInVisible = true;
             RefreshSignIn();
         }
         catch (Exception error) { Notice = error.Message; }
+    }
+
+    /// <summary>Signs in again with the saved account after Gameforge's session lapsed. False when the user has to step in,
+    /// in which case the sign-in form shows what is needed.</summary>
+    private async Task<bool> RenewSignInAsync(string accountId)
+    {
+        var saved = credentialStore is null ? null : await Task.Run(() => credentialStore.ReadAsync());
+        SignedInAs = ""; selectedAccountId = null;
+        if (saved is null)
+        {
+            signIn?.Dispose(); signIn = null;
+            RefreshSignIn();
+            return false;
+        }
+        SignInEmail = saved.Email;
+        signIn?.Dispose(); signIn = null;
+        var identity = IdentityRequested is null ? null : await IdentityRequested();
+        signIn = Coordinator!.CreateSignIn(identity);
+        await signIn.SignInAsync(saved.Email, saved.Password);
+        RefreshSignIn();
+        if (signIn.Stage == SignInStage.ChooseAccount && SignInAccounts.FirstOrDefault(account => account.Id == accountId) is { } account)
+        {
+            selectedAccountId = account.Id; SignedInAs = account.Name;
+            return true;
+        }
+        SignInError = signIn.ChallengeMessage ?? "";
+        SignInVisible = true;
+        return false;
+    }
+
+    private async Task CreateSignInAsync()
+    {
+        SignInBusy = true;
+        try
+        {
+            signIn?.Dispose(); signIn = null;
+            var identity = IdentityRequested is null ? null : await IdentityRequested();
+            signIn = Coordinator!.CreateSignIn(identity);
+        }
+        finally { SignInBusy = false; }
     }
 
     [RelayCommand]
@@ -234,7 +550,9 @@ public partial class MainViewModel : ObservableObject
         {
             switch (signIn.Stage)
             {
-                case SignInStage.NeedCredentials: await signIn.SignInAsync(SignInEmail, SignInPassword); break;
+                case SignInStage.NeedCredentials:
+                    await signIn.SignInAsync(SignInEmail, SignInPassword);
+                    break;
                 case SignInStage.NeedOtp: await signIn.SubmitOtpAsync(SignInOtp); break;
                 case SignInStage.NeedCaptcha:
                     if (!int.TryParse(SignInCaptchaAnswer, out var answer)) throw new InvalidOperationException("Enter the number of the matching image.");
@@ -242,30 +560,28 @@ public partial class MainViewModel : ObservableObject
             }
             SignInPassword = "";
             RefreshSignIn();
+            SignInError = signIn.ChallengeMessage ?? "";
+            if (signIn.Stage == SignInStage.ChooseAccount && SignInAccounts.Count == 1)
+                SelectAccount(SignInAccounts[0].Id);
+            else SignInVisible = signIn.Stage != SignInStage.NeedCredentials;
         }
         catch (Exception error) { SignInError = error.Message; }
         finally { SignInBusy = false; }
     }
 
     [RelayCommand]
-    private async Task ChooseAccountAsync(string id)
+    private Task ChooseAccountAsync(string id)
     {
-        if (signIn is null || SignInBusy) return;
-        SignInBusy = true; SignInError = "";
-        try
-        {
-            await signIn.ChooseAccountAsync(id);
-            if (signIn.Stage == SignInStage.Ready && signIn.LaunchCode is { } code)
-            {
-                Coordinator!.UseLaunchCode(code, signIn.InstallationId);
-                SignedInAs = SignInAccounts.FirstOrDefault(account => account.Id == id)?.Name ?? id;
-                SignInVisible = false;
-                Notice = "Signed in to Gameforge. Press Play to launch.";
-            }
-            RefreshSignIn();
-        }
-        catch (Exception error) { SignInError = error.Message; }
-        finally { SignInBusy = false; }
+        if (signIn is not null && !SignInBusy) SelectAccount(id);
+        return Task.CompletedTask;
+    }
+
+    private void SelectAccount(string id)
+    {
+        selectedAccountId = id;
+        SignedInAs = SignInAccounts.First(account => account.Id == id).Name;
+        SignInVisible = false; SignInError = "";
+        RefreshSignIn();
     }
 
     private void RefreshSignIn()
@@ -277,12 +593,32 @@ public partial class MainViewModel : ObservableObject
                 SignInAccounts.Add(new AccountItem(item!["id"]!.GetValue<string>(), item["name"]?.GetValue<string>() ?? item["id"]!.GetValue<string>()));
             if (signIn.Captcha is { } captcha)
             {
-                CaptchaPrompt = ToBitmap(captcha.Prompt); CaptchaIcons = ToBitmap(captcha.Icons); CaptchaTarget = ToBitmap(captcha.Target);
+                // Keep one revision for the whole image set. A drag begun on an old challenge cannot submit
+                // an answer against refreshed images, and re-rendering account state does not invalidate it.
+                if (CaptchaChoices.Count == 0 || displayedCaptcha != captcha || displayedCaptchaVersion != signIn.CaptchaVersion)
+                {
+                    foreach (var choice in CaptchaChoices) choice.Image.Dispose();
+                    CaptchaChoices.Clear();
+                    CaptchaPrompt?.Dispose(); CaptchaIcons?.Dispose(); CaptchaTarget?.Dispose();
+                    CaptchaPrompt = ToBitmap(captcha.Prompt); CaptchaIcons = ToBitmap(captcha.Icons); CaptchaTarget = ToBitmap(captcha.Target);
+                    displayedCaptcha = captcha; displayedCaptchaVersion = signIn.CaptchaVersion;
+                    CaptchaRevision = Guid.NewGuid(); SignInCaptchaAnswer = "";
+                    if (CaptchaIcons is { } strip)
+                        for (var index = 0; index < 4; index++)
+                        {
+                            var left = index * strip.PixelSize.Width / 4;
+                            var right = (index + 1) * strip.PixelSize.Width / 4;
+                            CaptchaChoices.Add(new(index + 1, new CroppedBitmap(strip, new PixelRect(left, 0, right - left, strip.PixelSize.Height)), CaptchaRevision));
+                        }
+                }
             }
         }
         foreach (var name in new[] { nameof(StageCredentials), nameof(StageOtp), nameof(StageCaptcha), nameof(StageAccounts), nameof(SignInSubmitLabel), nameof(SignInSubmitVisible) })
             OnPropertyChanged(name);
     }
+
+    private (string Prompt, string Icons, string Target)? displayedCaptcha;
+    private string? displayedCaptchaVersion;
 
     private static Bitmap? ToBitmap(string dataUri)
     {

@@ -27,6 +27,8 @@ static double prof_mark(void) {
 }
 static double prof_draw, prof_upload, prof_frame_start, prof_frames_ms, prof_submit, prof_present, prof_fetch;
 static uint32_t prof_frames, prof_draw_calls, prof_vertices;
+/* Draws transformed on the GPU, and why the others stayed on the CPU (render_gl.inc, gl_tnl_draw). */
+static uint32_t prof_gpu_draws, prof_gl_draws, prof_cpu_reason[6];
 double port_prof_net;
 static void gl_start(uint32_t backbuffer);
 static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, int h);
@@ -731,7 +733,6 @@ static void log_state_combo(void) {
 }
 
 static void gl_draw_list(uint32_t prim, Vtx* v, uint32_t n);
-static int gl_buffer_draw(uint32_t prim, uint32_t n, uint32_t first, int32_t base_vertex, int indexed);
 
 /* Frame dump (F9 in the page): every draw of the next frame with its state, to debug a scene that renders wrong. */
 static int dump_state;   /* 1: armed, dump from the next Present; 2: dumping this frame */
@@ -786,11 +787,16 @@ static int reserve(Vtx** buf, uint32_t* cap, uint32_t n) {
     return 1;
 }
 
+/* WebGL: vertex-buffer draws transformed, lit and fogged on the GPU from buffers uploaded once (render_gl.inc);
+   returns 0 to leave a draw it does not handle to the CPU path below. */
+static int gl_tnl_draw(uint32_t prim, uint32_t count, int indexed, int32_t base_vertex, uint32_t start,
+                       uint32_t up_data, uint32_t up_stride, uint32_t up_indices, int up_idx32);
+
 static void draw_impl_draw(uint32_t prim, uint32_t start, uint32_t count) {
     layout_begin();
+    if (gl_on && gl_tnl_draw(prim, count, 0, 0, start, 0, 0, 0, 0)) return;
     uint32_t n = vertex_count(prim, count);
-    if (!R.vb || !n || !R.vb_stride) return;
-    if (gl_buffer_draw(prim, n, start, 0, 0) || !reserve(&vbuf, &vbuf_cap, n)) return;
+    if (!R.vb || !n || !R.vb_stride || !reserve(&vbuf, &vbuf_cap, n)) return;
     uint32_t base = M32(R.vb + 28) + R.vb_offset;
     for (uint32_t k = 0; k < n; k++) fetch(base + (start + k) * R.vb_stride, &vbuf[k]);
     draw_list(prim, count, vbuf, n);
@@ -798,6 +804,7 @@ static void draw_impl_draw(uint32_t prim, uint32_t start, uint32_t count) {
 
 static void draw_impl_draw_up(uint32_t prim, uint32_t count, uint32_t data, uint32_t stride) {
     layout_begin();
+    if (gl_on && gl_tnl_draw(prim, count, 0, 0, 0, data, stride, 0, 0)) return;
     uint32_t n = vertex_count(prim, count);
     if (!n || !reserve(&vbuf, &vbuf_cap, n)) return;
     for (uint32_t k = 0; k < n; k++) fetch(data + k * stride, &vbuf[k]);
@@ -826,9 +833,9 @@ static void draw_indexed_cached(uint32_t prim, uint32_t count, uint32_t n, uint3
 
 static void draw_impl_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t start_index, uint32_t count) {
     layout_begin();
+    if (gl_on && gl_tnl_draw(prim, count, 1, base_vertex, start_index, 0, 0, 0, 0)) return;
     uint32_t n = vertex_count(prim, count);
-    if (!R.vb || !R.ib || !n) return;
-    if (gl_buffer_draw(prim, n, start_index, base_vertex, 1) || !reserve(&vbuf, &vbuf_cap, n)) return;
+    if (!R.vb || !R.ib || !n || !reserve(&vbuf, &vbuf_cap, n)) return;
     int idx32 = M32(R.ib + 20) == 102;
     uint32_t ib = M32(R.ib + 28) + start_index * (idx32 ? 4 : 2);
     draw_indexed_cached(prim, count, n, M32(R.vb + 28) + R.vb_offset, R.vb_stride, ib, idx32, base_vertex);
@@ -836,6 +843,7 @@ static void draw_impl_draw_indexed(uint32_t prim, int32_t base_vertex, uint32_t 
 
 static void draw_impl_draw_indexed_up(uint32_t prim, uint32_t count, uint32_t indices, uint32_t idx_fmt, uint32_t data, uint32_t stride) {
     layout_begin();
+    if (gl_on && gl_tnl_draw(prim, count, 1, 0, 0, data, stride, indices, idx_fmt == 102)) return;
     uint32_t n = vertex_count(prim, count);
     if (!n || !reserve(&vbuf, &vbuf_cap, n)) return;
     draw_indexed_cached(prim, count, n, data, stride, indices, idx_fmt == 102, 0);
@@ -932,16 +940,24 @@ void r_prof_frame(void) {
     at_present = prof_present;
     if (++prof_frames < 2 || prof_frames_ms < 5000) return;
     if (!prof_detail)
-        port_log("profile: %.1f ms/frame (%.0f fps), %u draw calls, %u prims, %u late frames, worst %.0f ms of work; "
+        port_log("profile: %.1f ms/frame (%.0f fps), %u draw calls, %u prims, %u GL draws, %u late frames, worst %.0f ms of work; "
                  "PORT_PROFILE=1 splits the frame",
                  prof_frames_ms / prof_frames, 1000.0 * prof_frames / prof_frames_ms, prof_draw_calls / prof_frames,
-                 prof_vertices / prof_frames, late, worst);
-    else port_log("profile: %.1f ms/frame (%.0f fps): draw calls %.1f ms (%u calls, %u prims; GL submit %.1f), texture uploads %.1f, "
+                 prof_vertices / prof_frames, prof_gl_draws / prof_frames, late, worst);
+    else port_log("profile: %.1f ms/frame (%.0f fps): draw calls %.1f ms (%u calls, %u prims, %u GL draws; GL submit %.1f), texture uploads %.1f, "
              "present %.1f, game %.1f; vertex fetch %.1f, network relay %.1f",
              prof_frames_ms / prof_frames, 1000.0 * prof_frames / prof_frames_ms, prof_draw / prof_frames,
-             prof_draw_calls / prof_frames, prof_vertices / prof_frames, prof_submit / prof_frames, prof_upload / prof_frames,
+             prof_draw_calls / prof_frames, prof_vertices / prof_frames, prof_gl_draws / prof_frames, prof_submit / prof_frames, prof_upload / prof_frames,
              prof_present / prof_frames, (prof_frames_ms - prof_draw - prof_upload - prof_present) / prof_frames,
              prof_fetch / prof_frames, port_prof_net / prof_frames);
+    if (prof_detail)
+        port_log("draw paths per frame: GPU %u; CPU: other target %u, not triangles %u, pretransformed %u, "
+                 "texture coordinate generation %u, buffer %u, offset %u",
+                 prof_gpu_draws / prof_frames, prof_cpu_reason[0] / prof_frames, prof_cpu_reason[1] / prof_frames,
+                 prof_cpu_reason[2] / prof_frames, prof_cpu_reason[3] / prof_frames, prof_cpu_reason[4] / prof_frames,
+                 prof_cpu_reason[5] / prof_frames);
+    prof_gpu_draws = prof_gl_draws = 0;
+    memset(prof_cpu_reason, 0, sizeof prof_cpu_reason);
     if (prof_detail)
         port_log("frames: %u late, worst %.1f ms of work (draw calls %.1f, texture uploads %.1f, game %.1f)", late,
                  worst, worst_draw, worst_upload, worst - worst_draw - worst_upload);

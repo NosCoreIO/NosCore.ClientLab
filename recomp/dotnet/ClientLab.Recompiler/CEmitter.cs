@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using Iced.Intel;
 
 namespace NosCore.ClientLab.Recompiler;
@@ -18,6 +19,7 @@ public sealed partial class CEmitter
     public IReadOnlyList<X86Instruction> Instructions => instructions;
     public uint Entry => function.Entry;
     public bool UsesSeh => instructions.Any(i => i.WritesFsEsp);
+    public int StructuredDispatchThreshold { get; set; } = 1024;
 
     public static readonly Dictionary<string, string> Conditions = new()
     {
@@ -39,6 +41,13 @@ public sealed partial class CEmitter
         this.image = image; this.function = function;
         instructions = function.Ranges.SelectMany(r => image.Disassemble(r.Start, r.End)).ToList();
         addresses = instructions.Select(i => i.Address).ToHashSet();
+        // Merging byte ranges can hide a valid x86 entry that starts inside another
+        // instruction's encoding. Retain that independently decoded entry path.
+        if (!addresses.Contains(function.Entry))
+            foreach (var address in new FunctionDiscovery(image).Descend([function.Entry], address => !addresses.Contains(address)).Keys)
+            {
+                instructions.Add(image.Decode(address)!); addresses.Add(address);
+            }
         if (covered is not null) AbsorbOrphans(covered);
         instructions.Sort((a, b) => a.Address.CompareTo(b.Address));
     }
@@ -96,8 +105,8 @@ public sealed partial class CEmitter
         for (var index = 0; index < instructions.Count; index++)
         {
             var instruction = instructions[index]; var m = instruction.Mnemonic;
-            if ((m.StartsWith('j') || m is "loop" or "call" or "push") && instruction.DirectTarget is { } target && addresses.Contains(target)) labels.Add(target);
-            if ((m.StartsWith('j') || m is "ret" or "call" or "loop") && addresses.Contains(instruction.Next)) labels.Add(instruction.Next);
+            if ((m.StartsWith('j') || m.StartsWith("loop") || m is "call" or "push") && instruction.DirectTarget is { } target && addresses.Contains(target)) labels.Add(target);
+            if ((m.StartsWith('j') || m.StartsWith("loop") || m is "ret" or "call") && addresses.Contains(instruction.Next)) labels.Add(instruction.Next);
             if (image.RelocationTargets.Contains(instruction.Address)) labels.Add(instruction.Address);
             if (index > 0 && instructions[index - 1].Next != instruction.Address) labels.Add(instruction.Address);
         }
@@ -154,9 +163,13 @@ public sealed partial class CEmitter
     public string Generate()
     {
         Labels = FindLabels(); output.Clear(); Callees.Clear(); Unsupported.Clear();
+        var structured = Labels.Count >= StructuredDispatchThreshold;
+        if (instructions.Any(instruction => image.PacketCaptureSites.ContainsKey(instruction.Address)))
+            output.AppendLine("void port_capture_packet(uint32_t packet, int kind);\nvoid port_capture_login_packet(CPU* c);");
         output.AppendLine($"/* {function.Name.Replace("*/", "")} */");
         output.AppendLine($"void f_{function.Entry:x8}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{");
-        E("uint32_t tgt = entry, t, a, b, r; uint64_t q; int ind = 0; (void)t; (void)a; (void)b; (void)r; (void)q;");
+        E((structured ? "volatile uint32_t tgt = entry; uint32_t t, a, b, r;" : "uint32_t tgt = entry, t, a, b, r;") + " uint64_t q; int ind = 0; (void)t; (void)a; (void)b; (void)r; (void)q;");
+        if (FlagLiveness) E("uint32_t xCF, xZF, xSF, xOF, xPF; (void)xCF; (void)xZF; (void)xSF; (void)xOF; (void)xPF;");
         E("RT_TRACE(c, entry, ret);");
         if (UsesSeh)
         {
@@ -168,10 +181,12 @@ public sealed partial class CEmitter
         output.AppendLine("dispatch:"); E("switch (tgt) {");
         foreach (var label in Labels.Order()) E($"case 0x{label:x8}u: goto L_{label:x8};");
         E("default: if (ind) { rt_jump_ind(c, tgt, ret, ind); EXIT; } c->pend = 1; c->pend_target = tgt; EXIT;"); E("}");
+        var bodyStart = output.Length;
+        var lifted = new string[instructions.Count];
         for (var index = 0; index < instructions.Count; index++)
         {
             var instruction = instructions[index];
-            if (Labels.Contains(instruction.Address)) output.AppendLine($"L_{instruction.Address:x8}:");
+            var start = output.Length;
             try { Lift(instruction); }
             catch (NotSupportedException error)
             {
@@ -181,9 +196,85 @@ public sealed partial class CEmitter
             }
             if ((index + 1 >= instructions.Count || instructions[index + 1].Address != instruction.Next) && instruction.Mnemonic is not ("jmp" or "ret"))
                 E($"{{ rt_jump(c, 0x{instruction.Next:x8}u, ret); EXIT; }}");
+            lifted[index] = output.ToString(start, output.Length - start);
+            output.Length = start;
+        }
+        if (FlagLiveness) DropDeadFlags(lifted);
+        for (var index = 0; index < instructions.Count; index++)
+        {
+            if (Labels.Contains(instructions[index].Address)) output.AppendLine($"L_{instructions[index].Address:x8}:");
+            if (image.PacketCaptureSites.TryGetValue(instructions[index].Address, out var packetKind))
+                E(packetKind == 2 ? "port_capture_login_packet(c);" : $"port_capture_packet(c->edx, {packetKind});");
+            output.Append(lifted[index]);
         }
         output.AppendLine("#undef EXIT"); output.AppendLine("}");
-        return output.ToString();
+        if (!structured) return output.ToString();
+        // Keep large graphs reducible for the WebAssembly backend. All backward edges go
+        // through dispatch; volatile prevents jump threading from recreating the old graph.
+        // Dispatch's own case destinations stay direct, and guest instruction order is unchanged.
+        var body = output.ToString(bodyStart, output.Length - bodyStart);
+        return output.ToString(0, bodyStart) + Regex.Replace(body, @"goto L_([0-9a-f]{8});",
+            match => "{ tgt = 0x" + match.Groups[1].Value + "u; goto dispatch; }");
+    }
+
+    /// <summary>When set, a flag result that no later instruction can read goes to a local the C compiler then deletes.</summary>
+    public bool FlagLiveness { get; set; } = true;
+    private static readonly string[] FlagNames = ["CF", "ZF", "SF", "OF", "PF"];
+    private const int AllFlags = 31;
+    private static readonly Regex FlagWrite = new(@"\b(CF|ZF|SF|OF|PF)\s*=(?!=)", RegexOptions.Compiled);
+
+    /// <summary>Flags the lifted instruction always writes. A shift or rotate by CL leaves them alone when the count is
+    /// zero, so it only writes them for a non-zero immediate count.</summary>
+    private static int FlagsWritten(X86Instruction instruction, string lifted)
+    {
+        var ops = instruction.Operands;
+        if (instruction.Mnemonic is "shl" or "sal" or "shr" or "sar" or "rol" or "ror" or "rcl" or "rcr" &&
+            ops.Length > 1 && !(ops[1].Kind == OperandKind.Immediate && (ops[1].Immediate & 31) != 0)) return 0;
+        var written = 0;
+        foreach (Match match in FlagWrite.Matches(lifted)) written |= 1 << Array.IndexOf(FlagNames, match.Groups[1].Value);
+        return written;
+    }
+
+    private static int FlagsRead(X86Instruction instruction, string lifted) =>
+        lifted.Contains("rt_unimpl(") || lifted.Contains("rt_get_eflags") ? AllFlags : instruction.FlagsRead;
+
+    /// <summary>Backward liveness of the arithmetic flags over the function. Flags are live wherever control leaves
+    /// through ret, an indirect or outside jump or an unknown instruction (a caller may test them, as the RTL's compare
+    /// routines' callers do), and dead before a call, which clobbers them without reading the caller's.</summary>
+    private void DropDeadFlags(string[] lifted)
+    {
+        var count = instructions.Count;
+        var at = new Dictionary<uint, int>(count);
+        for (var index = 0; index < count; index++) at[instructions[index].Address] = index;
+        int[] liveIn = new int[count], liveOut = new int[count], written = new int[count], read = new int[count];
+        for (var index = 0; index < count; index++) { written[index] = FlagsWritten(instructions[index], lifted[index]); read[index] = FlagsRead(instructions[index], lifted[index]); }
+        bool changed;
+        do
+        {
+            changed = false;
+            for (var index = count - 1; index >= 0; index--)
+            {
+                var instruction = instructions[index]; var m = instruction.Mnemonic;
+                int At(uint address) => at.TryGetValue(address, out var target) ? liveIn[target] : AllFlags;
+                var fall = index + 1 < count && instructions[index + 1].Address == instruction.Next ? liveIn[index + 1] : AllFlags;
+                var after = m switch
+                {
+                    "ret" or "int3" => AllFlags,
+                    "jmp" => instruction.Operands[0].Kind == OperandKind.Immediate ? At((uint)instruction.Operands[0].Immediate) : AllFlags,
+                    _ when m.StartsWith('j') || m.StartsWith("loop") => (instruction.DirectTarget is { } target ? At(target) : AllFlags) | fall,
+                    _ => fall
+                };
+                var before = m == "call" ? 0 : read[index] | (after & ~written[index]);
+                if (after == liveOut[index] && before == liveIn[index]) continue;
+                liveOut[index] = after; liveIn[index] = before; changed = true;
+            }
+        } while (changed);
+        for (var index = 0; index < count; index++)
+        {
+            var dead = written[index] & ~liveOut[index] & ~read[index];
+            for (var flag = 0; flag < FlagNames.Length; flag++)
+                if ((dead & (1 << flag)) != 0) lifted[index] = Regex.Replace(lifted[index], $@"\b{FlagNames[flag]}\b", "x" + FlagNames[flag]);
+        }
     }
 
     public string GenerateSnippet(string name)

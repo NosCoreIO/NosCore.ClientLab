@@ -16,6 +16,26 @@ static CPU* main_cpu;
 static int port_trace;
 int port_trace_methods;
 static int api_timing;
+/* These calls are inserted only at uniquely matched DeveloperTools cleartext sites.
+   They observe registers/memory without changing the client's execution. */
+void port_capture_packet(uint32_t packet, int kind) {
+#ifdef __EMSCRIPTEN__
+    EM_ASM({
+        if (ENV.PORT_PACKET_LOG !== '1') return;
+        const ptr = $0 >>> 0;
+        if (ptr < 4 || ptr >= HEAPU8.length) return;
+        const length = HEAPU32[(ptr - 4) >>> 2] >>> 0;
+        if (!length || length > 65536 || ptr + length > HEAPU8.length) return;
+        postMessage({type:'packet', kind:$1, raw:new TextDecoder().decode(HEAPU8.subarray(ptr,ptr+length)), timestamp:new Date().toISOString()});
+    }, packet, kind);
+#else
+    (void)packet; (void)kind;
+#endif
+}
+void port_capture_login_packet(CPU* c) {
+    if (c->ebp >= GUEST_BASE + 8 && c->ebp < GUEST_STACK_TOP)
+        port_capture_packet(M32(c->ebp - 8), 2);
+}
 int port_trace_budget;
 
 /* While a click trace is running, each guest function seen in the entry ring is logged once. */

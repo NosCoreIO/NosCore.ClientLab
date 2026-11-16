@@ -1,66 +1,136 @@
-<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        x:Class="NosCore.ClientLab.Launcher.MainWindow" Title="ClientLab" Width="1250" Height="830"
-        MinWidth="1030" MinHeight="700" WindowStartupLocation="CenterScreen">
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:views="using:NosCore.ClientLab.Launcher"
+        x:Class="NosCore.ClientLab.Launcher.MainWindow" Title="ClientLab" Width="1180" Height="800"
+        MinWidth="1020" MinHeight="740" WindowStartupLocation="CenterScreen" Icon="/Assets/noscore.ico">
+  <Window.Resources><views:NewsPageHeightConverter x:Key="NewsPageHeight" /></Window.Resources>
   <Grid>
+              <Viewbox Stretch="UniformToFill" ClipToBounds="True" IsVisible="{Binding !HasArtwork}">
+                <Canvas Width="540" Height="660">
+                  <Ellipse Width="290" Height="290" Canvas.Left="230" Canvas.Top="70" Fill="#163E4750" />
+                  <Ellipse Width="194" Height="194" Canvas.Left="287" Canvas.Top="111" Fill="#123E5157" />
+                  <Ellipse Width="98" Height="98" Canvas.Left="333" Canvas.Top="158" Fill="#E1E8CC" />
+                  <Ellipse Width="3" Height="3" Canvas.Left="82" Canvas.Top="211" Fill="#ACCBC7" />
+                  <Ellipse Width="3" Height="3" Canvas.Left="265" Canvas.Top="123" Fill="#ACCBC7" />
+                  <Ellipse Width="2" Height="2" Canvas.Left="456" Canvas.Top="302" Fill="#ACCBC7" />
+                  <Ellipse Width="2" Height="2" Canvas.Left="154" Canvas.Top="289" Fill="#ACCBC7" />
+                  <Path Data="M 452,106 l 0,14 M 445,113 l 14,0 M 113,350 l 0,10 M 108,355 l 10,0" Stroke="#C7DACE" StrokeThickness="1" />
+                  <Path Data="M -35,442 L 103,282 196,401 290,291 425,440 558,313 590,660 -35,660 Z" Fill="#31555B" />
+                  <Path Data="M 103,282 L 72,367 105,347 126,370 147,339 Z M 290,291 L 249,357 284,344 305,362 326,331 Z" Fill="#6F9291" Opacity="0.6" />
+                  <Path Data="M -40,488 L 65,419 172,478 302,386 433,478 582,404 590,660 -40,660 Z" Fill="#24484E" />
+                  <Path Data="M -30,555 Q 132,445 282,502 Q 390,529 570,465 L 570,680 -30,680 Z" Fill="#17383E" />
+                  <Path Data="M 88,529 Q 232,456 354,501 L 302,545 197,561 Z" Fill="#3D6664" />
+                  <Path Data="M 88,529 L 197,561 302,545 354,501 305,590 232,628 182,589 142,579 Z" Fill="#102B32" />
+                  <Path Data="M 197,561 L 232,628 246,567 302,545 Z" Fill="#1D4246" />
+                  <Path Data="M 207,505 L 207,443 Q 207,405 242,405 Q 277,405 277,443 L 277,505" Stroke="#94C5B2" StrokeThickness="11" />
+                  <Path Data="M 217,505 L 217,445 Q 217,416 242,416 Q 267,416 267,445 L 267,505 Z">
+                    <Path.Fill><LinearGradientBrush StartPoint="50%,0%" EndPoint="50%,100%"><GradientStop Color="#A7E6D4" Offset="0" /><GradientStop Color="#387F79" Offset="1" /></LinearGradientBrush></Path.Fill>
+                  </Path>
+                  <Path Data="M 224,508 Q 272,523 269,540 Q 259,550 211,557 L 211,561 Q 289,550 291,538 Q 285,519 249,507 Z" Fill="#709B87" />
+                  <Path Data="M 3,618 Q 98,562 177,630 L 177,680 0,680 Z M 358,633 Q 449,550 565,587 L 565,680 358,680 Z" Fill="#0E252A" />
+                  <Path Data="M 33,606 L 49,549 65,606 Z M 57,625 L 76,552 95,625 Z M 455,606 L 477,523 499,606 Z M 491,619 L 513,540 535,619 Z" Fill="#0E292D" />
+                </Canvas>
+              </Viewbox>
+    <Image Source="{Binding Artwork}" Stretch="UniformToFill" IsVisible="{Binding HasArtwork}" />
+    <Border IsHitTestVisible="False">
+      <Border.Background><LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%"><GradientStop Color="#30101A1F" Offset="0" /><GradientStop Color="#35101A1F" Offset="0.45" /><GradientStop Color="#88101A1F" Offset="1" /></LinearGradientBrush></Border.Background>
+    </Border>
+    <Border IsHitTestVisible="False">
+      <Border.Background><LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%"><GradientStop Color="#C0101A1F" Offset="0" /><GradientStop Color="#00101A1F" Offset="0.3" /><GradientStop Color="#30101A1F" Offset="0.5" /><GradientStop Color="#F0101A1F" Offset="1" /></LinearGradientBrush></Border.Background>
+    </Border>
     <Grid x:Name="LauncherPanel" RowDefinitions="Auto,*">
       <Grid ColumnDefinitions="Auto,*,Auto" Margin="32,24,32,6">
         <StackPanel Orientation="Horizontal" Spacing="11" VerticalAlignment="Center">
-          <Border Background="#B9F074" Width="30" Height="30" CornerRadius="9"><TextBlock Text="C" FontSize="18" FontWeight="Bold" Foreground="#1A2A15" HorizontalAlignment="Center" VerticalAlignment="Center" /></Border>
+          <Image Source="/Assets/noscore.png" Width="36" Height="36" Stretch="Uniform" />
           <TextBlock Text="ClientLab" FontWeight="SemiBold" FontSize="16" VerticalAlignment="Center" />
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-          <Button Classes="nav" Classes.active="{Binding IsLibrary}" Command="{Binding NavigateCommand}" CommandParameter="library" Content="Play" />
+          <Button Classes="nav" Classes.active="{Binding IsLibrary}" Command="{Binding NavigateCommand}" CommandParameter="library" Content="Home" />
           <Button Classes="nav" Classes.active="{Binding IsActivity}" Command="{Binding NavigateCommand}" CommandParameter="activity" Content="Activity" />
           <Button Classes="nav" Classes.active="{Binding IsSettings}" Command="{Binding NavigateCommand}" CommandParameter="settings" Content="Settings" />
         </StackPanel>
       </Grid>
       <Grid Grid.Row="1" Margin="32,18,32,26">
-        <ScrollViewer IsVisible="{Binding IsLibrary}" HorizontalScrollBarVisibility="Disabled">
-          <StackPanel Spacing="20" MaxWidth="560" HorizontalAlignment="Center">
-            <StackPanel Spacing="4" Margin="0,12,0,0">
-              <TextBlock Text="NosTale" FontSize="44" FontWeight="Bold" LetterSpacing="-1.5" />
-              <TextBlock Text="ClientLab edition" Classes="muted" FontSize="14" />
+        <Grid IsVisible="{Binding IsLibrary}" ColumnDefinitions="1.12*,*" ColumnSpacing="52">
+          <Grid RowDefinitions="*,Auto" RowSpacing="16" Margin="8,0,4,8">
+            <StackPanel VerticalAlignment="Bottom" Spacing="8">
+              <TextBlock Text="YOUR NEXT CHAPTER STARTS HERE" FontSize="10" LetterSpacing="2.4" Foreground="#C0DBD3" />
+              <TextBlock Text="NosTale" FontSize="54" FontWeight="Bold" LetterSpacing="-2" Foreground="#FAFCF4" />
+              <TextBlock Text="A world worth coming back to." FontSize="15" Foreground="#DBE6E1" />
             </StackPanel>
-            <Border IsVisible="{Binding HasNotice}" Background="#332C23" BorderBrush="#796344" BorderThickness="1" CornerRadius="9" Padding="14"><TextBlock Text="{Binding Notice}" Foreground="#EBD7AC" TextWrapping="Wrap" /></Border>
-            <Border Classes="card" Padding="24,22">
-              <StackPanel Spacing="16">
-                <StackPanel Orientation="Horizontal" Spacing="9">
-                  <Ellipse Fill="#B9F074" Width="7" Height="7" VerticalAlignment="Center" />
-                  <TextBlock Text="{Binding StatusLabel}" FontWeight="SemiBold" FontSize="16" />
-                </StackPanel>
-                <TextBlock Text="{Binding Message}" Classes="muted" FontSize="13" TextWrapping="Wrap" />
-                <ProgressBar Value="{Binding Progress}" Maximum="100" IsIndeterminate="{Binding IsIndeterminate}" IsVisible="{Binding Busy}" Height="4" Foreground="#B9F074" />
-                <Grid ColumnDefinitions="Auto,*,Auto">
-                  <Button Content="Cancel" Command="{Binding CancelCommand}" IsVisible="{Binding Busy}" />
-                  <Button Grid.Column="2" Classes="primary" Content="{Binding ActionLabel}" Command="{Binding PrimaryCommand}" IsEnabled="{Binding CanAct}" MinWidth="190" HorizontalContentAlignment="Center" />
-                </Grid>
+          <StackPanel Grid.Row="1" Spacing="10" IsVisible="{Binding HasNews}">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="NEWS &amp; EVENTS" Classes="eyebrow" FontSize="10" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="5" IsVisible="{Binding CanPageNews}">
+                <Button Content="‹" Classes="subtle" FontSize="19" Padding="9,0" Command="{Binding PreviousNewsCommand}" IsEnabled="{Binding CanPreviousNews}" AutomationProperties.Name="Previous news page" />
+                <TextBlock Text="{Binding NewsPageLabel}" FontSize="10" Classes="muted" VerticalAlignment="Center" />
+                <Button Content="›" Classes="subtle" FontSize="19" Padding="9,0" Command="{Binding NextNewsCommand}" IsEnabled="{Binding CanNextNews}" AutomationProperties.Name="Next news page" />
               </StackPanel>
-            </Border>
-            <Border Classes="card" Padding="18,15">
-              <Grid ColumnDefinitions="*,Auto">
-                <StackPanel Spacing="3">
-                  <TextBlock Text="Game files" FontSize="13" />
-                  <TextBlock Text="{Binding ImportDirectory}" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" />
-                </StackPanel>
-                <Button Grid.Column="1" Content="Change…" Click="BrowseImport" VerticalAlignment="Center" FontSize="12" />
-              </Grid>
-            </Border>
-            <Border Classes="card" Padding="18,15" IsVisible="{Binding UseGameforge}">
-              <Grid ColumnDefinitions="*,Auto">
-                <StackPanel Spacing="3">
-                  <TextBlock Text="Gameforge account" FontSize="13" />
-                  <TextBlock Text="{Binding SignedInAs, StringFormat='Signed in as {0}'}" Classes="muted" FontSize="11" IsVisible="{Binding SignedIn}" />
-                  <TextBlock Text="Not signed in" Classes="muted" FontSize="11" IsVisible="{Binding !SignedIn}" />
-                </StackPanel>
-                <Button Grid.Column="1" Content="Sign in" Command="{Binding OpenSignInCommand}" IsVisible="{Binding CanSignIn}" VerticalAlignment="Center" FontSize="12" />
-              </Grid>
-            </Border>
-            <StackPanel Orientation="Horizontal" Spacing="18" IsVisible="{Binding !Busy}">
-              <Button Content="Check for updates" Command="{Binding CheckUpdatesCommand}" IsEnabled="{Binding CanCheck}" FontSize="12" />
-              <Button Content="Play current build" Command="{Binding PlayCurrentCommand}" IsEnabled="{Binding CanPlayCurrent}" FontSize="12" />
-            </StackPanel>
+            </Grid>
+            <Carousel ItemsSource="{Binding NewsPages}" SelectedIndex="{Binding NewsPageIndex, Mode=TwoWay}" Height="{Binding Bounds.Width, RelativeSource={RelativeSource Self}, Converter={StaticResource NewsPageHeight}}" ClipToBounds="True">
+              <Carousel.PageTransition><PageSlide Duration="0:0:0.2" Orientation="Horizontal" /></Carousel.PageTransition>
+              <Carousel.ItemTemplate><DataTemplate>
+            <ItemsControl ItemsSource="{Binding Items}">
+              <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Columns="2" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Button Classes="news" Margin="0,0,8,8" Padding="0" ClipToBounds="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"
+                          Command="{Binding $parent[Window].DataContext.OpenNewsCommand}" CommandParameter="{Binding Url}">
+                    <Grid RowDefinitions="Auto,Auto">
+                      <Border Background="#223B42" ClipToBounds="True"><Viewbox Stretch="Uniform"><Image Source="{Binding Image}" Width="444" Height="250" Stretch="UniformToFill" /></Viewbox></Border>
+                      <Border Background="#CC102226" CornerRadius="4" Padding="5,3" Margin="8" HorizontalAlignment="Left" VerticalAlignment="Top"><TextBlock Text="{Binding Category}" FontSize="8" LetterSpacing="1.3" Foreground="#D0F2DE" /></Border>
+                      <Grid Grid.Row="1" RowDefinitions="Auto,Auto" RowSpacing="5" Margin="12,8">
+                        <TextBlock Text="{Binding Title}" TextWrapping="Wrap" MaxLines="2" Height="32" TextTrimming="CharacterEllipsis" FontSize="12" LineHeight="16" />
+                        <Grid Grid.Row="1" ColumnDefinitions="*,Auto"><TextBlock Text="{Binding Date}" Classes="muted" FontSize="9" /><TextBlock Grid.Column="1" Text="↗" Foreground="#B9E8CC" FontSize="12" /></Grid>
+                      </Grid>
+                    </Grid>
+                  </Button>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+              </DataTemplate></Carousel.ItemTemplate>
+            </Carousel>
           </StackPanel>
-        </ScrollViewer>
+          </Grid>
+          <Border Grid.Column="1" CornerRadius="22" Background="#CC111D22" BorderBrush="#66778E8A" BorderThickness="1" Padding="28,24" VerticalAlignment="Center" MaxHeight="650">
+          <Grid RowDefinitions="*,Auto">
+              <StackPanel Spacing="14" Margin="0,6" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" Spacing="8" IsEnabled="{Binding CanSelectMode}">
+                  <Button Content="Gameforge" Classes="mode" Classes.active="{Binding UseGameforge}" Command="{Binding SelectModeCommand}" CommandParameter="gameforge" />
+                  <Button Content="Private server" Classes="mode" Classes.active="{Binding !UseGameforge}" Command="{Binding SelectModeCommand}" CommandParameter="noscore" />
+                </StackPanel>
+                <StackPanel Spacing="8">
+                  <TextBlock Text="MAKE YOURSELF AT HOME" Classes="eyebrow" />
+                  <TextBlock Text="Welcome back." FontSize="34" FontWeight="SemiBold" LetterSpacing="-0.8" />
+                  <TextBlock Text="{Binding WelcomeMessage}" Classes="muted" FontSize="13" LineHeight="21" TextWrapping="Wrap" />
+                </StackPanel>
+                <Border IsVisible="{Binding HasNotice}" Classes="notice" Padding="13"><TextBlock Text="{Binding Notice}" TextWrapping="Wrap" FontSize="12" /></Border>
+                <Border IsVisible="{Binding HasSignInError}" Classes="notice" Padding="13"><TextBlock Text="{Binding SignInError}" TextWrapping="Wrap" FontSize="12" /></Border>
+                <StackPanel Spacing="12" IsVisible="{Binding ShowCredentials}" IsEnabled="{Binding !SignInBusy}">
+                  <StackPanel Spacing="7"><TextBlock Text="{Binding AccountLabel}" FontSize="12" Foreground="#C9D2D0" /><TextBox Text="{Binding SignInEmail}" Watermark="Your account" AutomationProperties.Name="Account" /></StackPanel>
+                  <StackPanel Spacing="7"><TextBlock Text="Password" FontSize="12" Foreground="#C9D2D0" /><TextBox Text="{Binding SignInPassword}" Watermark="Enter your password" PasswordChar="●" AutomationProperties.Name="Password" /></StackPanel>
+                  <CheckBox Content="Remember me" IsChecked="{Binding RememberCredentials}" FontSize="12" Foreground="#C9D2D0" />
+                </StackPanel>
+                <Border IsVisible="{Binding SignedIn}" Classes="card" Padding="17">
+                  <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+                    <Border Background="#294C41" Width="38" Height="38" CornerRadius="19"><TextBlock Text="✓" Foreground="#B9E8CC" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="17" /></Border>
+                    <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center"><TextBlock Text="{Binding SignedInAs}" FontWeight="SemiBold" FontSize="14" /><TextBlock Text="Ready for your adventure" Classes="muted" FontSize="11" /></StackPanel>
+                    <Button Grid.Column="2" Classes="subtle" Content="Sign out" Command="{Binding SignOutCommand}" IsEnabled="{Binding CanCheck}" />
+                  </Grid>
+                </Border>
+                <StackPanel Spacing="8">
+                  <Button Classes="primary" Content="{Binding ActionLabel}" Command="{Binding PrimaryCommand}" IsEnabled="{Binding CanPrimary}" IsDefault="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Height="52" />
+                  <ProgressBar Value="{Binding Progress}" Maximum="100" IsIndeterminate="{Binding IsIndeterminate}" IsVisible="{Binding Busy}" Height="3" Foreground="#B9E8CC" />
+                  <ProgressBar IsIndeterminate="True" IsVisible="{Binding SignInBusy}" Height="3" Foreground="#B9E8CC" />
+                  <TextBlock Text="{Binding Message}" IsVisible="{Binding Busy}" Classes="muted" FontSize="11" TextWrapping="Wrap" />
+                  <Button Content="Cancel" Classes="subtle" Command="{Binding CancelCommand}" IsVisible="{Binding Busy}" HorizontalAlignment="Center" />
+                </StackPanel>
+              </StackPanel>
+            <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,24,0,8">
+              <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center"><Ellipse Width="5" Height="5" Fill="#B9E8CC" VerticalAlignment="Center" /><TextBlock Text="{Binding StatusLabel}" Classes="muted" FontSize="10" /></StackPanel>
+              <Button Grid.Column="1" Classes="subtle" Content="Check for updates" Command="{Binding CheckUpdatesCommand}" IsEnabled="{Binding CanCheck}" FontSize="10" />
+            </Grid>
+          </Grid>
+          </Border>
+        </Grid>
         <Grid IsVisible="{Binding IsActivity}" RowDefinitions="Auto,*" RowSpacing="14">
           <TextBlock Text="Activity" FontSize="22" FontWeight="SemiBold" />
           <Border Grid.Row="1" Classes="card" Padding="16"><TextBox Text="{Binding Activity, Mode=OneWay}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" FontFamily="Cascadia Code, Consolas, monospace" FontSize="11" BorderThickness="0" Background="Transparent" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto" /></Border>
@@ -68,6 +138,16 @@
         <ScrollViewer IsVisible="{Binding IsSettings}" HorizontalScrollBarVisibility="Disabled">
           <StackPanel Spacing="18" MaxWidth="620" HorizontalAlignment="Left">
             <TextBlock Text="Settings" FontSize="22" FontWeight="SemiBold" />
+            <Border IsVisible="{Binding HasNotice}" Classes="notice" Padding="13"><TextBlock Text="{Binding Notice}" TextWrapping="Wrap" /></Border>
+            <Border Classes="card" Padding="22"><StackPanel Spacing="11" IsEnabled="{Binding !Running}">
+              <TextBlock Text="Game preferences" FontSize="15" FontWeight="SemiBold" />
+              <CheckBox Content="Music" IsChecked="{Binding GameMusic}" />
+              <CheckBox Content="Sound effects" IsChecked="{Binding GameSoundEffects}" />
+              <CheckBox Content="3D sound" IsChecked="{Binding GameSpatialSound}" />
+              <CheckBox Content="Full screen" IsChecked="{Binding GameFullScreen}" />
+              <TextBlock Text="{Binding GamePreferencesStatus}" Classes="muted" TextWrapping="Wrap" FontSize="12" />
+              <TextBlock Text="Close the game before changing these options." Classes="muted" TextWrapping="Wrap" FontSize="12" />
+            </StackPanel></Border>
             <Border Classes="card" Padding="22"><StackPanel Spacing="11">
               <TextBlock Text="Game files" FontSize="15" FontWeight="SemiBold" />
               <TextBlock Text="The folder with your NosTale install. ClientLab builds and plays from these files; leave it empty to download from Gameforge instead." Classes="muted" TextWrapping="Wrap" FontSize="12" />
@@ -75,24 +155,37 @@
             </StackPanel></Border>
             <Border Classes="card" Padding="22"><StackPanel Spacing="12">
               <TextBlock Text="Gameforge sign-in" FontSize="15" FontWeight="SemiBold" />
-              <CheckBox IsChecked="{Binding UseGameforge}" Content="Sign in with your Gameforge account" />
-              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10"><TextBox Text="{Binding IdentityFile}" Watermark="Captured Gameforge identity (.json), optional" /><Button Grid.Column="1" Content="Browse…" Click="BrowseIdentity" /></Grid>
-              <TextBox Text="{Binding InstallationId}" Watermark="Installation ID (optional if included in the identity file)" />
-              <TextBlock Text="Email, password and any verification are entered when you sign in. Nothing is stored here." Classes="muted" TextWrapping="Wrap" FontSize="12" />
+              <TextBlock Text="Choose Gameforge or Private server on Home." Classes="muted" />
+              <TextBlock Text="Remember me stores your email and password in the system credential store. Sign out removes them." Classes="muted" TextWrapping="Wrap" FontSize="12" />
+              <Expander Header="Advanced sign-in options" HorizontalAlignment="Stretch">
+                <StackPanel Spacing="12" Margin="0,10,0,0">
+                  <TextBlock Text="Device verification uses Gameforge's official script in the embedded browser. An existing identity file can supply your registered installation ID. Keep this file on your own device." Classes="muted" TextWrapping="Wrap" FontSize="12" />
+                  <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10"><TextBox Text="{Binding IdentityFile}" Watermark="Official Gameforge identity (.json)" /><Button Grid.Column="1" Content="Browse…" Click="BrowseIdentity" /></Grid>
+                  <TextBox Text="{Binding InstallationId}" Watermark="Installation ID override (optional)" />
+                </StackPanel>
+              </Expander>
             </StackPanel></Border>
-            <Button Classes="primary" Content="Save settings" Command="{Binding SaveSettingsCommand}" IsEnabled="{Binding CanCheck}" HorizontalAlignment="Left" />
+            <Border Classes="card" Padding="22" IsVisible="{Binding !UseGameforge}"><StackPanel Spacing="10">
+              <TextBlock Text="Private server" FontSize="15" FontWeight="SemiBold" />
+              <TextBlock Text="Authentication URL" Classes="muted" /><TextBox Text="{Binding PrivateAuthUrl}" Watermark="https://127.0.0.1:7001" />
+              <TextBlock Text="Game server host (optional)" Classes="muted" /><TextBox Text="{Binding PrivateServerHost}" Watermark="Use the server advertised by the game" />
+              <TextBlock Text="Port mappings (optional)" Classes="muted" /><TextBox Text="{Binding PrivatePortRemap}" Watermark="4000=4000,5000=5000" />
+            </StackPanel></Border>
+            <Border Classes="card" Padding="22"><StackPanel Spacing="11">
+              <TextBlock Text="Developer tools" FontSize="15" FontWeight="SemiBold" />
+              <CheckBox Content="Open packet logger when the game starts" IsChecked="{Binding PacketLogger}" />
+              <TextBlock Text="Cleartext packets are saved to a timestamped JSONL file in the data folder's packet-logs directory. Logs can include account and chat data. Choose Save settings to apply." Classes="muted" TextWrapping="Wrap" FontSize="12" />
+            </StackPanel></Border>
+            <Button Classes="primary" Content="Save settings" Command="{Binding SaveSettingsCommand}" IsEnabled="{Binding CanSaveSettings}" HorizontalAlignment="Left" />
           </StackPanel>
         </ScrollViewer>
       </Grid>
     </Grid>
-    <Grid x:Name="GamePanel" IsVisible="False" RowDefinitions="Auto,*" Background="#10131C">
-      <Grid ColumnDefinitions="Auto,*,Auto" Margin="16,10"><Button Content="←  Back" Click="BackToLibrary" /><TextBlock Grid.Column="1" Text="NosTale" VerticalAlignment="Center" Margin="20,0" Classes="muted" /><Button Grid.Column="2" Content="Close game" Click="CloseGame" /></Grid>
-      <Border x:Name="GameHost" Grid.Row="1" />
-    </Grid>
     <Grid IsVisible="{Binding SignInVisible}" Background="#D80A0D14">
-      <Border Classes="card" Width="420" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="26">
+      <Border Classes="card" Width="520" MaxHeight="680" VerticalAlignment="Center" HorizontalAlignment="Center" Padding="24">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled">
         <StackPanel Spacing="14">
-          <TextBlock Text="Sign in with Gameforge" FontSize="18" FontWeight="SemiBold" />
+          <TextBlock Text="Finish signing in" FontSize="18" FontWeight="SemiBold" />
           <Border IsVisible="{Binding HasSignInError}" Background="#3A2420" BorderBrush="#7A4B42" BorderThickness="1" CornerRadius="8" Padding="12"><TextBlock Text="{Binding SignInError}" Foreground="#F0C5BC" TextWrapping="Wrap" FontSize="12" /></Border>
           <StackPanel Spacing="10" IsVisible="{Binding StageCredentials}">
             <TextBox Text="{Binding SignInEmail}" Watermark="Gameforge email" />
@@ -102,16 +195,33 @@
             <TextBlock Text="Enter the code from your authenticator app." Classes="muted" FontSize="12" />
             <TextBox Text="{Binding SignInOtp}" Watermark="Authenticator code" />
           </StackPanel>
-          <StackPanel Spacing="10" IsVisible="{Binding StageCaptcha}">
-            <Image Source="{Binding CaptchaPrompt}" Stretch="Uniform" MaxHeight="40" HorizontalAlignment="Left" />
-            <Image Source="{Binding CaptchaIcons}" Stretch="Uniform" MaxHeight="90" HorizontalAlignment="Left" />
-            <StackPanel Orientation="Horizontal" Spacing="12">
-              <Image Source="{Binding CaptchaTarget}" Stretch="Uniform" MaxHeight="70" />
-              <StackPanel VerticalAlignment="Center" Spacing="6">
-                <TextBlock Text="Type the number of the matching image." Classes="muted" FontSize="12" TextWrapping="Wrap" MaxWidth="180" />
-                <TextBox Text="{Binding SignInCaptchaAnswer}" Watermark="1–4" Width="90" HorizontalAlignment="Left" />
+          <StackPanel Spacing="10" IsVisible="{Binding StageCaptcha}" IsEnabled="{Binding !SignInBusy}">
+            <TextBlock Text="Read Gameforge's instruction, then drag an item onto the picture." TextWrapping="Wrap" FontSize="13" />
+            <Border Background="#34474F" BorderBrush="#6D8587" BorderThickness="1" CornerRadius="8" Padding="12">
+              <Image Source="{Binding CaptchaPrompt}" Stretch="Uniform" Height="44" />
+            </Border>
+            <ItemsControl ItemsSource="{Binding CaptchaChoices}" HorizontalAlignment="Stretch">
+              <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Columns="4" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <StackPanel Spacing="5" Margin="5,0">
+                    <Border Height="76" Background="#153C4C" CornerRadius="10" BorderBrush="#4A6B70" BorderThickness="1" Cursor="Hand"
+                            PointerPressed="CaptchaPointerPressed" PointerMoved="CaptchaPointerMoved" PointerReleased="CaptchaPointerReleased">
+                      <Image Source="{Binding Image}" Stretch="Uniform" Margin="4" IsHitTestVisible="False" />
+                    </Border>
+                    <Button Classes="subtle" Content="{Binding Number}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                            Command="{Binding $parent[ItemsControl].DataContext.ChooseCaptchaCommand}" CommandParameter="{Binding}" />
+                  </StackPanel>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <Border x:Name="CaptchaDropTarget" DragDrop.AllowDrop="True" Background="#F8FAF5" BorderBrush="#78B99C" BorderThickness="2" CornerRadius="12" Padding="14" HorizontalAlignment="Center" Width="210">
+              <StackPanel Spacing="10">
+                <Image Source="{Binding CaptchaTarget}" Stretch="Uniform" Width="160" Height="160" IsHitTestVisible="False" />
+                <TextBlock Text="Drop your item here" HorizontalAlignment="Center" Foreground="#365848" FontSize="11" IsHitTestVisible="False" />
               </StackPanel>
-            </StackPanel>
+            </Border>
+            <TextBlock Text="You can also click the number under an item to submit it." Classes="muted" FontSize="11" TextWrapping="Wrap" HorizontalAlignment="Center" />
           </StackPanel>
           <StackPanel Spacing="6" IsVisible="{Binding StageAccounts}">
             <TextBlock Text="Choose your game account" FontSize="13" />
@@ -125,11 +235,13 @@
           </StackPanel>
           <ProgressBar IsIndeterminate="True" IsVisible="{Binding SignInBusy}" Height="3" Foreground="#B9F074" />
           <Grid ColumnDefinitions="Auto,*,Auto">
-            <Button Content="Cancel" Command="{Binding CancelSignInCommand}" />
-            <Button Grid.Column="2" Classes="primary" Content="{Binding SignInSubmitLabel}" Command="{Binding SignInSubmitCommand}" IsVisible="{Binding SignInSubmitVisible}" IsEnabled="{Binding !SignInBusy}" />
+            <Button Content="Cancel" Command="{Binding CancelSignInCommand}" IsEnabled="{Binding !SignInBusy}" />
+            <Button Grid.Column="2" Classes="primary" Content="{Binding SignInSubmitLabel}" Command="{Binding SignInSubmitCommand}" IsDefault="True" IsVisible="{Binding SignInSubmitVisible}" IsEnabled="{Binding !SignInBusy}" />
           </Grid>
         </StackPanel>
+        </ScrollViewer>
       </Border>
     </Grid>
+    <Border x:Name="IdentityBrowserHost" IsVisible="False" Margin="32" Background="#142329" />
   </Grid>
 </Window>

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <OutputType Condition="$([MSBuild]::IsOSPlatform('Windows'))">WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>ClientLab</AssemblyName>
+    <ApplicationIcon>../ClientLab.Launcher/Assets/noscore.ico</ApplicationIcon>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(LauncherPayload)' != ''">
+    <EmbeddedResource Include="$(LauncherPayload)" LogicalName="LauncherPayload.zip" />
+  </ItemGroup>
+  <Target Name="RequirePayload" BeforeTargets="PrepareForPublish" Condition="'$(LauncherPayload)' == ''">
+    <Error Text="Use desktop/publish.ps1 to provide the launcher payload." />
+  </Target>
+</Project>

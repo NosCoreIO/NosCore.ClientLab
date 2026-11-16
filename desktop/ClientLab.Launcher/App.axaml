@@ -1,16 +1,27 @@
 <Application xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="NosCore.ClientLab.Launcher.App" RequestedThemeVariant="Dark">
   <Application.Styles>
-    <FluentTheme />
-    <Style Selector="Window"><Setter Property="FontFamily" Value="Inter, Segoe UI, sans-serif" /><Setter Property="Background" Value="#10131C" /><Setter Property="Foreground" Value="#EDF1FA" /></Style>
+    <FluentTheme>
+      <FluentTheme.Palettes>
+        <ColorPaletteResources x:Key="Dark" Accent="#B9E8CC" />
+      </FluentTheme.Palettes>
+    </FluentTheme>
+    <Style Selector="Window"><Setter Property="FontFamily" Value="Inter, Segoe UI, sans-serif" /><Setter Property="Background" Value="#111B1E" /><Setter Property="Foreground" Value="#F0F2EC" /></Style>
     <Style Selector="Button"><Setter Property="CornerRadius" Value="9" /><Setter Property="Padding" Value="17,11" /><Setter Property="Cursor" Value="Hand" /></Style>
-    <Style Selector="Button.primary"><Setter Property="Background" Value="#B9F074" /><Setter Property="Foreground" Value="#152213" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Padding" Value="28,15" /></Style>
-    <Style Selector="Button.primary:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="#CEF6A0" /><Setter Property="Foreground" Value="#152213" /></Style>
-    <Style Selector="Button.nav"><Setter Property="Background" Value="Transparent" /><Setter Property="HorizontalContentAlignment" Value="Left" /><Setter Property="Foreground" Value="#A4ABBD" /><Setter Property="Padding" Value="18,13" /><Setter Property="BorderThickness" Value="0" /></Style>
-    <Style Selector="Button.nav.active"><Setter Property="Background" Value="#242B36" /><Setter Property="Foreground" Value="#D9F4B7" /></Style>
-    <Style Selector="TextBox"><Setter Property="Background" Value="#141924" /><Setter Property="BorderBrush" Value="#323A4A" /><Setter Property="CornerRadius" Value="8" /><Setter Property="Padding" Value="12,11" /></Style>
-    <Style Selector="TextBlock.muted"><Setter Property="Foreground" Value="#939CAF" /></Style>
-    <Style Selector="TextBlock.eyebrow"><Setter Property="Foreground" Value="#8B97AA" /><Setter Property="FontSize" Value="11" /><Setter Property="LetterSpacing" Value="2" /></Style>
-    <Style Selector="Border.card"><Setter Property="Background" Value="#191E2A" /><Setter Property="CornerRadius" Value="14" /><Setter Property="BorderBrush" Value="#2A3242" /><Setter Property="BorderThickness" Value="1" /></Style>
+    <Style Selector="Button.primary"><Setter Property="Background" Value="#B9E8CC" /><Setter Property="Foreground" Value="#16332B" /><Setter Property="FontWeight" Value="SemiBold" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Padding" Value="28,15" /></Style>
+    <Style Selector="Button.primary:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="#D0F2DE" /><Setter Property="Foreground" Value="#16332B" /></Style>
+    <Style Selector="Button.nav"><Setter Property="Background" Value="Transparent" /><Setter Property="HorizontalContentAlignment" Value="Left" /><Setter Property="Foreground" Value="#9EAFAB" /><Setter Property="Padding" Value="18,13" /><Setter Property="BorderThickness" Value="0" /></Style>
+    <Style Selector="Button.nav.active"><Setter Property="Background" Value="#21332F" /><Setter Property="Foreground" Value="#C4E9D6" /></Style>
+    <Style Selector="Button.mode"><Setter Property="Background" Value="#17272B" /><Setter Property="BorderBrush" Value="#526B67" /><Setter Property="FontSize" Value="12" /></Style>
+    <Style Selector="Button.mode.active"><Setter Property="Background" Value="#B9E8CC" /><Setter Property="Foreground" Value="#16332B" /></Style>
+    <Style Selector="Button.subtle"><Setter Property="Background" Value="Transparent" /><Setter Property="BorderThickness" Value="0" /><Setter Property="Foreground" Value="#A1B4AD" /><Setter Property="Padding" Value="8,6" /><Setter Property="FontSize" Value="11" /></Style>
+    <Style Selector="Button.subtle:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="#243A35" /></Style>
+    <Style Selector="Button.news"><Setter Property="Background" Value="#B31B2B2D" /><Setter Property="BorderBrush" Value="#66718782" /><Setter Property="BorderThickness" Value="1" /><Setter Property="Padding" Value="15,13" /><Setter Property="CornerRadius" Value="12" /></Style>
+    <Style Selector="Button.news:pointerover /template/ ContentPresenter"><Setter Property="Background" Value="#29413D" /></Style>
+    <Style Selector="TextBox"><Setter Property="Background" Value="#172528" /><Setter Property="BorderBrush" Value="#364C4D" /><Setter Property="CornerRadius" Value="8" /><Setter Property="Padding" Value="12,11" /></Style>
+    <Style Selector="TextBlock.muted"><Setter Property="Foreground" Value="#92A5A1" /></Style>
+    <Style Selector="TextBlock.eyebrow"><Setter Property="Foreground" Value="#9BB6AD" /><Setter Property="FontSize" Value="11" /><Setter Property="LetterSpacing" Value="2" /></Style>
+    <Style Selector="Border.card"><Setter Property="Background" Value="#1B2B2D" /><Setter Property="CornerRadius" Value="14" /><Setter Property="BorderBrush" Value="#314743" /><Setter Property="BorderThickness" Value="1" /></Style>
+    <Style Selector="Border.notice"><Setter Property="Background" Value="#342F25" /><Setter Property="CornerRadius" Value="9" /><Setter Property="BorderBrush" Value="#665B40" /><Setter Property="BorderThickness" Value="1" /><Setter Property="TextElement.Foreground" Value="#EDDDB6" /></Style>
   </Application.Styles>
 </Application>

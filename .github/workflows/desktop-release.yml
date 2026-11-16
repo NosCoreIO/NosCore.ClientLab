@@ -1,0 +1,78 @@
+name: Desktop launcher releases
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Launcher version (for example 0.1.0)
+        required: true
+        default: '0.1.0'
+  push:
+    tags: ['launcher-v*']
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runtime: win-x64
+          - os: ubuntu-22.04
+            runtime: linux-x64
+          - os: macos-15-intel
+            runtime: osx-x64
+          - os: macos-15
+            runtime: osx-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Check launcher behavior
+        shell: pwsh
+        run: |
+          dotnet build desktop/ClientLab.Checks -m:1
+          if ($LASTEXITCODE) { throw 'Launcher check build failed.' }
+          dotnet desktop/ClientLab.Checks/bin/Debug/net10.0/ClientLab.Checks.dll
+          if ($LASTEXITCODE) { throw 'Launcher checks failed.' }
+      - name: Package launcher
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $version = if ($env:INPUT_VERSION) { $env:INPUT_VERSION } else { $env:RELEASE_TAG -replace '^launcher-v', '' }
+          ./desktop/publish.ps1 -Runtime '${{ matrix.runtime }}' -Version $version
+      - name: Verify bundled payload
+        shell: pwsh
+        run: |
+          $binaries = @(Get-ChildItem ./dist -File | Where-Object { $_.Name -notlike '*.sha256' })
+          if ($binaries.Count -ne 1) { throw 'Expected one release executable.' }
+          $binary = $binaries[0]
+          & $binary.FullName --verify-payload
+          if ($LASTEXITCODE) { throw 'Payload extraction failed.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClientLab-${{ matrix.runtime }}
+          path: |
+            dist/ClientLab-*
+          if-no-files-found: error
+  release:
+    if: startsWith(github.ref, 'refs/tags/launcher-v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release/* --draft --verify-tag --title "ClientLab ${RELEASE_TAG#launcher-v}" --notes "Experimental native launcher. Game files and build tools are downloaded or imported locally. Linux and macOS builds require platform testing; these executables are unsigned."

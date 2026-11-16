@@ -30,3 +30,8 @@ __pycache__/
 
 # Browser automation scratch
 .playwright-mcp/
+
+# Chromium caches written beside a browser-mode run
+DawnCache/
+GPUCache/
+MediaDeviceSalts*
