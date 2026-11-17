@@ -26,7 +26,7 @@ const defaults = { url: arg('--url', 'http://127.0.0.1:8090/'), params: arg('--p
   slot: (arg('--slot', process.env.CLIENTLAB_SLOT || '') || null)?.split(',').map(Number) };
 // Reads (state, screenshots, memory) are left out of the action log.
 const QUIET = new Set(['client_state', 'skills', 'inventory', 'map_grid', 'dialogs', 'screenshot', 'client_log', 'read_memory',
-  'find_signature', 'client_api', 'packets', 'wait_for']);
+  'find_signature', 'client_api', 'packets', 'wait_for', 'portals']);
 function logAction(name, args, content, error) {
   if (!defaults.log || QUIET.has(name)) return;
   let result = content?.type === 'text' ? content.text : content?.type;
@@ -344,7 +344,8 @@ async function guardTick() {
       logAction('guard', {}, json(event));
     };
     const s = await control({ op: 'state', kinds: ['none'] });
-    if (s.inWorld) {
+    // A dead character (0 %) waits for the revive box; eating then only wastes the item.
+    if (s.inWorld && s.character.hp > 0) {
       for (const [stat, below, vnum] of [['hp', guard.hpBelow, guard.hpItem], ['mp', guard.mpBelow, guard.mpItem]]) {
         if (!vnum || below === null || s.character[stat] > below || Date.now() - (guard.used[stat] || 0) < guard.cooldown * 1000) continue;
         guard.used[stat] = Date.now();
@@ -386,7 +387,33 @@ async function interact({ id, wait = true, timeout = 20 }) {
   return { ...(await control({ op: 'state', kinds: ['none'] })).character, timedOut: true };
 }
 
-async function walk({ x, y, wait = true, timeout = 30 }) {
+// Portals of the current map: the gp packets since the last at (map change) in the packet log.
+async function portals() {
+  const log = await page.evaluate(() => window.packetLog?.list ?? []);
+  let from = 0;
+  for (let i = log.length - 1; i >= 0; i--) if (log[i].direction === 'recv' && log[i].raw.startsWith('at ')) { from = i; break; }
+  return log.slice(from).filter((p) => p.direction === 'recv' && p.raw.startsWith('gp ')).map((p) => {
+    const [, x, y, map, type, id] = p.raw.split(' ').map(Number);
+    return { id, x, y, map, type };
+  });
+}
+
+// The pickup walks to the item first; done once the item has left the ground.
+async function pickUp({ id, timeout = 15 }) {
+  await control({ op: 'pickup', id });
+  for (const end = Date.now() + timeout * 1000; Date.now() < end; await sleep(250)) {
+    await guardTick();
+    const s = await control({ op: 'state', kinds: ['items'] });
+    if (!s.items?.some((i) => i.id === id)) return { pickedUp: id, character: s.character };
+  }
+  throw new Error(`item ${id} is still on the ground after ${timeout} s`);
+}
+
+async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPortal = false }) {
+  await ensurePage();
+  // Stepping on (or next to) a portal cell sends the character through it.
+  const near = throughPortal ? null : (await portals()).find((p) => Math.max(Math.abs(p.x - x), Math.abs(p.y - y)) <= 1);
+  if (near) throw new Error(`[${x},${y}] is on or next to portal ${near.id} at [${near.x},${near.y}] to map ${near.map}: pick another cell, or pass through_portal to take it`);
   await control({ op: 'walk', x, y });
   if (!wait) return 'walking';
   let last = null, still = 0;
@@ -425,14 +452,18 @@ const TOOLS = [
   { name: 'inventory', description: 'Inventory items (vnum, pocket, slot, amount, name).', inputSchema: obj(), run: () => control({ op: 'inventory' }).then(json) },
   { name: 'map_grid', description: 'The walkability grid of the current map: one row string per y, "." walkable, "#" blocked.', inputSchema: obj(), run: () => control({ op: 'grid' }).then(json) },
   { name: 'walk', description: 'Walk to a cell like a floor click. Waits for arrival unless wait is false.',
-    inputSchema: obj({ x: { type: 'integer' }, y: { type: 'integer' }, wait: { type: 'boolean' }, timeout: { type: 'number', description: 'Seconds' } }, ['x', 'y']),
+    inputSchema: obj({ x: { type: 'integer' }, y: { type: 'integer' }, wait: { type: 'boolean' }, timeout: { type: 'number', description: 'Seconds' },
+      through_portal: { type: 'boolean', description: 'Allow a cell on or next to a portal (refused otherwise)' } }, ['x', 'y']),
     run: (a) => walk(a).then(json) },
   { name: 'select', description: 'Select a monster, NPC or player as the target, like clicking it once.', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'select', id: a.id }).then(json) },
   { name: 'interact', description: 'Act on an entity like clicking it: walk up to it, then attack a monster with the armed skill or talk to an NPC. Waits until the character has stopped walking unless wait is false.',
     inputSchema: obj({ id, wait: { type: 'boolean' }, timeout: { type: 'number', description: 'Seconds' } }, ['id']), run: (a) => interact(a).then(json) },
   { name: 'use_skill', description: 'Arm a skill by cast id (0 is the basic attack) and use it on a target, like the skill bar.',
     inputSchema: obj({ cast_id: { type: 'integer' }, target: id }, ['cast_id']), run: (a) => control({ op: 'skill', castId: a.cast_id, target: a.target ?? 0 }).then(json) },
-  { name: 'pick_up', description: 'Pick up a ground item by id.', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'pickup', id: a.id }).then(json) },
+  { name: 'pick_up', description: 'Pick up a ground item by id: walks to it and waits until it has left the ground.',
+    inputSchema: obj({ id, timeout: { type: 'number', description: 'Seconds' } }, ['id']), run: (a) => pickUp(a).then(json) },
+  { name: 'portals', description: 'Portals of the current map (from the packet log): id, cell, destination map, type.', inputSchema: obj(),
+    run: async () => { await ensurePage(); return json(await portals()); } },
   { name: 'collect', description: 'Collect from a collectable map object (an NPC entry).', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'collect', id: a.id }).then(json) },
   { name: 'use_item', description: 'Use an inventory item the way a double click does (wear equipment; potion, scroll, wing, box, quest item), by vnum or by pocket and slot.',
     inputSchema: obj({ vnum: { type: 'integer' }, pocket: { type: 'integer' }, slot: { type: 'integer' } }),

@@ -134,6 +134,10 @@ offer, `#revival^0`). It runs before each tool, inside `walk` and `wait_for`, an
 `guard` with no arguments shows what it did. `client_state` lists entities nearest first with their distance in cells,
 so an agent can pull the closest group instead of a whole room.
 
+`walk` refuses a cell on or next to a portal of the current map (the `gp` packets since the last `at`, listed by
+`portals`) unless `through_portal` is set, so a character is not sent through one by accident. `interact` and `pick_up`
+return once the walk to the target is over and, for `pick_up`, once the item has left the ground.
+
 On a Linux machine without a GPU, headless Chromium stops updating the canvas after the login screen, although the
 game keeps running. Run it headed under Xvfb with ANGLE on Mesa's GL instead:
 
