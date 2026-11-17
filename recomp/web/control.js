@@ -137,23 +137,25 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     };
   }
 
-  function entities(list, kind, selfId) {
+  function entities(list, kind, selfId, keep = () => true) {
     const out = [];
     for (let i = 0, n = listCount(list); i < n; i++) {
       const e = listItem(list, i), id = i32(e + ENT.id);
       if (!e || id <= 0 || (kind === 'player' && id === selfId)) continue;
-      out.push(entityInfo(e, kind));
+      const info = entityInfo(e, kind);
+      if (keep(info)) out.push(info);
     }
     return out;
   }
 
-  function groundItems(list) {
+  function groundItems(list, keep = () => true) {
     const out = [];
     for (let i = 0, n = listCount(list); i < n; i++) {
       const it = listItem(list, i), id = i32(it + ENT.id);
       if (!it || id <= 0) continue;
-      out.push({ id, vnum: s16(it + 0xca), x: u16(it + ENT.x), y: u16(it + ENT.y), owner: i32(it + 0xd8),
-        name: str(ptr(ptr(it + 0xcc) + 0x38)) });
+      const info = { id, vnum: s16(it + 0xca), x: u16(it + ENT.x), y: u16(it + ENT.y), owner: i32(it + 0xd8),
+        name: str(ptr(ptr(it + 0xcc) + 0x38)) };
+      if (keep(info)) out.push(info);
     }
     return out;
   }
@@ -198,22 +200,32 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     return out;
   }
 
-  function state() {
+  // Cells between two points as the client counts them for skill range: the larger of the two axis distances.
+  const cells = (a, b) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+
+  // radius limits the lists to that many cells around the character, vnums to those monster/NPC/item vnums, and
+  // kinds to some of monsters, npcs, players and items.
+  function state({ radius, vnums, kinds } = {}) {
     const mgr = obj('player'), self_ = ptr(mgr + MGR.entity), id = i32(mgr + MGR.id);
     if (!mgr || !self_ || id <= 0) return { inWorld: false };
     const ui = obj('targetUi'), target = u8(ui + TARGET_UI.selected) ? ptr(ui + TARGET_UI.entity) : 0;
     const scene = obj('scene');
     const selected = inRange(target) ? entityInfo(target) : null;
+    const me = { x: u16(self_ + ENT.x), y: u16(self_ + ENT.y) };
+    const keep = (e) => (radius === undefined || radius === null || cells(me, e) <= radius)
+      && (!vnums?.length || vnums.includes(e.vnum));
+    const want = (k) => (!kinds?.length || kinds.includes(k));
+    const list = (k, kind) => (want(k) ? entities(ptr(scene + SCENE[k]), kind, id, keep) : undefined);
     return {
       inWorld: true,
       character: { id, name: str(ptr(self_ + ENT.playerName)), map: i32(self_ + ENT.map), x: u16(self_ + ENT.x),
         y: u16(self_ + ENT.y), level: u8(self_ + ENT.level), heroLevel: u8(self_ + ENT.heroLevel), hp: s8(self_ + ENT.hp),
         mp: s8(self_ + ENT.mp), sitting: !!u8(mgr + MGR.sitting), morph: u8(self_ + ENT.morph), action: i32(mgr + MGR.action) },
       target: selected,
-      monsters: entities(ptr(scene + SCENE.monsters), 'monster', id),
-      npcs: entities(ptr(scene + SCENE.npcs), 'npc', id),
-      players: entities(ptr(scene + SCENE.players), 'player', id),
-      items: groundItems(ptr(scene + SCENE.items)),
+      monsters: list('monsters', 'monster'),
+      npcs: list('npcs', 'npc'),
+      players: list('players', 'player'),
+      items: want('items') ? groundItems(ptr(scene + SCENE.items), keep) : undefined,
     };
   }
 
@@ -284,28 +296,41 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     return out;
   }
 
+  // The target window a click on an entity opens; the client then shows the entity's bars at the top.
+  const selectEntity = (e) => call(resolve().select, need(obj('mateManager'), 'no mate manager'), e, 0x78, [1, 1, 0]);
+  const standing = () => { if (u8(player() + MGR.sitting)) throw new Error('the character is sitting: call rest to stand up first'); };
+
   let scratch = 0;
-  const scratchRecord = () => (scratch ||= call(need(resolve().newString, 'string allocator not found in this build'), 16));
+  const RECORD_BYTES = 32;
+  const scratchRecord = () => {
+    scratch ||= call(need(resolve().newString, 'string allocator not found in this build'), RECORD_BYTES);
+    HEAPU8.fill(0, scratch, scratch + RECORD_BYTES);
+    return scratch;
+  };
 
   const actions = {
-    // What a double click on the item in the inventory does: potions, scrolls, wings, boxes, quest items.
+    // What a double click on the item in the inventory does: wear equipment; use potions, scrolls, wings, boxes, quest items.
     use_item({ vnum, pocket, slot }) {
       const found = inventoryItems().find(({ item, def }) => (vnum !== undefined && vnum !== null
         ? i32(def + 0x30) === vnum : s8(item + 0x1c) === pocket && s16(item + 0x1e) === slot));
       const { item, def } = need(found, vnum !== undefined && vnum !== null ? `no item ${vnum} in the inventory` : `no item in pocket ${pocket} slot ${slot}`);
       const rec = scratchRecord();
       dv().setUint32(rec, item, true);
-      HEAPU8[rec + 4] = 1;
+      // The record's source: 0 wears an equipment item, 1 (the worn-equipment source) would take it off; other pockets use 1.
+      HEAPU8[rec + 4] = s8(item + 0x1c) === 0 ? 0 : 1;
       dv().setInt16(rec + 6, s8(item + 0x1c), true);
       dv().setInt16(rec + 8, s16(item + 0x1e), true);
       call(need(resolve().useItem, 'use item code not found in this build'), need(obj('game'), 'not in the world'), rec);
       return { used: { vnum: i32(def + 0x30), name: str(ptr(def + 0x38)), pocket: s8(item + 0x1c), slot: s16(item + 0x1e) } };
     },
     // Press the box's own Yes or No button.
-    answer({ index, yes }) {
+    answer({ index, text, yes }) {
       const pool = need(obj('dialogs'), 'no dialog pool');
       const shown = dialogs();
-      const d = need(index === undefined || index === null ? shown[0] : shown.find((x) => x.index === index), 'no dialog is open');
+      if (!shown.length) throw new Error('no dialog is open');
+      const has = (d) => [d.text, d.yes, d.no].some((t) => t.toLowerCase().includes(text.toLowerCase()));
+      const d = need(text ? shown.find(has) : index === undefined || index === null ? shown[0] : shown.find((x) => x.index === index),
+        `no open dialog ${text ? `contains "${text}"` : `has index ${index}`}; open: ${shown.map((x) => `${x.index} "${x.text}"`).join(', ')}`);
       const box = ptr(ptr(pool + 0xc) + d.index * 4);
       const buttons = need(dialogButtons(box), 'dialog buttons not found');
       call(resolve().dialogButton, box, yes ? buttons.yes : buttons.no);
@@ -316,26 +341,33 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       call(resolve().preWalk, mgr);
       call(resolve().walk, mgr, ((y & 0xffff) << 16) | (x & 0xffff), 0, [1]);
     },
-    select({ id }) {
-      const e = need(entity(id), `no entity ${id} on this map`);
-      call(resolve().select, need(obj('mateManager'), 'no mate manager'), e, 0x78, [1, 1, 0]);
-    },
-    // What a click on a monster, NPC or player does: walk up to it, then attack or talk with the armed skill.
+    select({ id }) { selectEntity(need(entity(id), `no entity ${id} on this map`)); },
+    // What a click on a monster, NPC or player does: select it, walk up to it, then attack or talk with the armed skill.
     interact({ id }) {
-      call(resolve().interact, player(), need(entity(id), `no entity ${id} on this map`));
+      const e = need(entity(id), `no entity ${id} on this map`);
+      standing();
+      if (u8(e + ENT.kind) !== 3) selectEntity(e);
+      call(resolve().interact, player(), e);
     },
     skill({ castId, target }) {
       const s = need(skillDef(castId), `skill ${castId} not learned`);
       const ui = need(obj('skillUi'), 'no skill bar');
       const e = target ? need(entity(target), `no entity ${target} on this map`) : 0;
-      const def = s.def, ground = u8(def + SKILL.target) === 3;
+      const def = s.def, ground = u8(def + SKILL.target) === 3, range = u8(def + SKILL.range);
+      standing();
+      if (!s.ready) throw new Error(`skill ${castId} is on cooldown`);
+      if (e && range && u8(def + SKILL.self) !== 2) {
+        const me = ptr(player() + MGR.entity), d = cells({ x: u16(me + ENT.x), y: u16(me + ENT.y) }, { x: u16(e + ENT.x), y: u16(e + ENT.y) });
+        if (d > range) throw new Error(`target ${target} is ${d} cells away and the skill reaches ${range}: walk closer first`);
+      }
+      if (e && u8(e + ENT.kind) !== 3) selectEntity(e);
       if (ground && e) {
         const scene = obj('scene');
         dv().setUint16(scene + SCENE.groundX, u16(e + ENT.x), true);
         dv().setUint16(scene + SCENE.groundY, u16(e + ENT.y), true);
       }
       call(resolve().armSkill, ui, def, s.ready ? 1 : 0);
-      if (e && u8(def + SKILL.range) !== 0 && u8(def + SKILL.self) !== 2) call(resolve().interact, player(), e);
+      if (e && range !== 0 && u8(def + SKILL.self) !== 2) call(resolve().interact, player(), e);
     },
     pickup({ id }) {
       call(resolve().pickup, player(), need(findIn(sceneList('items'), id), `no item ${id} on the ground`));
@@ -349,7 +381,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
   // ---- requests ----
   function serve(req) {
     switch (req.op) {
-      case 'state': return state();
+      case 'state': return state(req);
       case 'grid': return grid();
       case 'inventory': return inventory();
       case 'skills': return skills();

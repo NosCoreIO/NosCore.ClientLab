@@ -25,7 +25,7 @@ const defaults = { url: arg('--url', 'http://127.0.0.1:8090/'), params: arg('--p
   attach: arg('--attach', process.env.CLIENTLAB_ATTACH || ''), log: arg('--log', process.env.CLIENTLAB_ACTION_LOG || '') };
 // Reads (state, screenshots, memory) are left out of the action log.
 const QUIET = new Set(['client_state', 'skills', 'inventory', 'map_grid', 'dialogs', 'screenshot', 'client_log', 'read_memory',
-  'find_signature', 'client_api']);
+  'find_signature', 'client_api', 'packets', 'wait_for']);
 function logAction(name, args, content, error) {
   if (!defaults.log || QUIET.has(name)) return;
   let result = content?.type === 'text' ? content.text : content?.type;
@@ -111,7 +111,9 @@ async function open({ url = defaults.url, params = defaults.params, headed = def
   watch(page);
   layout = LAYOUT[/PORT_SCREEN=(\d+x\d+)/.exec(params)?.[1]] || LAYOUT.default;
   // Message boxes answer themselves with their default button so nothing waits on a human.
-  await page.goto(`${url}?autodismiss=1${params ? `&${params}` : ''}`);
+  // The packet log feeds packets and wait_for.
+  const query = [params, /PORT_PACKET_LOG=/.test(params) ? '' : 'PORT_PACKET_LOG=1'].filter(Boolean).join('&');
+  await page.goto(`${url}?autodismiss=1&${query}`);
   return 'client opened';
 }
 
@@ -231,6 +233,33 @@ async function waitLog(re, seconds, after = 0) {
   return false;
 }
 
+// Packets the client sent or received after seq, newest last, filtered by header, direction and text.
+async function packetsSince(seq, { header, direction, contains } = {}) {
+  const log = await page.evaluate(() => window.packetLog ?? null);
+  if (!log) throw new Error('this client keeps no packet log: open it with PORT_PACKET_LOG=1 (the launcher\'s packet logger setting)');
+  return { seq: log.seq, list: log.list.filter((p) => p.seq > seq && (!direction || p.direction === direction)
+    && (!header || p.raw.split(' ')[0] === header || p.raw.split(' ')[1] === header) && (!contains || p.raw.includes(contains))) };
+}
+const packetSeq = async () => (page ? (await page.evaluate(() => window.packetLog?.seq ?? 0).catch(() => 0)) : 0);
+// Where wait_for starts: the packet count just before the last action, so a reply that came before the call is not missed.
+let actionSeq = 0;
+
+async function waitFor({ header, direction, contains, dialog, timeout = 30 }) {
+  await ensurePage();
+  if (!header && !contains && !dialog) throw new Error('give a packet header, a text it contains or a dialog text');
+  for (const end = Date.now() + timeout * 1000; ; await sleep(250)) {
+    if (header || contains) {
+      const { list } = await packetsSince(actionSeq, { header, direction, contains });
+      if (list.length) { actionSeq = list[0].seq; return list[0]; }
+    }
+    if (dialog) {
+      const box = (await control({ op: 'dialogs' })).find((d) => [d.text, d.yes, d.no].some((t) => t.toLowerCase().includes(dialog.toLowerCase())));
+      if (box) return box;
+    }
+    if (Date.now() >= end) throw new Error(`nothing matched within ${timeout} s`);
+  }
+}
+
 async function waitState(test, seconds) {
   for (const end = Date.now() + seconds * 1000; Date.now() < end; await sleep(500)) {
     const s = await control({ op: 'state' }).catch(() => null);
@@ -325,7 +354,10 @@ const TOOLS = [
     inputSchema: obj({ slot: { type: 'array', items: { type: 'integer' }, description: 'Character slot position [x,y] on the 1680x1050 screen' } }),
     run: (a) => enterWorld(a).then(json) },
   { name: 'client_state', description: 'Character (id, name, map, cell, level, HP/MP, sitting), current target, and the monsters, NPCs, players and ground items the client knows on this map.',
-    inputSchema: obj(), run: () => control({ op: 'state' }).then(json) },
+    inputSchema: obj({ radius: { type: 'integer', description: 'Only entities within this many cells of the character' },
+      vnums: { type: 'array', items: { type: 'integer' }, description: 'Only these monster, NPC or item vnums' },
+      kinds: { type: 'array', items: { type: 'string' }, description: 'Only these lists: monsters, npcs, players, items' } }),
+    run: (a) => control({ op: 'state', radius: a.radius, vnums: a.vnums, kinds: a.kinds }).then(json) },
   { name: 'skills', description: 'Learned skills with cast id, range, area, MP cost and whether each is off cooldown.', inputSchema: obj(), run: () => control({ op: 'skills' }).then(json) },
   { name: 'inventory', description: 'Inventory items (vnum, pocket, slot, amount, name).', inputSchema: obj(), run: () => control({ op: 'inventory' }).then(json) },
   { name: 'map_grid', description: 'The walkability grid of the current map: one row string per y, "." walkable, "#" blocked.', inputSchema: obj(), run: () => control({ op: 'grid' }).then(json) },
@@ -339,14 +371,23 @@ const TOOLS = [
     inputSchema: obj({ cast_id: { type: 'integer' }, target: id }, ['cast_id']), run: (a) => control({ op: 'skill', castId: a.cast_id, target: a.target ?? 0 }).then(json) },
   { name: 'pick_up', description: 'Pick up a ground item by id.', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'pickup', id: a.id }).then(json) },
   { name: 'collect', description: 'Collect from a collectable map object (an NPC entry).', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'collect', id: a.id }).then(json) },
-  { name: 'use_item', description: 'Use an inventory item the way a double click does (potion, scroll, wing, box, quest item), by vnum or by pocket and slot.',
+  { name: 'use_item', description: 'Use an inventory item the way a double click does (wear equipment; potion, scroll, wing, box, quest item), by vnum or by pocket and slot.',
     inputSchema: obj({ vnum: { type: 'integer' }, pocket: { type: 'integer' }, slot: { type: 'integer' } }),
     run: (a) => control({ op: 'use_item', vnum: a.vnum, pocket: a.pocket, slot: a.slot }).then(json) },
   { name: 'dialogs', description: 'Open yes/no boxes (questions, confirmations, revive, teleport offers): their text and what Yes and No would answer.',
     inputSchema: obj(), run: () => control({ op: 'dialogs' }).then(json) },
-  { name: 'answer_dialog', description: 'Press Yes or No on an open yes/no box (the first one unless index is given).',
-    inputSchema: obj({ yes: { type: 'boolean' }, index: { type: 'integer' } }, ['yes']),
-    run: (a) => control({ op: 'answer', yes: a.yes, index: a.index }).then(json) },
+  { name: 'answer_dialog', description: 'Press Yes or No on an open yes/no box: the one whose text or answers contain text, else the one at index, else the first.',
+    inputSchema: obj({ yes: { type: 'boolean' }, text: { type: 'string', description: 'Part of the box text or of its answers, e.g. "Continue here" or "#revival"' },
+      index: { type: 'integer' } }, ['yes']),
+    run: (a) => control({ op: 'answer', yes: a.yes, text: a.text, index: a.index }).then(json) },
+  { name: 'wait_for', description: 'Wait for a packet (by header, direction and/or text) sent or received since the last action, or for a yes/no box whose text contains dialog. Returns the packet or the box.',
+    inputSchema: obj({ header: { type: 'string', description: 'Packet header, e.g. at, c_info, sayi' }, direction: { type: 'string', enum: ['send', 'recv'] },
+      contains: { type: 'string' }, dialog: { type: 'string' }, timeout: { type: 'number', description: 'Seconds, default 30' } }),
+    run: (a) => waitFor(a).then(json) },
+  { name: 'packets', description: 'The last packets the client sent and received (newest last), optionally filtered by header, direction and text.',
+    inputSchema: obj({ header: { type: 'string' }, direction: { type: 'string', enum: ['send', 'recv'] }, contains: { type: 'string' },
+      last: { type: 'integer', description: 'How many, default 30' } }),
+    run: async (a) => { await ensurePage(); return json((await packetsSince(0, a)).list.slice(-(a.last || 30)).map((p) => `${p.direction} ${p.raw}`)); } },
   { name: 'rest', description: 'Sit down or stand up.', inputSchema: obj(), run: () => control({ op: 'rest' }).then(json) },
   { name: 'screenshot', description: 'The game screen (1680x1050).', inputSchema: obj(), run: () => screenshot() },
   { name: 'click', description: 'Click the game screen at [x,y] in 1680x1050 coordinates, for windows and dialogues.',
@@ -395,6 +436,7 @@ async function handle(m) {
         const invalid = invalidArgs(tool.inputSchema, args);
         if (invalid) return send({ id: m.id, error: { code: -32602, message: `${tool.name}: ${invalid}` } });
         try {
+          if (!QUIET.has(tool.name)) actionSeq = await packetSeq();
           const content = await tool.run(args);
           logAction(tool.name, args, content);
           return send({ id: m.id, result: { content: [content] } });

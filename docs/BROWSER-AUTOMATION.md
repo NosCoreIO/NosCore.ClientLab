@@ -89,16 +89,16 @@ a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
 
 | Request | What it does |
 |---|---|
-| `{op:'state'}` | Character (id, name, map, cell, level, HP/MP, sitting), target, monsters, NPCs, players, ground items |
+| `{op:'state', radius, vnums, kinds}` | Character (id, name, map, cell, level, HP/MP, sitting), target, monsters, NPCs, players, ground items; the optional filters keep entities within `radius` cells, with those `vnums`, or only some lists |
 | `{op:'skills'}`, `{op:'inventory'}`, `{op:'grid'}` | Learned skills, inventory, the map's walkability grid |
 | `{op:'walk', x, y}` | A floor click on that cell |
 | `{op:'select', id}` | Selects the entity as the target |
-| `{op:'interact', id}` | A click on the entity: walk up, then attack with the armed skill or talk |
-| `{op:'skill', castId, target}` | Arms the skill from the skill bar and uses it on the target |
+| `{op:'interact', id}` | A click on the entity: select it, walk up, then attack with the armed skill or talk |
+| `{op:'skill', castId, target}` | Selects the target, arms the skill from the skill bar and uses it; refused while sitting, on cooldown or out of range |
 | `{op:'pickup', id}`, `{op:'collect', id}`, `{op:'rest'}` | Picks up, collects from a map object, sits or stands |
 | `{op:'use_item', vnum}` or `{op:'use_item', pocket, slot}` | A double click on the inventory item |
 | `{op:'dialogs'}` | Open yes/no boxes (revive, teleport offers, confirmations): their text and what Yes and No answer |
-| `{op:'answer', yes, index}` | Presses the box's own Yes or No button |
+| `{op:'answer', yes, text, index}` | Presses the Yes or No button of the box whose text or answers contain `text` (or the one at `index`) |
 | `{op:'read', address, length}`, `{op:'scan', signature}`, `{op:'call', address, eax, edx, ecx, stack}` | For finding new structures and functions |
 
 `recomp/web/mcp.mjs` wraps these, plus screenshots, clicks and keys for the windows that have no call yet, as an MCP
@@ -120,6 +120,11 @@ claude mcp add clientlab -- node /path/to/NosCore.ClientLab/recomp/web/mcp.mjs -
 
 `--log` appends every action (walk, select, answer_dialog, ...) with its arguments and result as one JSON line, so a run
 can be replayed or reviewed next to the packet log. Reads such as `client_state` and `screenshot` are left out.
+
+With the packet log on (`PORT_PACKET_LOG=1`, which the MCP adds to the pages it opens, or the launcher's packet logger
+setting), the page keeps the last 2000 cleartext packets. `packets` lists them and `wait_for` waits for one by header,
+direction or text, counted from just before the last action so a fast reply is not missed. `wait_for` also takes
+`dialog` to wait for a yes/no box.
 
 On a Linux machine without a GPU, headless Chromium stops updating the canvas after the login screen, although the
 game keeps running. Run it headed under Xvfb with ANGLE on Mesa's GL instead:
