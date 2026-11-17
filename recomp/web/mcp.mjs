@@ -325,7 +325,7 @@ async function enterWorld({ slot = defaults.slot } = {}) {
     await (slot ? click(slot) : click(layout.slot, { layout: true }));
     await sleep(2000);
     await click(layout.start, { layout: true });
-    const s = await waitState((st) => st.inWorld, 30);
+    const s = await waitState((st) => st.inWorld && st.character.hp > 0, 30);
     if (s) return s.character;
   }
   throw new Error('did not enter the world: if the slot was empty, pass slot as the character\'s [x,y] on a character-select screenshot (or start the MCP with --slot x,y)');
@@ -399,6 +399,27 @@ async function portals() {
   });
 }
 
+// Sitting and standing take a server round trip; the character's flag flips when it lands.
+async function rest({ timeout = 5 } = {}) {
+  const before = (await control({ op: 'state', kinds: ['none'] })).character?.sitting;
+  await control({ op: 'rest' });
+  for (const end = Date.now() + timeout * 1000; Date.now() < end; await sleep(200)) {
+    const c = (await control({ op: 'state', kinds: ['none'] })).character;
+    if (c && c.sitting !== before) return c;
+  }
+  throw new Error(`still ${before ? 'sitting' : 'standing'} after ${timeout} s`);
+}
+
+// A skill still cooling down (often from the auto-attack interact starts) is waited for, up to wait seconds.
+async function useSkill({ cast_id: castId, target = 0, wait = 5 }) {
+  for (const end = Date.now() + wait * 1000; ; await sleep(200)) {
+    const skill = (await control({ op: 'skills' })).find((k) => k.castId === castId);
+    if (!skill || skill.ready || Date.now() >= end) break;
+    await guardTick();
+  }
+  return control({ op: 'skill', castId, target });
+}
+
 // The pickup walks to the item first; done once the item has left the ground.
 async function pickUp({ id, timeout = 15 }) {
   await control({ op: 'pickup', id });
@@ -460,7 +481,8 @@ const TOOLS = [
   { name: 'interact', description: 'Act on an entity like clicking it: walk up to it, then attack a monster with the armed skill or talk to an NPC. Waits until the character has stopped walking unless wait is false.',
     inputSchema: obj({ id, wait: { type: 'boolean' }, timeout: { type: 'number', description: 'Seconds' } }, ['id']), run: (a) => interact(a).then(json) },
   { name: 'use_skill', description: 'Arm a skill by cast id (0 is the basic attack) and use it on a target, like the skill bar.',
-    inputSchema: obj({ cast_id: { type: 'integer' }, target: id }, ['cast_id']), run: (a) => control({ op: 'skill', castId: a.cast_id, target: a.target ?? 0 }).then(json) },
+    inputSchema: obj({ cast_id: { type: 'integer' }, target: id, wait: { type: 'number', description: 'Seconds to wait for the skill to come off cooldown, default 5' } }, ['cast_id']),
+    run: (a) => useSkill(a).then(json) },
   { name: 'pick_up', description: 'Pick up a ground item by id: walks to it and waits until it has left the ground.',
     inputSchema: obj({ id, timeout: { type: 'number', description: 'Seconds' } }, ['id']), run: (a) => pickUp(a).then(json) },
   { name: 'portals', description: 'Portals of the current map (from the packet log): id, cell, destination map, type.', inputSchema: obj(),
@@ -488,7 +510,8 @@ const TOOLS = [
     inputSchema: obj({ header: { type: 'string' }, direction: { type: 'string', enum: ['send', 'recv'] }, contains: { type: 'string' },
       last: { type: 'integer', description: 'How many, default 30' } }),
     run: async (a) => { await ensurePage(); return json((await packetsSince(0, a)).list.slice(-(a.last || 30)).map((p) => `${p.direction} ${p.raw}`)); } },
-  { name: 'rest', description: 'Sit down or stand up.', inputSchema: obj(), run: () => control({ op: 'rest' }).then(json) },
+  { name: 'rest', description: 'Sit down or stand up; returns once the server has confirmed it.', inputSchema: obj({ timeout: { type: 'number', description: 'Seconds' } }),
+    run: (a) => rest(a).then(json) },
   { name: 'screenshot', description: 'The game screen, with its size in pixels; click takes the same pixel coordinates.', inputSchema: obj(), run: () => screenshot() },
   { name: 'click', description: 'Click the game screen at [x,y] in screenshot pixels, for windows and dialogues.',
     inputSchema: obj({ x: { type: 'integer' }, y: { type: 'integer' }, button: { type: 'string', enum: ['left', 'right'] }, double: { type: 'boolean' } }, ['x', 'y']),

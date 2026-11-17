@@ -136,7 +136,8 @@ so an agent can pull the closest group instead of a whole room.
 
 `walk` refuses a cell on or next to a portal of the current map (the `gp` packets since the last `at`, listed by
 `portals`) unless `through_portal` is set, so a character is not sent through one by accident. `interact` and `pick_up`
-return once the walk to the target is over and, for `pick_up`, once the item has left the ground.
+return once the walk to the target is over and, for `pick_up`, once the item has left the ground. `rest` returns once
+the server has sat or stood the character, and `use_skill` waits up to `wait` seconds for the skill's cooldown.
 
 On a Linux machine without a GPU, headless Chromium stops updating the canvas after the login screen, although the
 game keeps running. Run it headed under Xvfb with ANGLE on Mesa's GL instead:
