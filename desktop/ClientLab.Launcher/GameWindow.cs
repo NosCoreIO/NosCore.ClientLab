@@ -10,7 +10,7 @@ namespace NosCore.ClientLab.Launcher;
 
 public sealed class GameWindow : Window
 {
-    private const string StatsScript = "return window.gameStats ? JSON.stringify(window.gameStats) : ''";
+    private const string StatsScript = "return window.gameExited ? 'exited' : window.gameStats ? JSON.stringify(window.gameStats) : ''";
     private static readonly Size DefaultChrome = new(16, 39);
     private readonly AvaloniaCefBrowser browser;
     private readonly Func<Task> closeRuntime;
@@ -18,7 +18,7 @@ public sealed class GameWindow : Window
     private readonly DispatcherTimer statsTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private (int Width, int Height) applied;
     private Task? closeTask;
-    private bool allowClose, polling;
+    private bool allowClose, polling, exitRequested;
 
     public GameWindow(string url, Func<Task> closeRuntime, (int Width, int Height)? resolution = null, Action<int, int>? rememberResolution = null)
     {
@@ -36,10 +36,13 @@ public sealed class GameWindow : Window
         Content = browser;
         statsTimer.Tick += async (_, _) => await PollStatsAsync();
         Opened += (_, _) => statsTimer.Start();
+        // Like the native client's close button, this asks the game to quit: it confirms with the player and saves its
+        // in-game options before exiting, and the window follows it. Closing again while it asks closes at once.
         Closing += async (_, e) =>
         {
             if (allowClose) return;
             e.Cancel = true;
+            if (!exitRequested && await RequestGameExitAsync()) { exitRequested = true; return; }
             await CloseGameAsync();
         };
     }
@@ -54,6 +57,12 @@ public sealed class GameWindow : Window
         finally { allowClose = true; Close(); }
     }
 
+    private async Task<bool> RequestGameExitAsync()
+    {
+        try { return await browser.EvaluateJavaScript<bool>("return window.closeGame ? window.closeGame() : false"); }
+        catch (Exception) { return false; /* the page never loaded or is already gone */ }
+    }
+
     // The page publishes the frames it showed in the last second and the size the game rendered at.
     private async Task PollStatsAsync()
     {
@@ -62,6 +71,7 @@ public sealed class GameWindow : Window
         try
         {
             var json = await browser.EvaluateJavaScript<string>(StatsScript);
+            if (json == "exited") { _ = CloseGameAsync(); return; }
             if (string.IsNullOrEmpty(json)) return;
             using var stats = JsonDocument.Parse(json);
             var fps = stats.RootElement.GetProperty("fps").GetInt32();

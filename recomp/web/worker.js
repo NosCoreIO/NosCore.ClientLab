@@ -104,56 +104,64 @@ function mountGameFile(FS, dir, name, url, size) {
   node.node_ops = { ...fileNode, setattr: (n, attr) => { materialise(n); return fileNode.setattr(n, attr); } };
 }
 
-// Keep the game's own INI representation. The C# host stores it outside patched
-// game versions, so desktop and browser launches restore exactly the same bytes.
+// The client reads Config.ini at start and writes its in-game options to Config.dat when it shuts down. The C# host
+// keeps both files outside patched game versions, so desktop and browser launches restore exactly the same bytes.
+const SETTINGS_FILES = ['config.ini', 'config.dat'];
+
 function installGameSettings(FS) {
-  const path = '/c:/nostale/config.ini', endpoint = '/game-settings/config.ini';
-  const isSettings = name => typeof name === 'string' && name.replace(/\\/g, '/').toLowerCase() === path;
   const report = text => postMessage({ type: 'log', text });
-  try {
-    const request = new XMLHttpRequest();
-    request.open('GET', endpoint, false);
-    request.responseType = 'arraybuffer';
-    request.send();
-    // Older standalone game hosts still work without the persistence extension.
-    if (request.getResponseHeader('X-ClientLab-Settings') !== 'enabled') return;
-    if (request.status === 200) {
-      if (FS.analyzePath(path).exists) FS.unlink(path);
-      FS.writeFile(path, new Uint8Array(request.response));
-    } else if (request.status !== 404) {
-      report('Game settings could not be restored; using the available client defaults.');
-    }
-  } catch (error) {
-    report('Game settings could not be restored; using the available client defaults.');
-    return;
-  }
-  let lastSaved = null;
-  const save = () => {
+  const settingsFile = name => {
+    if (typeof name !== 'string') return null;
+    const path = name.replace(/\\/g, '/').toLowerCase();
+    return SETTINGS_FILES.find(file => path === `/c:/nostale/${file}`) ?? null;
+  };
+  const lastSaved = new Map();
+  for (const file of SETTINGS_FILES) {
+    const path = `/c:/nostale/${file}`;
     try {
-      const bytes = FS.readFile(path);
-      if (lastSaved && bytes.length === lastSaved.length && bytes.every((value, index) => value === lastSaved[index])) return;
       const request = new XMLHttpRequest();
-      request.open('POST', endpoint, false);
+      request.open('GET', `/game-settings/${file}`, false);
+      request.responseType = 'arraybuffer';
+      request.send();
+      // Older standalone game hosts still work without the persistence extension.
+      if (request.getResponseHeader('X-ClientLab-Settings') !== 'enabled') return;
+      if (request.status === 200) {
+        if (FS.analyzePath(path).exists) FS.unlink(path);
+        FS.writeFile(path, new Uint8Array(request.response));
+      } else if (request.status !== 404) {
+        report('Game settings could not be restored; using the available client defaults.');
+      }
+    } catch (error) {
+      report('Game settings could not be restored; using the available client defaults.');
+      return;
+    }
+  }
+  const save = file => {
+    try {
+      const bytes = FS.readFile(`/c:/nostale/${file}`), previous = lastSaved.get(file);
+      if (previous && bytes.length === previous.length && bytes.every((value, index) => value === previous[index])) return;
+      const request = new XMLHttpRequest();
+      request.open('POST', `/game-settings/${file}`, false);
       request.setRequestHeader('Content-Type', 'application/octet-stream');
       request.send(bytes);
       if (request.status !== 204) throw new Error('Settings save failed');
-      lastSaved = bytes.slice();
+      lastSaved.set(file, bytes.slice());
     } catch (error) { report('Game settings could not be saved. Check Activity and the data folder permissions.'); }
   };
   const close = FS.close;
   FS.close = function(stream) {
-    let changed = false;
-    try { changed = (stream.flags & 3) !== 0 && isSettings(FS.getPath(stream.node)); } catch (error) { }
+    let file = null;
+    try { if ((stream.flags & 3) !== 0) file = settingsFile(FS.getPath(stream.node)); } catch (error) { }
     const result = close.call(FS, stream);
-    if (changed) save();
+    if (file) save(file);
     return result;
   };
   const rename = FS.rename;
   FS.rename = function(from, to) {
     const result = rename.call(FS, from, to);
-    let changed = isSettings(to);
-    try { changed ||= isSettings(FS.getPath(FS.lookupPath(to).node)); } catch (error) { }
-    if (changed) save();
+    let file = settingsFile(to);
+    try { file ??= settingsFile(FS.getPath(FS.lookupPath(to).node)); } catch (error) { }
+    if (file) save(file);
     return result;
   };
 }
@@ -182,6 +190,7 @@ self.Module = {
   locateFile: (path) => `/build/${path}`,
   print: (text) => postMessage({ type: 'log', text }),
   printErr: (text) => postMessage({ type: 'log', text }),
+  onExit: (code) => postMessage({ type: 'exited', code }),
   preRun: [() => {
     let code = params.get('auth');
     if (!code) {

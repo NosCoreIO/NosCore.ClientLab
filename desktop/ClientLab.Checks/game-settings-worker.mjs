@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 const worker = fs.readFileSync(new URL('../../recomp/web/worker.js', import.meta.url), 'utf8');
 const settingsPath = '/c:/nostale/config.ini';
-let saved = new TextEncoder().encode('[EW_Sound_Config]\r\nBGMSoundOff=1\r\nFxSoundOff=0\r\n');
+const optionsPath = '/c:/nostale/config.dat';
+const host = new Map([['/game-settings/config.ini', new TextEncoder().encode('[EW_Sound_Config]\r\nBGMSoundOff=1\r\nFxSoundOff=0\r\n')]]);
+let saved = host.get('/game-settings/config.ini');
 let writes = 0, failSave = false, supported = true;
 const logs = [];
 function instance() {
@@ -21,12 +23,16 @@ function instance() {
     rename: (from, to) => { files.set(full(to), files.get(full(from))); files.delete(full(from)); }
   };
   class Xhr {
-    open(method, path, async) { assert.equal(path, '/game-settings/config.ini'); assert.equal(async, false); this.method = method; }
+    open(method, path, async) { assert(['/game-settings/config.ini', '/game-settings/config.dat'].includes(path)); assert.equal(async, false); this.method = method; this.path = path; }
     setRequestHeader() {}
     getResponseHeader(name) { assert.equal(name, 'X-ClientLab-Settings'); return supported ? 'enabled' : null; }
     send(body) {
-      if (this.method === 'GET') { this.status = saved ? 200 : 404; this.response = saved?.slice().buffer; }
-      else { this.status = failSave ? 500 : 204; if (!failSave) { saved = Uint8Array.from(body); writes++; } }
+      const file = host.get(this.path);
+      if (this.method === 'GET') { this.status = file ? 200 : 404; this.response = file?.slice().buffer; }
+      else {
+        this.status = failSave ? 500 : 204;
+        if (!failSave) { host.set(this.path, Uint8Array.from(body)); writes++; if (this.path.endsWith('.ini')) saved = host.get(this.path); }
+      }
     }
   }
   const context = vm.createContext({ URLSearchParams, SharedArrayBuffer, Int32Array, Uint8Array, XMLHttpRequest: Xhr,
@@ -58,6 +64,14 @@ assert(logs.some(text => text.includes('could not be saved')));
 assert.deepEqual([...saved], [...replaced], 'A failed write damaged the last durable settings');
 failSave = false; FS.close({ flags: 1, node: { path: settingsPath } });
 assert.deepEqual([...saved], [...changed], 'Settings were not retried after a failed save');
+({ FS, files } = instance());
+assert.equal(FS.analyzePath(optionsPath).exists, false, 'In-game options appeared before the client ever saved them');
+const options = Uint8Array.from({ length: 1024 }, (_, index) => index % 251);
+FS.writeFile(optionsPath, options); FS.close({ flags: 1, node: { path: optionsPath } });
+assert.deepEqual([...host.get('/game-settings/config.dat')], [...options], 'In-game options written at shutdown were not saved');
+({ FS, files } = instance());
+assert.deepEqual([...FS.readFile(optionsPath)], [...options], 'Restarting the worker lost the in-game options');
+assert.deepEqual([...FS.readFile(settingsPath)], [...changed], 'Saving the in-game options changed Config.ini');
 supported = false;
 const olderHost = instance(); assert.equal(olderHost.FS.close, olderHost.originalClose, 'An older game host lost its normal file behavior');
-console.log('PASS: worker restores original INI bytes, persists write-close and atomic rename, survives restart, excludes other game files, and retries failed saves.');
+console.log('PASS: worker restores original Config.ini and Config.dat bytes, persists write-close and atomic rename, survives restart, excludes other game files, and retries failed saves.');

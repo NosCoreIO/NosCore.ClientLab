@@ -209,6 +209,8 @@
       pending.push(m.text);
       window.allLog.push(m.text);
       if (!flushQueued) { flushQueued = true; requestAnimationFrame(flushLog); }
+    } else if (m.type === 'exited') {
+      window.gameExited = true;
     } else if (m.type === 'input') {
       ring = m.ring;
       audioDone = m.audioDone;
@@ -495,7 +497,14 @@
   });
 
   // Same event codes as pump_input in hle_user32.c.
-  const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7, dumpFrame: 8, profile: 9 };
+  const IN = { move: 1, down: 2, up: 3, wheel: 4, keydown: 5, keyup: 6, char: 7, dumpFrame: 8, profile: 9, close: 10 };
+  // The desktop window's close button: the client asks the player to confirm, then saves its in-game options while it
+  // shuts down. Returns whether a running game got the request.
+  window.closeGame = () => {
+    if (!ring || window.gameExited) return false;
+    send(IN.close, 0);
+    return true;
+  };
   // From DevTools: toggles the detailed profile lines of a running game.
   let rendererProfileDetailed = false;
   window.toggleProfile = () => {

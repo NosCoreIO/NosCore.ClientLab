@@ -255,29 +255,25 @@ static void w_timeGetDevCaps(CPU* c) { if (ARG(0)) { M32(ARG(0)) = 1; M32(ARG(0)
 
 static uint32_t persona_addr, language_addr, branch_addr;
 static void s_one(CPU* c) { RET(1); }
+/* The client passes one 1024-byte buffer and reads it back as a C string; nothing else is on the stack for us. */
+enum { AUTH_TICKET_CAPACITY = 0x400 };
 static void s_GetAuthSessionTicket(CPU* c) {
     const char* code = getenv("_NC_AUTH_CODE");
-    uint32_t buf = ARG(0), size = ARG(1), psize = ARG(2);
-    if (!code || !*code || !buf || !size) {
+    uint32_t buf = ARG(0);
+    if (!code || !*code || !buf) {
         port_log("auth ticket requested but none is available");
-        if (psize) M32(psize) = 0;
         RET(0);
         return;
     }
     uint32_t n = (uint32_t)strlen(code);
-    if (n >= size) {
-        port_log("auth ticket buffer is too small");
-        if (psize) M32(psize) = 0;
+    if (n >= AUTH_TICKET_CAPACITY) {
+        port_log("auth ticket is too long for the client's buffer");
         RET(0);
         return;
     }
     port_log("auth ticket handed to the client (%u chars)", n);
     memcpy(GPTR(buf), code, n);
-    // This wrapper is consumed as text by the client. Its buffer may contain
-    // old bytes beyond the ticket; terminate it rather than append garbage to
-    // the NoS0577 token (the length out-parameter still excludes the NUL).
     M8(buf + n) = 0;
-    if (psize) M32(psize) = n;
     RET(1);
 }
 static void s_GetPersonaName(CPU* c) { if (!persona_addr) persona_addr = guest_strdup(""); RET(persona_addr); }
