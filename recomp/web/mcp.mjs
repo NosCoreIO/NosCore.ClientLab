@@ -30,7 +30,31 @@ function logAction(name, args, content, error) {
   try { result = JSON.parse(result); } catch { }
   try {
     appendFileSync(defaults.log, `${JSON.stringify({ time: new Date().toISOString(), tool: name, args, ...(error ? { error } : { result }) })}\n`);
-  } catch { }
+  } catch (e) {
+    process.stderr.write(`action log ${defaults.log}: ${e.message}\n`);
+  }
+}
+if (defaults.log) {
+  try { appendFileSync(defaults.log, ''); } catch (e) {
+    process.stderr.write(`cannot write the action log ${defaults.log}: ${e.message}\n`);
+    process.exit(1);
+  }
+}
+
+// The argument checks the tool schemas here need: required keys and the four scalar/array types.
+const TYPES = { integer: Number.isInteger, boolean: (v) => typeof v === 'boolean', string: (v) => typeof v === 'string', array: Array.isArray };
+function invalidArgs(schema, args) {
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return 'arguments must be an object';
+  for (const key of schema.required || []) if (args[key] === undefined) return `${key} is required`;
+  for (const [key, value] of Object.entries(args)) {
+    const spec = schema.properties?.[key];
+    if (!spec) return `unknown argument ${key}`;
+    if (value === undefined || value === null) continue;
+    if (TYPES[spec.type] && !TYPES[spec.type](value)) return `${key} must be ${spec.type === 'integer' ? 'an' : 'a'} ${spec.type}`;
+    if (spec.enum && !spec.enum.includes(value)) return `${key} must be one of ${spec.enum.join(', ')}`;
+    if (spec.type === 'array' && spec.items?.type && !value.every(TYPES[spec.items.type])) return `${key} items must be ${spec.items.type}s`;
+  }
+  return null;
 }
 
 // Screen positions in the 1680x1050 canvas space the page is scaled to; the login screens move at 1280x720.
@@ -258,6 +282,8 @@ async function handle(m) {
         const tool = TOOLS.find((t) => t.name === m.params?.name);
         if (!tool) return send({ id: m.id, error: { code: -32602, message: `unknown tool ${m.params?.name}` } });
         const args = m.params.arguments || {};
+        const invalid = invalidArgs(tool.inputSchema, args);
+        if (invalid) return send({ id: m.id, error: { code: -32602, message: `${tool.name}: ${invalid}` } });
         try {
           const content = await tool.run(args);
           logAction(tool.name, args, content);
