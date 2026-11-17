@@ -402,11 +402,9 @@ async function interact({ id, wait = true, timeout = 20 }) {
 
 // Portals of the current map: the gp packets since the last at (map change) in the packet log.
 async function portals() {
-  const log = await page.evaluate(() => window.packetLog?.list ?? []);
-  let from = 0;
-  for (let i = log.length - 1; i >= 0; i--) if (log[i].direction === 'recv' && log[i].raw.startsWith('at ')) { from = i; break; }
-  return log.slice(from).filter((p) => p.direction === 'recv' && p.raw.startsWith('gp ')).map((p) => {
-    const [, x, y, map, type, id] = p.raw.split(' ').map(Number);
+  const lines = await page.evaluate(() => window.mapPortals ?? []);
+  return lines.map((raw) => {
+    const [, x, y, map, type, id] = raw.split(' ').map(Number);
     return { id, x, y, map, type };
   });
 }

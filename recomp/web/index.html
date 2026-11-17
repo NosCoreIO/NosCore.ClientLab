@@ -141,6 +141,15 @@
   // The last cleartext packets for tools that wait on the server (PORT_PACKET_LOG=1); seq keeps counting past the cap.
   const PACKET_LINES = 2000;
   window.packetLog = { seq: 0, list: [] };
+  // The current map's portals are kept apart from the bounded log, so a long stay on one map does not lose them.
+  window.mapPortals = [];
+  function recordPacket(direction, raw) {
+    window.packetLog.list.push({ seq: ++window.packetLog.seq, direction, raw });
+    if (window.packetLog.list.length > PACKET_LINES) window.packetLog.list.splice(0, window.packetLog.list.length - PACKET_LINES);
+    if (direction !== 'recv') return;
+    if (raw.startsWith('at ')) window.mapPortals = [];
+    else if (raw.startsWith('gp ')) window.mapPortals.push(raw);
+  }
   function flushLog() {
     flushQueued = false;
     lines = lines.concat(pending);
@@ -240,8 +249,7 @@
     } else if (m.type === 'open-url') {
       window.open(m.url, '_blank', 'noopener');
     } else if (m.type === 'packet') {
-      window.packetLog.list.push({ seq: ++window.packetLog.seq, direction: m.kind === 0 ? 'send' : 'recv', raw: m.raw });
-      if (window.packetLog.list.length > PACKET_LINES) window.packetLog.list.splice(0, window.packetLog.list.length - PACKET_LINES);
+      recordPacket(m.kind === 0 ? 'send' : 'recv', m.raw);
       packetSends = packetSends.then(() => fetch('/packets', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(m)})).then(response=>{if(!response.ok)throw Error('Packet log write failed: '+response.status);}).catch(error=>console.error(error.message));
     } else if (m.type === 'sound') {
       sound(m);
