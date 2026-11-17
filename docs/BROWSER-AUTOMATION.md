@@ -135,7 +135,9 @@ offer, `#revival^0`). It runs before each tool, inside `walk` and `wait_for`, an
 so an agent can pull the closest group instead of a whole room.
 
 `walk` refuses a cell on or next to a portal of the current map (the `gp` packets since the last `at`, listed by
-`portals`) unless `through_portal` is set, so a character is not sent through one by accident. `interact` and `pick_up`
+`portals`) unless `through_portal` is set, so a character is not sent through one by accident. Around known portals it plans the
+route itself, in legs short enough that no route the client could pick between them passes one, and a `walk` with
+`wait` off is refused when it could. `interact` and `pick_up`
 return once the walk to the target is over and, for `pick_up`, once the item has left the ground. `rest` returns once
 the server has sat or stood the character, and `use_skill` waits up to `wait` seconds for the skill's cooldown.
 

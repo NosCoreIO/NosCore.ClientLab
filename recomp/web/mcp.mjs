@@ -450,7 +450,19 @@ async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPo
   const known = throughPortal ? [] : await portals();
   const near = known.find((p) => Math.max(Math.abs(p.x - x), Math.abs(p.y - y)) <= 1);
   if (near) throw new Error(`[${x},${y}] is on or next to portal ${near.id} at [${near.x},${near.y}] to map ${near.map}: pick another cell, or pass through_portal to take it`);
-  if (!wait) { await control({ op: 'walk', x, y }); return 'walking'; }
+  if (!wait) {
+    // Without waiting there is a single leg, so with portals around it is only sent when it cannot pass one.
+    if (known.length) {
+      const from = (await control({ op: 'state', kinds: ['none'] })).character;
+      const grid = await control({ op: 'grid' });
+      const avoid = portalAvoid(known, from);
+      const path = gridPath(grid, from, { x, y }, avoid);
+      if (!path) throw new Error(`no walkable path from [${from.x},${from.y}] to [${x},${y}] that keeps off the portals`);
+      if (!legSafe(grid, from, { x, y }, avoid, path.length)) throw new Error(`the way to [${x},${y}] may pass a portal: walk with wait to follow a route around it`);
+    }
+    await control({ op: 'walk', x, y });
+    return 'walking';
+  }
   const end = Date.now() + timeout * 1000;
   // With portals around, the route is planned around them up front; otherwise the client's own walk goes first, and
   // since it gives up on long detours, a stalled walk is retried along waypoints from the map grid.
@@ -460,21 +472,46 @@ async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPo
   const from = c?.character ?? (await control({ op: 'state', kinds: ['none'] })).character;
   const grid = await control({ op: 'grid' });
   if (grid && grid.rows[y]?.[x] !== '.') throw new Error(`[${x},${y}] is not walkable`);
-  // Leaving an arrival portal is allowed: around the portal the character stands next to, only its own cell is avoided.
-  const reach = (p, cx, cy) => Math.max(Math.abs(p.x - cx), Math.abs(p.y - cy)) <= (reach.start.has(p) ? 0 : 1);
-  reach.start = new Set(known.filter((p) => Math.max(Math.abs(p.x - from.x), Math.abs(p.y - from.y)) <= 1));
-  const avoid = (cx, cy) => known.some((p) => reach(p, cx, cy));
+  const avoid = portalAvoid(known, from);
   const path = gridPath(grid, from, { x, y }, avoid);
   if (!path) throw new Error(`no walkable path from [${from.x},${from.y}] to [${x},${y}]${known.length ? ' that keeps off the portals' : ''}`);
   if (!path.length) return from;
-  for (let i = Math.min(WAYPOINT, path.length) - 1; ; i = Math.min(i + WAYPOINT, path.length - 1)) {
+  // The client picks its own route between waypoints, so near portals a leg is shortened until none of its routes
+  // can pass one; a single step is always safe.
+  for (let at = from, i = Math.min(WAYPOINT, path.length) - 1; ; i = Math.min(i + WAYPOINT, path.length - 1)) {
+    const first = path.indexOf(at) + 1;
+    while (known.length && i > first && !legSafe(grid, at, path[i], avoid, i - first + 1)) i--;
     const p = path[i];
+    at = p;
     c = await walkLeg(p.x, p.y, end);
     if (!c.arrived) throw new Error(`stopped at [${c.character.x},${c.character.y}] on the way to [${x},${y}] (waypoint [${p.x},${p.y}]${c.timedOut ? ', timed out' : ''})`);
     if (i === path.length - 1) return c.character;
   }
 }
 const WAYPOINT = 8;
+
+// Leaving an arrival portal is allowed: around the portal the character stands next to, only its own cell is avoided.
+function portalAvoid(known, from) {
+  const start = new Set(known.filter((p) => cells(p, from) <= 1));
+  return (cx, cy) => known.some((p) => cells(p, { x: cx, y: cy }) <= (start.has(p) ? 0 : 1));
+}
+
+const cells = (a, b) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+
+// Every shortest eight-direction route from a to b stays on cells c with |a,c| + |c,b| = |a,b|. A leg is safe when it
+// takes steps = |a,b| cells, so the client's shortest route stays in that area, and no walkable cell there is near a
+// portal.
+function legSafe(grid, a, b, avoid, steps) {
+  const d = cells(a, b);
+  if (!grid || steps !== d) return false;
+  for (let cy = Math.min(a.y, b.y) - d; cy <= Math.max(a.y, b.y) + d; cy++)
+    for (let cx = Math.min(a.x, b.x) - d; cx <= Math.max(a.x, b.x) + d; cx++) {
+      const c = { x: cx, y: cy };
+      if (cells(a, c) + cells(c, b) !== d) continue;
+      if (grid.rows[cy]?.[cx] === '.' && avoid(cx, cy)) return false;
+    }
+  return true;
+}
 
 async function walkLeg(x, y, end) {
   if (Date.now() >= end) return { arrived: false, timedOut: true, character: (await control({ op: 'state', kinds: ['none'] })).character };
