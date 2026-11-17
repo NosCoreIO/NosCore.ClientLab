@@ -333,10 +333,11 @@ async function enterWorld({ slot = defaults.slot } = {}) {
 
 // The guard eats or drinks below an HP or MP percentage and accepts chosen yes/no boxes. It runs before every tool,
 // inside walk and wait_for loops, and once a second while the MCP is idle.
-const guard = { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, accept: [], cooldown: 4, events: [], used: {} };
+const guard = { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, foodBelow: null, foodItem: null, safeRadius: 6, accept: [],
+  cooldown: 4, events: [], used: {} };
 let guarding = false;
 async function guardTick() {
-  if (!page || guarding || !(guard.hpItem || guard.mpItem || guard.accept.length)) return;
+  if (!page || guarding || !(guard.hpItem || guard.mpItem || guard.foodItem || guard.accept.length)) return;
   guarding = true;
   try {
     const note = (event) => {
@@ -353,6 +354,17 @@ async function guardTick() {
         const used = await control({ op: 'use_item', vnum }).then(() => true, (e) => { note({ stat, vnum, error: String(e?.message || e) }); return false; });
         if (used) note({ stat, percent: s.character[stat], used: vnum });
       }
+      // Food sits the character down, so it waits until no monster is within safeRadius.
+      const food = guard.foodItem, hp = s.character.hp;
+      if (food && guard.foodBelow !== null && hp <= guard.foodBelow && !s.character.sitting
+        && Date.now() - (guard.used.food || 0) >= guard.cooldown * 1000) {
+        const near = (await control({ op: 'state', kinds: ['monsters'], radius: guard.safeRadius })).monsters ?? [];
+        if (!near.length) {
+          guard.used.food = Date.now();
+          const used = await control({ op: 'use_item', vnum: food }).then(() => true, (e) => { note({ stat: 'food', vnum: food, error: String(e?.message || e) }); return false; });
+          if (used) note({ stat: 'food', percent: hp, used: food });
+        }
+      }
     }
     if (guard.accept.length) {
       for (const d of await control({ op: 'dialogs' })) {
@@ -365,9 +377,9 @@ async function guardTick() {
   } catch { } finally { guarding = false; }
 }
 function setGuard(a) {
-  if (a.off) Object.assign(guard, { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, accept: [] });
-  for (const [arg, key] of [['hp_below', 'hpBelow'], ['hp_item', 'hpItem'], ['mp_below', 'mpBelow'], ['mp_item', 'mpItem'], ['accept', 'accept'],
-    ['cooldown', 'cooldown']]) if (a[arg] !== undefined && a[arg] !== null) guard[key] = a[arg];
+  if (a.off) Object.assign(guard, { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, foodBelow: null, foodItem: null, accept: [] });
+  for (const [arg, key] of [['hp_below', 'hpBelow'], ['hp_item', 'hpItem'], ['mp_below', 'mpBelow'], ['mp_item', 'mpItem'], ['food_below', 'foodBelow'],
+    ['food_item', 'foodItem'], ['safe_radius', 'safeRadius'], ['accept', 'accept'], ['cooldown', 'cooldown']]) if (a[arg] !== undefined && a[arg] !== null) guard[key] = a[arg];
   const { events, used, ...config } = guard;
   return { ...config, events: events.slice(-10) };
 }
@@ -436,20 +448,61 @@ async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPo
   // Stepping on (or next to) a portal cell sends the character through it.
   const near = throughPortal ? null : (await portals()).find((p) => Math.max(Math.abs(p.x - x), Math.abs(p.y - y)) <= 1);
   if (near) throw new Error(`[${x},${y}] is on or next to portal ${near.id} at [${near.x},${near.y}] to map ${near.map}: pick another cell, or pass through_portal to take it`);
+  if (!wait) { await control({ op: 'walk', x, y }); return 'walking'; }
+  const end = Date.now() + timeout * 1000;
+  // The client gives up on long detours, so a walk that stalls is retried along waypoints from the map grid.
+  let c = await walkLeg(x, y, end);
+  if (c.arrived) return c.character;
+  const grid = await control({ op: 'grid' });
+  if (grid && grid.rows[y]?.[x] !== '.') throw new Error(`[${x},${y}] is not walkable`);
+  const path = gridPath(grid, c.character, { x, y });
+  if (!path) throw new Error(`no walkable path from [${c.character.x},${c.character.y}] to [${x},${y}]`);
+  for (let i = WAYPOINT; i < path.length + WAYPOINT - 1; i += WAYPOINT) {
+    const p = path[Math.min(i, path.length - 1)];
+    c = await walkLeg(p.x, p.y, end);
+    if (!c.arrived) throw new Error(`stopped at [${c.character.x},${c.character.y}] on the way to [${x},${y}] (waypoint [${p.x},${p.y}]${c.timedOut ? ', timed out' : ''})`);
+  }
+  return c.character;
+}
+const WAYPOINT = 8;
+
+async function walkLeg(x, y, end) {
   await control({ op: 'walk', x, y });
-  if (!wait) return 'walking';
-  let last = null, still = 0;
-  for (const end = Date.now() + timeout * 1000; Date.now() < end; await sleep(500)) {
+  let last = null, still = 0, c = null;
+  for (; Date.now() < end; await sleep(500)) {
     await guardTick();
-    const c = (await control({ op: 'state', kinds: ['none'] })).character;
-    if (!c) break;
-    if (c.x === x && c.y === y) return c;
-    // Stopped short: the path is blocked or the walk was refused.
+    c = (await control({ op: 'state', kinds: ['none'] })).character;
+    if (!c) throw new Error('not in the world');
+    if (c.x === x && c.y === y) return { arrived: true, character: c };
     still = last && last.x === c.x && last.y === c.y ? still + 1 : 0;
-    if (still >= 6) return { ...c, stoppedShort: true };
+    if (still >= 6) return { arrived: false, character: c };
     last = c;
   }
-  return { ...(await control({ op: 'state' })).character, timedOut: true };
+  return { arrived: false, timedOut: true, character: c ?? (await control({ op: 'state', kinds: ['none'] })).character };
+}
+
+// Breadth-first search over the walkability grid, eight directions, no corner cutting.
+function gridPath(grid, from, to) {
+  if (!grid) return null;
+  const { width: w, height: h, rows } = grid, open = (x, y) => x >= 0 && y >= 0 && x < w && y < h && rows[y][x] === '.';
+  if (!open(to.x, to.y)) return null;
+  const prev = new Int32Array(w * h).fill(-1), start = from.y * w + from.x, goal = to.y * w + to.x;
+  prev[start] = start;
+  for (let queue = [start], head = 0; head < queue.length;) {
+    const cur = queue[head++];
+    if (cur === goal) break;
+    const cx = cur % w, cy = (cur / w) | 0;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const nx = cx + dx, ny = cy + dy, n = ny * w + nx;
+      if (!open(nx, ny) || prev[n] >= 0 || (dx && dy && (!open(cx + dx, cy) || !open(cx, cy + dy)))) continue;
+      prev[n] = cur;
+      queue.push(n);
+    }
+  }
+  if (prev[goal] < 0) return null;
+  const path = [];
+  for (let n = goal; n !== start; n = prev[n]) path.unshift({ x: n % w, y: (n / w) | 0 });
+  return path;
 }
 
 const json = (v) => ({ type: 'text', text: typeof v === 'string' ? v : JSON.stringify(v, null, 1) });
@@ -497,9 +550,11 @@ const TOOLS = [
     inputSchema: obj({ yes: { type: 'boolean' }, text: { type: 'string', description: 'Part of the box text or of its answers, e.g. "Continue here" or "#revival"' },
       index: { type: 'integer' } }, ['yes']),
     run: (a) => control({ op: 'answer', yes: a.yes, text: a.text, index: a.index }).then(json) },
-  { name: 'guard', description: 'Keep the character alive between calls: use hp_item (a potion or food vnum) when HP is at or below hp_below percent, the same for MP, and press Yes on any box whose text or answers contain one of accept (e.g. "Teleport", "#revival^0"). Checked before every tool, during walk and wait_for, and every second when idle. No arguments returns the settings and the last things it did; off clears it.',
+  { name: 'guard', description: 'Keep the character alive between calls: use hp_item (a potion) when HP is at or below hp_below percent, the same for MP, eat food_item out of combat, and press Yes on any box whose text or answers contain one of accept (e.g. "Teleport", "#revival^0"). Checked before every tool, during walk and wait_for, and every second when idle. No arguments returns the settings and the last things it did; off clears it.',
     inputSchema: obj({ hp_below: { type: 'integer' }, hp_item: { type: 'integer' }, mp_below: { type: 'integer' }, mp_item: { type: 'integer' },
-      accept: { type: 'array', items: { type: 'string' } }, cooldown: { type: 'number', description: 'Seconds between two uses, default 4' },
+      accept: { type: 'array', items: { type: 'string' } },
+      food_item: { type: 'integer', description: 'Food to eat at or below food_below percent HP, only with no monster within safe_radius cells (it sits the character down)' },
+      food_below: { type: 'integer' }, safe_radius: { type: 'integer', description: 'Default 6' }, cooldown: { type: 'number', description: 'Seconds between two uses, default 4' },
       off: { type: 'boolean' } }),
     run: async (a) => json(setGuard(a)) },
   { name: 'wait_for', description: 'Wait for a packet (by header, direction and/or text) sent or received since the last action, or for a yes/no box whose text contains dialog. Returns the packet or the box.',

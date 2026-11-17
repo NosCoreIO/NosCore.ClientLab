@@ -139,6 +139,10 @@ so an agent can pull the closest group instead of a whole room.
 return once the walk to the target is over and, for `pick_up`, once the item has left the ground. `rest` returns once
 the server has sat or stood the character, and `use_skill` waits up to `wait` seconds for the skill's cooldown.
 
+The client gives up on a long detour without moving. When a `walk` stalls, the MCP finds a path on the map grid and
+walks it in short legs; if that fails too, `walk` returns an error with where the character stopped. The guard's
+`food_item` is eaten only when no monster is within `safe_radius` cells, since eating sits the character down.
+
 On a Linux machine without a GPU, headless Chromium stops updating the canvas after the login screen, although the
 game keeps running. Run it headed under Xvfb with ANGLE on Mesa's GL instead:
 
