@@ -393,7 +393,7 @@ def make_handler(game, build, relay, auth, client_exe=None):
             path = urllib.parse.unquote(urllib.parse.urlparse(self.path).path)
             if path in ("/", "/index.html"):
                 return os.path.join(HERE, "index.html")
-            if path in ("/worker.js", "/gl.js"):
+            if path in ("/worker.js", "/gl.js", "/control.js"):
                 return os.path.join(HERE, path[1:])
             if path.startswith("/build/"):
                 return os.path.join(build, path[len("/build/"):])

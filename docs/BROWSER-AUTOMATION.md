@@ -76,3 +76,45 @@ The launcher performs patching and recompilation in C# using the matching map. A
 patches reuse the compiled runtime. An unknown executable requires a compatibility
 update; it never silently reuses a different executable's map or replaces a good build
 with an incomplete analysis.
+
+## Driving the game through its own functions
+
+`recomp/web/control.js` lets a test or an agent play without aiming the mouse. The page sends one JSON request at a
+time through a shared buffer (`window.clientControl.request({...})`); the game thread answers it between window
+messages, so a client function called there runs where the client's own input handlers would. Nothing builds or
+sends a packet: an action is the call a click or a key ends in, and the client sends what it would have sent for it.
+
+The functions and globals are found by byte patterns in the client's code, so they follow the executable rather than
+a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
+
+| Request | What it does |
+|---|---|
+| `{op:'state'}` | Character (id, name, map, cell, level, HP/MP, sitting), target, monsters, NPCs, players, ground items |
+| `{op:'skills'}`, `{op:'inventory'}`, `{op:'grid'}` | Learned skills, inventory, the map's walkability grid |
+| `{op:'walk', x, y}` | A floor click on that cell |
+| `{op:'select', id}` | Selects the entity as the target |
+| `{op:'interact', id}` | A click on the entity: walk up, then attack with the armed skill or talk |
+| `{op:'skill', castId, target}` | Arms the skill from the skill bar and uses it on the target |
+| `{op:'pickup', id}`, `{op:'collect', id}`, `{op:'rest'}` | Picks up, collects from a map object, sits or stands |
+| `{op:'read', address, length}`, `{op:'scan', signature}`, `{op:'call', address, eax, edx, ecx, stack}` | For finding new structures and functions |
+
+`recomp/web/mcp.mjs` wraps these, plus screenshots, clicks and keys for the windows that have no call yet, as an MCP
+server over stdio. It opens its own Chromium on the game host:
+
+```bash
+claude mcp add clientlab -- node /path/to/NosCore.ClientLab/recomp/web/mcp.mjs --url http://127.0.0.1:8090/ --params PORT_SCREEN=1280x720
+```
+
+`enter_world` picks the first server and channel and the character slot; the other tools then work on the character
+in the world.
+
+On a Linux machine without a GPU, headless Chromium stops updating the canvas after the login screen, although the
+game keeps running. Run it headed under Xvfb with ANGLE on Mesa's GL instead:
+
+```bash
+sudo apt-get install -y xvfb libegl-mesa0 libegl1 libgles2
+CHROME_ARGS="--use-angle=gl --ignore-gpu-blocklist" xvfb-run -a -s "-screen 0 1920x1200x24" \
+  node recomp/web/mcp.mjs --headed --params PORT_SCREEN=1280x720
+```
+
+The control requests do not depend on the display; only `screenshot` does.

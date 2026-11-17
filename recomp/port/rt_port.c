@@ -375,6 +375,28 @@ uint32_t guest_call(CPU* c, uint32_t fn, int n, ...) {
     return c->eax;
 }
 
+/* Delphi's register convention: the first three arguments in EAX, EDX and ECX, the rest pushed left to right and
+   popped by the callee. Leaves c->pend set like guest_call when an exception jumps past the call. */
+uint32_t guest_call_register(CPU* c, uint32_t fn, uint32_t a, uint32_t d, uint32_t cx, int n, const uint32_t* stack) {
+    uint32_t save_esp = c->esp, saved[4] = {c->ebx, c->esi, c->edi, c->ebp};
+    uint32_t sentinel = SENTINEL_BASE + 16 * ++sentinel_depth;
+    c->esp = (c->esp - 16) & ~3u;
+    for (int k = 0; k < n; k++) PUSH(stack[k]);
+    PUSH(sentinel);
+    c->eax = a;
+    c->edx = d;
+    c->ecx = cx;
+    rt_call(c, fn, sentinel);
+    sentinel_depth--;
+    if (c->pend) {
+        if (c->pend_target == sentinel) c->pend = 0;
+        else return 0;
+    }
+    c->esp = save_esp;
+    c->ebx = saved[0]; c->esi = saved[1]; c->edi = saved[2]; c->ebp = saved[3];
+    return c->eax;
+}
+
 /* ---- PE image ---- */
 
 static uint8_t* file_bytes;

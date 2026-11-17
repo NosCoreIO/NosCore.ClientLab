@@ -1,0 +1,304 @@
+// Drives the running client through its own functions instead of the mouse, for automated tests and agents.
+// The page writes one JSON request at a time into a shared buffer; the game thread serves it between window messages
+// (hle_control.c), reading the client's objects straight from guest memory and calling the client's functions with
+// Delphi's register convention. Nothing here builds or sends a packet: every action is a call the client's own UI
+// makes, so the client sends whatever it would have sent for that click.
+//
+// Buffer: Int32 [0] = request sequence, [1] = answered sequence, [2] = request length, [3] = answer length, then the
+// UTF-8 JSON bytes from offset 16.
+'use strict';
+
+const CONTROL_BYTES = 8 << 20;
+self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
+
+(() => {
+  const head = new Int32Array(self.controlBuf, 0, 4);
+  const body = new Uint8Array(self.controlBuf, 16);
+  const encoder = new TextEncoder(), utf8 = new TextDecoder();
+  const ansi = new TextDecoder('windows-1252');
+
+  // ---- guest memory (identity-mapped into the wasm heap) ----
+  let view = null;
+  const dv = () => (view && view.buffer === HEAPU8.buffer ? view : (view = new DataView(HEAPU8.buffer)));
+  const inRange = (a, n = 4) => a >= 0x10000 && a + n <= HEAPU8.length;
+  const u8 = (a) => (inRange(a, 1) ? HEAPU8[a] : 0);
+  const s8 = (a) => (u8(a) << 24) >> 24;
+  const u16 = (a) => (inRange(a, 2) ? dv().getUint16(a, true) : 0);
+  const s16 = (a) => (u16(a) << 16) >> 16;
+  const i32 = (a) => (inRange(a) ? dv().getInt32(a, true) : 0);
+  const u32 = (a) => (inRange(a) ? dv().getUint32(a, true) : 0);
+  const ptr = (a) => (a ? u32(a) : 0);
+  const str = (p, max = 64) => {
+    if (!inRange(p, 1)) return '';
+    let end = p;
+    while (end < p + max && end < HEAPU8.length && HEAPU8[end]) end++;
+    return ansi.decode(HEAPU8.slice(p, end));
+  };
+  // Delphi TList: VMT, +4 item array, +8 count.
+  const listCount = (l) => (l && u32(l) ? Math.max(0, Math.min(i32(l + 8), 4096)) : 0);
+  const listItem = (l, i) => ptr(ptr(l + 4) + i * 4);
+
+  // ---- locating the client's globals and functions by their code ----
+  const code = () => {
+    const pe = 0x400000 + u32(0x400000 + 0x3c);
+    const sections = u16(pe + 6), first = pe + 24 + u16(pe + 20);
+    for (let k = 0; k < sections; k++) {
+      const s = first + 40 * k;
+      if (u32(s + 36) & 0x20000000) return { start: 0x400000 + u32(s + 12), size: u32(s + 8) };
+    }
+    return { start: 0x401000, size: 0 };
+  };
+  const parse = (sig) => sig.split(' ').map((b) => (b === '??' ? -1 : parseInt(b, 16)));
+  function scan(sig) {
+    const p = parse(sig), { start, size } = code(), end = start + size - p.length;
+    const bytes = HEAPU8;
+    for (let a = bytes.indexOf(p[0], start); a >= 0 && a <= end; a = bytes.indexOf(p[0], a + 1)) {
+      let k = 1;
+      while (k < p.length && (p[k] < 0 || bytes[a + k] === p[k])) k++;
+      if (k === p.length) return a;
+    }
+    return 0;
+  }
+  // A global behind `mov eax, [slot]`: the slot holds the address of the Delphi variable that holds the object.
+  const global = (sig) => { const site = scan(sig); return site ? ptr(u32(site + 1)) : 0; };
+  const callTarget = (sig) => { const site = scan(sig); return site ? (site + 5 + i32(site + 1)) >>> 0 : 0; };
+
+  const SIG = {
+    scene: 'A1 ?? ?? ?? ?? 8B 00 8B 70 ?? 8D 86',
+    player: 'A1 ?? ?? ?? ?? 8B 00 3B 78 ?? 0F 84',
+    inventory: 'A1 ?? ?? ?? ?? 8B 00 8B 80 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 7D ?? ?? 75',
+    mates: 'A1 ?? ?? ?? ?? 8B 00 8B 10 FF 52 ?? 6A ?? A1',
+    buffs: 'A1 ?? ?? ?? ?? 8B 00 8B 80 ?? ?? ?? ?? 8B 10 FF 52 ?? E8',
+    skills: 'A1 ?? ?? ?? ?? 8B 00 8B 80 ?? ?? ?? ?? 8B D3 E8 ?? ?? ?? ?? 8B D8',
+    skillUi: 'A1 ?? ?? ?? ?? 8B 00 66 8B 4F',
+    mateManager: 'A1 ?? ?? ?? ?? 8B 00 8A 14',
+    targetUi: 'A1 ?? ?? ?? ?? 8B 00 80 78 ?? ?? 74 ?? A1 ?? ?? ?? ?? 8B 00 E8 ?? ?? ?? ?? 8B 15 ?? ?? ?? ?? 83 3A ?? 76 ?? ' +
+      '8B 15 ?? ?? ?? ?? 8B 12 FF 02 80 3D ?? ?? ?? ?? ?? 0F 85 ?? ?? ?? ?? 6A ?? 6A ?? 6A ?? 8B 15 ?? ?? ?? ?? 8B 12 33 C9',
+    preWalk: '80 78 ?? ?? 74 ?? 8B 15 ?? ?? ?? ?? 8B 12',
+    walk: '55 8B EC 83 C4 ?? 53 56 57 66 89 4D ?? 89 55 ?? 8B F8 33 DB',
+    interact: '66 83 B8 ?? ?? ?? ?? ?? 7D ?? 6A',
+    armSkill: '53 56 57 55 51 88 0C ?? 8B F2 8B F8',
+    pickup: '53 56 57 55 8B F2 8B F8 33 DB 8B C7',
+    collect: '53 56 57 55 8B F2 8B E8 33 DB A1',
+    rest: '55 8B EC B9 ?? ?? ?? ?? 6A ?? 6A ?? 49 75 ?? 51 53 56 57 33 C0',
+    select: '55 8B EC 83 C4 ?? 53 56 88 4D ?? 89 55 ?? 89 45 ?? EB ?? EB ?? 39 19 83 7D',
+  };
+  let api = null;
+  function resolve() {
+    if (api) return api;
+    api = {
+      scene: global(SIG.scene), player: global(SIG.player), inventory: global(SIG.inventory), mates: global(SIG.mates),
+      buffs: global(SIG.buffs), skills: global(SIG.skills), skillUi: global(SIG.skillUi),
+      mateManager: global(SIG.mateManager), targetUi: global(SIG.targetUi),
+      preWalk: scan(SIG.preWalk), walk: scan(SIG.walk), interact: scan(SIG.interact), armSkill: scan(SIG.armSkill),
+      pickup: scan(SIG.pickup), collect: scan(SIG.collect), rest: scan(SIG.rest), select: scan(SIG.select),
+    };
+    return api;
+  }
+  const obj = (name) => ptr(resolve()[name]);
+
+  // ---- object layouts ----
+  const SCENE = { players: 0x0c, monsters: 0x10, npcs: 0x14, items: 0x18, grid: 0x20, groundX: 0x54, groundY: 0x56 };
+  const ENT = { kind: 0x04, id: 0x08, x: 0x0c, y: 0x0e, hp: 0xc8, mp: 0xc9, collect: 0x158, mateKind: 0x160,
+    untargetable: 0x194, map: 0x1a4, morph: 0x1b9, vnum: 0x1c2, def: 0x1c4, displayName: 0x1dc, playerName: 0x1f8,
+    level: 0x150, heroLevel: 0x151 };
+  const DEF = { name: 0x04, race: 0x0c, flags: 0x2f, boss: 0x3a0 };
+  const MGR = { action: 0x14, entity: 0x20, id: 0x24, sitting: 0xa9 };
+  const OBJECT_RACE = 8, UNTARGETABLE = 0x10;
+  const TARGET_UI = { entity: 0x34, selected: 0x38 };
+  const SKILL = { def: 0x08, cooldown: 0x24, name: 0x14, castId: 0x18, self: 0x1c, range: 0x30, target: 0x38, area: 0x40,
+    combo: 0x68, mp: 0x102, list: 0x160 };
+
+  const KINDS = { 1: 'player', 2: 'monster', 3: 'npc' };
+  function entityInfo(e, kind = KINDS[u8(e + ENT.kind)] || 'object') {
+    const def = ptr(e + ENT.def), race = def ? i32(def + DEF.race) : 0;
+    let name = kind === 'player' ? str(ptr(e + ENT.playerName)) : str(ptr(def + DEF.name));
+    if (!name) name = str(ptr(e + ENT.displayName));
+    return {
+      id: i32(e + ENT.id), kind, vnum: s16(e + ENT.vnum), x: u16(e + ENT.x), y: u16(e + ENT.y), hp: s8(e + ENT.hp),
+      mp: s8(e + ENT.mp), name, boss: !!(def && u8(def + DEF.boss)),
+      targetable: !(race === OBJECT_RACE || (def && u8(def + DEF.flags) === UNTARGETABLE) || u8(e + ENT.untargetable) === 1),
+      collectable: kind === 'npc' && race === OBJECT_RACE && u8(e + ENT.kind) === 3 && u8(e + ENT.collect) === 1,
+    };
+  }
+
+  function entities(list, kind, selfId) {
+    const out = [];
+    for (let i = 0, n = listCount(list); i < n; i++) {
+      const e = listItem(list, i), id = i32(e + ENT.id);
+      if (!e || id <= 0 || (kind === 'player' && id === selfId)) continue;
+      out.push(entityInfo(e, kind));
+    }
+    return out;
+  }
+
+  function groundItems(list) {
+    const out = [];
+    for (let i = 0, n = listCount(list); i < n; i++) {
+      const it = listItem(list, i), id = i32(it + ENT.id);
+      if (!it || id <= 0) continue;
+      out.push({ id, vnum: s16(it + 0xca), x: u16(it + ENT.x), y: u16(it + ENT.y), owner: i32(it + 0xd8),
+        name: str(ptr(ptr(it + 0xcc) + 0x38)) });
+    }
+    return out;
+  }
+
+  function inventory() {
+    const inv = obj('inventory'), out = [];
+    if (!inv) return out;
+    for (const pocket of [0x228, 0x22c, 0x230]) {
+      const list = ptr(inv + pocket);
+      for (let i = 0, n = listCount(list); i < n; i++) {
+        const item = ptr(listItem(list, i)), def = ptr(item + 0x08);
+        if (!item || !def) continue;
+        out.push({ vnum: i32(def + 0x30), pocket: s8(item + 0x1c), slot: s16(item + 0x1e), amount: s16(item + 0x20),
+          name: str(ptr(def + 0x38)) });
+      }
+    }
+    return out;
+  }
+
+  function skills() {
+    const list = ptr(obj('skills') + SKILL.list), out = [];
+    for (let i = 0, n = listCount(list); i < n; i++) {
+      const inst = ptr(listItem(list, i)), def = ptr(inst + SKILL.def);
+      if (!inst || !def) continue;
+      const range = u8(def + SKILL.range);
+      out.push({ castId: u16(def + SKILL.castId), vnum: i32(def), name: str(ptr(def + SKILL.name)),
+        ready: i32(inst + SKILL.cooldown) === 0, range, area: u8(def + SKILL.area), self: u8(def + SKILL.self) === 2,
+        ground: u8(def + SKILL.target) === 3, mp: u16(def + SKILL.mp) });
+    }
+    return out;
+  }
+
+  function state() {
+    const mgr = obj('player'), self_ = ptr(mgr + MGR.entity), id = i32(mgr + MGR.id);
+    if (!mgr || !self_ || id <= 0) return { inWorld: false };
+    const ui = obj('targetUi'), target = u8(ui + TARGET_UI.selected) ? ptr(ui + TARGET_UI.entity) : 0;
+    const scene = obj('scene');
+    const selected = inRange(target) ? entityInfo(target) : null;
+    return {
+      inWorld: true,
+      character: { id, name: str(ptr(self_ + ENT.playerName)), map: i32(self_ + ENT.map), x: u16(self_ + ENT.x),
+        y: u16(self_ + ENT.y), level: u8(self_ + ENT.level), heroLevel: u8(self_ + ENT.heroLevel), hp: s8(self_ + ENT.hp),
+        mp: s8(self_ + ENT.mp), sitting: !!u8(mgr + MGR.sitting), morph: u8(self_ + ENT.morph), action: i32(mgr + MGR.action) },
+      target: selected,
+      monsters: entities(ptr(scene + SCENE.monsters), 'monster', id),
+      npcs: entities(ptr(scene + SCENE.npcs), 'npc', id),
+      players: entities(ptr(scene + SCENE.players), 'player', id),
+      items: groundItems(ptr(scene + SCENE.items)),
+    };
+  }
+
+  function grid() {
+    const g = ptr(obj('scene') + SCENE.grid), w = u16(g), h = u16(g + 2);
+    if (!g || !w || !h || w > 1024 || h > 1024) return null;
+    // One character per row cell: '.' walkable, '#' blocked.
+    const rows = [];
+    for (let y = 0; y < h; y++) {
+      let row = '';
+      for (let x = 0; x < w; x++) row += HEAPU8[g + 4 + x + y * w] ? '#' : '.';
+      rows.push(row);
+    }
+    return { width: w, height: h, rows };
+  }
+
+  // ---- actions: the calls the client's own clicks and keys end in ----
+  const call = (fn, a = 0, d = 0, c = 0, stack = []) => {
+    if (!fn) throw new Error('client function not found in this build');
+    return Module._control_call(fn, a, d, c, stack.length, stack[0] ?? 0, stack[1] ?? 0, stack[2] ?? 0) >>> 0;
+  };
+  const findIn = (list, id) => {
+    for (let i = 0, n = listCount(list); i < n; i++) { const e = listItem(list, i); if (e && i32(e + ENT.id) === id) return e; }
+    return 0;
+  };
+  const sceneList = (k) => ptr(obj('scene') + SCENE[k]);
+  const entity = (id) => findIn(sceneList('monsters'), id) || findIn(sceneList('npcs'), id) || findIn(sceneList('players'), id);
+  const need = (v, what) => { if (!v) throw new Error(what); return v; };
+  const player = () => need(obj('player'), 'not in the world');
+
+  function skillDef(castId) {
+    const list = ptr(obj('skills') + SKILL.list);
+    for (let i = 0, n = listCount(list); i < n; i++) {
+      const inst = ptr(listItem(list, i)), def = ptr(inst + SKILL.def);
+      if (def && u16(def + SKILL.castId) === castId) return { def, ready: i32(inst + SKILL.cooldown) === 0 };
+    }
+    return null;
+  }
+
+  const actions = {
+    walk({ x, y }) {
+      const mgr = player();
+      call(resolve().preWalk, mgr);
+      call(resolve().walk, mgr, ((y & 0xffff) << 16) | (x & 0xffff), 0, [1]);
+    },
+    select({ id }) {
+      const e = need(entity(id), `no entity ${id} on this map`);
+      call(resolve().select, need(obj('mateManager'), 'no mate manager'), e, 0x78, [1, 1, 0]);
+    },
+    // What a click on a monster, NPC or player does: walk up to it, then attack or talk with the armed skill.
+    interact({ id }) {
+      call(resolve().interact, player(), need(entity(id), `no entity ${id} on this map`));
+    },
+    skill({ castId, target }) {
+      const s = need(skillDef(castId), `skill ${castId} not learned`);
+      const ui = need(obj('skillUi'), 'no skill bar');
+      const e = target ? need(entity(target), `no entity ${target} on this map`) : 0;
+      const def = s.def, ground = u8(def + SKILL.target) === 3;
+      if (ground && e) {
+        const scene = obj('scene');
+        dv().setUint16(scene + SCENE.groundX, u16(e + ENT.x), true);
+        dv().setUint16(scene + SCENE.groundY, u16(e + ENT.y), true);
+      }
+      call(resolve().armSkill, ui, def, s.ready ? 1 : 0);
+      if (e && u8(def + SKILL.range) !== 0 && u8(def + SKILL.self) !== 2) call(resolve().interact, player(), e);
+    },
+    pickup({ id }) {
+      call(resolve().pickup, player(), need(findIn(sceneList('items'), id), `no item ${id} on the ground`));
+    },
+    collect({ id }) {
+      call(resolve().collect, player(), need(findIn(sceneList('npcs'), id), `no NPC ${id} on this map`));
+    },
+    rest() { call(resolve().rest, need(obj('skillUi'), 'no skill bar')); },
+  };
+
+  // ---- requests ----
+  function serve(req) {
+    switch (req.op) {
+      case 'state': return state();
+      case 'grid': return grid();
+      case 'inventory': return inventory();
+      case 'skills': return skills();
+      case 'api': return Object.fromEntries(Object.entries(resolve()).map(([k, v]) => [k, v >>> 0]));
+      case 'read': {
+        const n = Math.min(req.length >>> 0, 1 << 20);
+        if (!inRange(req.address >>> 0, n)) throw new Error('address out of range');
+        return { bytes: Array.from(HEAPU8.subarray(req.address >>> 0, (req.address >>> 0) + n)) };
+      }
+      case 'scan': return { address: scan(req.signature) };
+      case 'call': return { eax: call(req.address >>> 0, req.eax >>> 0, req.edx >>> 0, req.ecx >>> 0, req.stack || []) };
+      default:
+        if (!Object.hasOwn(actions, req.op)) throw new Error(`unknown op ${req.op}`);
+        actions[req.op](req);
+        return { ok: true };
+    }
+  }
+
+  // Called by the game thread (hle_control.c) on every message-loop turn, so the idle path stays a single load.
+  self.controlPoll = () => {
+    const seq = Atomics.load(head, 0);
+    if (seq === Atomics.load(head, 1)) return;
+    let answer;
+    try {
+      answer = { result: serve(JSON.parse(utf8.decode(body.slice(0, head[2])))) };
+    } catch (e) {
+      answer = { error: String(e?.message || e) };
+    }
+    let bytes = encoder.encode(JSON.stringify(answer));
+    if (bytes.length > body.length) bytes = encoder.encode(JSON.stringify({ error: 'answer too large' }));
+    body.set(bytes);
+    head[3] = bytes.length;
+    Atomics.store(head, 1, seq);
+    Atomics.notify(head, 1);
+  };
+})();

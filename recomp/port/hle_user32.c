@@ -2287,6 +2287,7 @@ static void after_get(CPU* c, uint32_t m, int remove) {
 
 static void pump_all(CPU* c) {
     pump_input(c);
+    port_control_poll(c);
     pump_timers();
     port_threads_pump(c);
 }

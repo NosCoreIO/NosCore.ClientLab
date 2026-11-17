@@ -211,6 +211,7 @@
       if (!flushQueued) { flushQueued = true; requestAnimationFrame(flushLog); }
     } else if (m.type === 'input') {
       ring = m.ring;
+      controlBuf = m.control;
       audioDone = m.audioDone;
       pasteBuf = m.paste;
       shownCount = m.vsync;
@@ -503,6 +504,32 @@
     rendererProfileDetailed = !rendererProfileDetailed;
     renderer?.postMessage({type:'profile', enabled:rendererProfileDetailed});
   };
+  // Automation (control.js): one JSON request at a time, answered by the game thread between window messages.
+  let controlBuf = null, controlQueue = Promise.resolve();
+  window.clientControl = {
+    request(req) {
+      const run = async () => {
+        if (!controlBuf) throw new Error('the game has not started');
+        const head = new Int32Array(controlBuf, 0, 4), body = new Uint8Array(controlBuf, 16);
+        const bytes = new TextEncoder().encode(JSON.stringify(req));
+        body.set(bytes);
+        head[2] = bytes.length;
+        const seq = (Atomics.load(head, 0) + 1) | 0;
+        Atomics.store(head, 0, seq);
+        for (const started = performance.now(); Atomics.load(head, 1) !== seq;) {
+          if (performance.now() - started > 30000) throw new Error('the game thread did not answer');
+          await Atomics.waitAsync(head, 1, Atomics.load(head, 1), 1000).value;
+        }
+        const answer = JSON.parse(new TextDecoder().decode(body.slice(0, head[3])));
+        if (answer.error) throw new Error(answer.error);
+        return answer.result;
+      };
+      const result = controlQueue.then(run, run);
+      controlQueue = result.catch(() => { });
+      return result;
+    },
+  };
+
   let ring = null;
   function send(type, a, x = 0, y = 0, time = performance.now()) {
     if (!ring) return;

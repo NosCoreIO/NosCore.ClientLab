@@ -374,7 +374,7 @@ public sealed class GameHost : IAsyncDisposable
     private string? Resolve(string path)
     {
         if (path is "/" or "/index.html") return Path.Combine(webDir, "index.html");
-        if (path is "/worker.js" or "/gl.js") return Path.Combine(webDir, path[1..]);
+        if (path is "/worker.js" or "/gl.js" or "/control.js") return Path.Combine(webDir, path[1..]);
         if (path.StartsWith("/build/", StringComparison.Ordinal))
             return Contained(buildDir, path["/build/".Length..]);
         if (path.StartsWith("/game/", StringComparison.Ordinal))
