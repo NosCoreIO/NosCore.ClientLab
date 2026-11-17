@@ -3,8 +3,11 @@
 // Screenshots, clicks and keys are there for the windows and dialogues that have no call yet.
 //
 // usage: node mcp.mjs [--url http://127.0.0.1:8090/] [--params PORT_SCREEN=1280x720] [--headed]
+//        node mcp.mjs --attach http://127.0.0.1:9222   (drive a running desktop app started with CLIENTLAB_DEVTOOLS_PORT=9222)
+//        --log actions.jsonl   appends every action (walk, answer_dialog, ...) with its arguments and result
 // Register it with an MCP client, for example: claude mcp add clientlab -- node /path/to/recomp/web/mcp.mjs
 import { createRequire } from 'node:module';
+import { appendFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const require = createRequire(import.meta.url);
@@ -16,7 +19,19 @@ const arg = (name, fallback) => {
   const i = process.argv.indexOf(name);
   return i > 0 ? process.argv[i + 1] : fallback;
 };
-const defaults = { url: arg('--url', 'http://127.0.0.1:8090/'), params: arg('--params', ''), headed: process.argv.includes('--headed') };
+const defaults = { url: arg('--url', 'http://127.0.0.1:8090/'), params: arg('--params', ''), headed: process.argv.includes('--headed'),
+  attach: arg('--attach', process.env.CLIENTLAB_ATTACH || ''), log: arg('--log', process.env.CLIENTLAB_ACTION_LOG || '') };
+// Reads (state, screenshots, memory) are left out of the action log.
+const QUIET = new Set(['client_state', 'skills', 'inventory', 'map_grid', 'dialogs', 'screenshot', 'client_log', 'read_memory',
+  'find_signature', 'client_api']);
+function logAction(name, args, content, error) {
+  if (!defaults.log || QUIET.has(name)) return;
+  let result = content?.type === 'text' ? content.text : content?.type;
+  try { result = JSON.parse(result); } catch { }
+  try {
+    appendFileSync(defaults.log, `${JSON.stringify({ time: new Date().toISOString(), tool: name, args, ...(error ? { error } : { result }) })}\n`);
+  } catch { }
+}
 
 // Screen positions in the 1680x1050 canvas space the page is scaled to; the login screens move at 1280x720.
 const LAYOUT = {
@@ -30,7 +45,28 @@ let browser = null, page = null, layout = LAYOUT.default;
 const browserErrors = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function open({ url = defaults.url, params = defaults.params, headed = defaults.headed } = {}) {
+const watch = (p) => {
+  const note = (text) => { browserErrors.push(text); if (browserErrors.length > 200) browserErrors.shift(); };
+  p.on('pageerror', (e) => note(`pageerror: ${e.message}`));
+  p.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') note(`${m.type()}: ${m.text()}`); });
+  p.on('worker', (w) => w.on('console', (m) => { if (m.type() === 'error') note(`worker: ${m.text()}`); }));
+};
+
+// Attaching leaves the app's own window and session alone: close() only disconnects.
+async function attach(endpoint) {
+  await close();
+  browser = await chromium.connectOverCDP(endpoint);
+  for (const p of browser.contexts().flatMap((c) => c.pages())) {
+    if (await p.evaluate(() => !!window.clientControl).catch(() => false)) { page = p; break; }
+  }
+  if (!page) { await close(); throw new Error(`no game page at ${endpoint}`); }
+  layout = LAYOUT[/PORT_SCREEN=(\d+x\d+)/.exec(page.url())?.[1]] || LAYOUT.default;
+  watch(page);
+  return `attached to ${page.url()}`;
+}
+
+async function open({ url = defaults.url, params = defaults.params, headed = defaults.headed, attach: endpoint = defaults.attach } = {}) {
+  if (endpoint) return attach(endpoint);
   await close();
   browser = await chromium.launch({
     headless: !headed,
@@ -39,10 +75,7 @@ async function open({ url = defaults.url, params = defaults.params, headed = def
       ...(process.env.CHROME_ARGS ? process.env.CHROME_ARGS.split(' ') : [])],
   });
   page = await browser.newPage({ viewport: { width: 1800, height: 1200 } });
-  const note = (text) => { browserErrors.push(text); if (browserErrors.length > 200) browserErrors.shift(); };
-  page.on('pageerror', (e) => note(`pageerror: ${e.message}`));
-  page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') note(`${m.type()}: ${m.text()}`); });
-  page.on('worker', (w) => w.on('console', (m) => { if (m.type() === 'error') note(`worker: ${m.text()}`); }));
+  watch(page);
   layout = LAYOUT[/PORT_SCREEN=(\d+x\d+)/.exec(params)?.[1]] || LAYOUT.default;
   // Message boxes answer themselves with their default button so nothing waits on a human.
   await page.goto(`${url}?autodismiss=1${params ? `&${params}` : ''}`);
@@ -50,6 +83,7 @@ async function open({ url = defaults.url, params = defaults.params, headed = def
 }
 
 async function close() {
+  // Closing a CDP connection only disconnects; the attached app keeps running.
   if (browser) await browser.close().catch(() => { });
   browser = page = null;
 }
@@ -149,9 +183,10 @@ const obj = (properties = {}, required = []) => ({ type: 'object', properties, r
 
 const TOOLS = [
   { name: 'client_open', description: 'Open the browser client on the login screen (closes a running one). Other tools open it on demand.',
-    inputSchema: obj({ url: { type: 'string' }, params: { type: 'string', description: 'Extra page query, e.g. PORT_SCREEN=1280x720' }, headed: { type: 'boolean' } }),
+    inputSchema: obj({ url: { type: 'string' }, params: { type: 'string', description: 'Extra page query, e.g. PORT_SCREEN=1280x720' }, headed: { type: 'boolean' },
+      attach: { type: 'string', description: 'DevTools endpoint of a running desktop app (CLIENTLAB_DEVTOOLS_PORT), e.g. http://127.0.0.1:9222' } }),
     run: (a) => open(a).then(json) },
-  { name: 'client_close', description: 'Close the browser client.', inputSchema: obj(), run: () => close().then(() => json('closed')) },
+  { name: 'client_close', description: 'Close the browser client, or disconnect from an attached desktop app without closing it.', inputSchema: obj(), run: () => close().then(() => json('closed')) },
   { name: 'enter_world', description: 'Pick the first server and channel and enter the world with a character slot. Returns the character.',
     inputSchema: obj({ slot: { type: 'array', items: { type: 'integer' }, description: 'Character slot position [x,y] on the 1680x1050 screen' } }),
     run: (a) => enterWorld(a).then(json) },
@@ -170,6 +205,11 @@ const TOOLS = [
     inputSchema: obj({ cast_id: { type: 'integer' }, target: id }, ['cast_id']), run: (a) => control({ op: 'skill', castId: a.cast_id, target: a.target ?? 0 }).then(json) },
   { name: 'pick_up', description: 'Pick up a ground item by id.', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'pickup', id: a.id }).then(json) },
   { name: 'collect', description: 'Collect from a collectable map object (an NPC entry).', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'collect', id: a.id }).then(json) },
+  { name: 'dialogs', description: 'Open yes/no boxes (questions, confirmations, revive, teleport offers): their text and what Yes and No would answer.',
+    inputSchema: obj(), run: () => control({ op: 'dialogs' }).then(json) },
+  { name: 'answer_dialog', description: 'Press Yes or No on an open yes/no box (the first one unless index is given).',
+    inputSchema: obj({ yes: { type: 'boolean' }, index: { type: 'integer' } }, ['yes']),
+    run: (a) => control({ op: 'answer', yes: a.yes, index: a.index }).then(json) },
   { name: 'rest', description: 'Sit down or stand up.', inputSchema: obj(), run: () => control({ op: 'rest' }).then(json) },
   { name: 'screenshot', description: 'The game screen (1680x1050).', inputSchema: obj(), run: () => screenshot() },
   { name: 'click', description: 'Click the game screen at [x,y] in 1680x1050 coordinates, for windows and dialogues.',
@@ -214,9 +254,13 @@ async function handle(m) {
       case 'tools/call': {
         const tool = TOOLS.find((t) => t.name === m.params?.name);
         if (!tool) return send({ id: m.id, error: { code: -32602, message: `unknown tool ${m.params?.name}` } });
+        const args = m.params.arguments || {};
         try {
-          return send({ id: m.id, result: { content: [await tool.run(m.params.arguments || {})] } });
+          const content = await tool.run(args);
+          logAction(tool.name, args, content);
+          return send({ id: m.id, result: { content: [content] } });
         } catch (e) {
+          logAction(tool.name, args, null, String(e?.message || e));
           return send({ id: m.id, result: { content: [json(String(e?.message || e))], isError: true } });
         }
       }

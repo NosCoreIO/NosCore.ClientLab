@@ -96,6 +96,8 @@ a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
 | `{op:'interact', id}` | A click on the entity: walk up, then attack with the armed skill or talk |
 | `{op:'skill', castId, target}` | Arms the skill from the skill bar and uses it on the target |
 | `{op:'pickup', id}`, `{op:'collect', id}`, `{op:'rest'}` | Picks up, collects from a map object, sits or stands |
+| `{op:'dialogs'}` | Open yes/no boxes (revive, teleport offers, confirmations): their text and what Yes and No answer |
+| `{op:'answer', yes, index}` | Presses the box's own Yes or No button |
 | `{op:'read', address, length}`, `{op:'scan', signature}`, `{op:'call', address, eax, edx, ecx, stack}` | For finding new structures and functions |
 
 `recomp/web/mcp.mjs` wraps these, plus screenshots, clicks and keys for the windows that have no call yet, as an MCP
@@ -107,6 +109,16 @@ claude mcp add clientlab -- node /path/to/NosCore.ClientLab/recomp/web/mcp.mjs -
 
 `enter_world` picks the first server and channel and the character slot; the other tools then work on the character
 in the world.
+
+To drive the desktop app instead, start it with `CLIENTLAB_DEVTOOLS_PORT=9222` and attach to it; `client_close` then
+only disconnects and leaves the app running:
+
+```bash
+claude mcp add clientlab -- node /path/to/NosCore.ClientLab/recomp/web/mcp.mjs --attach http://127.0.0.1:9222 --log C:/dev/clientlab-actions.jsonl
+```
+
+`--log` appends every action (walk, select, answer_dialog, ...) with its arguments and result as one JSON line, so a run
+can be replayed or reviewed next to the packet log. Reads such as `client_state` and `screenshot` are left out.
 
 On a Linux machine without a GPU, headless Chromium stops updating the canvas after the login screen, although the
 game keeps running. Run it headed under Xvfb with ANGLE on Mesa's GL instead:

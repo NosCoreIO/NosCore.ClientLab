@@ -82,6 +82,10 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     collect: '53 56 57 55 8B F2 8B E8 33 DB A1',
     rest: '55 8B EC B9 ?? ?? ?? ?? 6A ?? 6A ?? 49 75 ?? 51 53 56 57 33 C0',
     select: '55 8B EC 83 C4 ?? 53 56 88 4D ?? 89 55 ?? 89 45 ?? EB ?? EB ?? 39 19 83 7D',
+    // Every yes/no box (qna, dlg and their i18n forms) comes from one pool; this takes the next box and stores its answer callback.
+    dialogs: '55 8B EC 53 A1 ?? ?? ?? ?? 8B 00 E8 ?? ?? ?? ?? 8B D8 8B 83 ?? ?? ?? ?? 05 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B 45 08 89 83',
+    // A yes/no box button: hide the box, then call its callback with the button's tag (1 yes, 0 no).
+    dialogButton: '53 56 8B F2 8B D8 8A 15 ?? ?? ?? ?? 8B C3 8B 08 FF 51 ?? 66 83 BB ?? ?? ?? ?? 00 74 ?? 8B 46 ?? 50 8B 4B ?? 8B D3 8B 83 ?? ?? ?? ?? FF 93',
   };
   let api = null;
   function resolve() {
@@ -92,6 +96,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       mateManager: global(SIG.mateManager), targetUi: global(SIG.targetUi),
       preWalk: scan(SIG.preWalk), walk: scan(SIG.walk), interact: scan(SIG.interact), armSkill: scan(SIG.armSkill),
       pickup: scan(SIG.pickup), collect: scan(SIG.collect), rest: scan(SIG.rest), select: scan(SIG.select),
+      dialogs: (() => { const site = scan(SIG.dialogs); return site ? ptr(u32(site + 5)) : 0; })(),
+      dialogButton: scan(SIG.dialogButton),
     };
     return api;
   }
@@ -227,7 +233,47 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     return null;
   }
 
+  // ---- yes/no boxes ----
+  const DIALOG = { visible: 0x18, code: 0xf0, text: 0xc8, yes: 0x104, no: 0x108 };
+  const delphiString = (p) => (p ? str(p, Math.min(Math.max(i32(p - 4), 0), 1024)) : '');
+  // A WideString: UTF-16, its byte length in front.
+  const wideString = (p) => {
+    const n = p ? Math.min(Math.max(i32(p - 4), 0), 2048) & ~1 : 0;
+    return n && inRange(p, n) ? new TextDecoder('utf-16le').decode(HEAPU8.slice(p, p + n)) : '';
+  };
+  // The box's two buttons: neighbouring fields of one class whose tags are 1 (yes) and 0 (no).
+  function dialogButtons(box) {
+    const tag = u8(need(resolve().dialogButton, 'dialog button code not found in this build') + 31);
+    for (let o = 0x20; o < 0x140; o += 4) {
+      const a = ptr(box + o), b = ptr(box + o + 4);
+      if (a && b && u32(a) && u32(a) === u32(b) && i32(a + tag) === 1 && i32(b + tag) === 0) return { yes: a, no: b };
+    }
+    return null;
+  }
+  function dialogs() {
+    const pool = obj('dialogs'), out = [];
+    if (!pool) return out;
+    const boxes = ptr(pool + 0xc), n = u8(pool + 0x13) + 1;
+    for (let i = 0; i < n && i < 64; i++) {
+      const box = ptr(boxes + i * 4);
+      if (!box || !u8(box + DIALOG.visible) || !u32(box + DIALOG.code)) continue;
+      out.push({ index: i, text: delphiString(ptr(box + DIALOG.text)),
+        yes: wideString(ptr(box + DIALOG.yes)), no: wideString(ptr(box + DIALOG.no)) });
+    }
+    return out;
+  }
+
   const actions = {
+    // Press the box's own Yes or No button.
+    answer({ index, yes }) {
+      const pool = need(obj('dialogs'), 'no dialog pool');
+      const shown = dialogs();
+      const d = need(index === undefined || index === null ? shown[0] : shown.find((x) => x.index === index), 'no dialog is open');
+      const box = ptr(ptr(pool + 0xc) + d.index * 4);
+      const buttons = need(dialogButtons(box), 'dialog buttons not found');
+      call(resolve().dialogButton, box, yes ? buttons.yes : buttons.no);
+      return { answered: d, choice: yes ? 'yes' : 'no' };
+    },
     walk({ x, y }) {
       const mgr = player();
       call(resolve().preWalk, mgr);
@@ -270,6 +316,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       case 'grid': return grid();
       case 'inventory': return inventory();
       case 'skills': return skills();
+      case 'dialogs': return dialogs();
       case 'api': return Object.fromEntries(Object.entries(resolve()).map(([k, v]) => [k, v >>> 0]));
       case 'read': {
         const n = Math.min(req.length >>> 0, 1 << 20);
@@ -280,8 +327,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       case 'call': return { eax: call(req.address >>> 0, req.eax >>> 0, req.edx >>> 0, req.ecx >>> 0, req.stack || []) };
       default:
         if (!Object.hasOwn(actions, req.op)) throw new Error(`unknown op ${req.op}`);
-        actions[req.op](req);
-        return { ok: true };
+        return actions[req.op](req) ?? { ok: true };
     }
   }
 
