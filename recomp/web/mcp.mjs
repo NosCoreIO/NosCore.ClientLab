@@ -66,7 +66,7 @@ const LAYOUT = {
 };
 const CANVAS = { width: 1680, height: 1050 };
 
-let browser = null, page = null, layout = LAYOUT.default;
+let browser = null, page = null, attached = false, layout = LAYOUT.default;
 // Browser-side errors (the renderer worker, the page) that never reach the client log.
 const browserErrors = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -92,6 +92,7 @@ async function attach(endpoint) {
     page = await cdpGamePage(endpoint);
   }
   if (!page) { await close(); throw new Error(`no game page at ${endpoint}`); }
+  attached = true;
   layout = LAYOUT[/PORT_SCREEN=(\d+x\d+)/.exec(page.url())?.[1]] || LAYOUT.default;
   watch(page);
   return `attached to ${page.url()}`;
@@ -119,6 +120,7 @@ async function close() {
   if (browser) await browser.close().catch(() => { });
   page?.disconnect?.();
   browser = page = null;
+  attached = false;
 }
 
 // Raw CDP on the game page, with the page calls the tools use: evaluate, focus, url, on, screenshot, mouse and keyboard.
@@ -236,22 +238,25 @@ async function waitState(test, seconds) {
   return null;
 }
 
+// Our own browser gets the canvas at 1680x1050; an attached app keeps its window size and coordinates are scaled to it.
 async function canvasOrigin() {
-  return page.evaluate(({ width, height }) => {
+  return page.evaluate(({ width, height, resize }) => {
     const c = document.getElementById('screen');
-    c.style.maxWidth = 'none';
-    c.style.width = `${width}px`;
-    c.style.height = `${height}px`;
+    if (resize) {
+      c.style.maxWidth = 'none';
+      c.style.width = `${width}px`;
+      c.style.height = `${height}px`;
+    }
     const b = c.getBoundingClientRect();
-    return { x: b.left, y: b.top };
-  }, CANVAS);
+    return { x: b.left, y: b.top, sx: b.width / width, sy: b.height / height, width: b.width, height: b.height };
+  }, { ...CANVAS, resize: !attached });
 }
 
 // Held for about a frame each way: the client samples input once per frame.
 async function click([x, y], { button = 'left', double = false } = {}) {
   await ensurePage();
   const o = await canvasOrigin();
-  await page.mouse.move(o.x + x, o.y + y, { steps: 5 });
+  await page.mouse.move(o.x + x * o.sx, o.y + y * o.sy, { steps: 5 });
   await sleep(300);
   for (let k = 0; k < (double ? 2 : 1); k++) {
     await page.mouse.down({ button });
@@ -264,7 +269,7 @@ async function click([x, y], { button = 'left', double = false } = {}) {
 async function screenshot() {
   await ensurePage();
   const o = await canvasOrigin();
-  const png = await page.screenshot({ clip: { x: o.x, y: o.y, ...CANVAS } });
+  const png = await page.screenshot({ clip: { x: o.x, y: o.y, width: o.width, height: o.height } });
   return { type: 'image', data: png.toString('base64'), mimeType: 'image/png' };
 }
 
