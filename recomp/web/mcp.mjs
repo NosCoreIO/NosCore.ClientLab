@@ -438,7 +438,8 @@ async function pickUp({ id, timeout = 15 }) {
   for (const end = Date.now() + timeout * 1000; Date.now() < end; await sleep(250)) {
     await guardTick();
     const s = await control({ op: 'state', kinds: ['items'] });
-    if (!s.items?.some((i) => i.id === id)) return { pickedUp: id, character: s.character };
+    if (!s.inWorld || !s.items) throw new Error(`left the world while picking up item ${id}`);
+    if (!s.items.some((i) => i.id === id)) return { pickedUp: id, character: s.character };
   }
   throw new Error(`item ${id} is still on the ground after ${timeout} s`);
 }
@@ -446,27 +447,37 @@ async function pickUp({ id, timeout = 15 }) {
 async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPortal = false }) {
   await ensurePage();
   // Stepping on (or next to) a portal cell sends the character through it.
-  const near = throughPortal ? null : (await portals()).find((p) => Math.max(Math.abs(p.x - x), Math.abs(p.y - y)) <= 1);
+  const known = throughPortal ? [] : await portals();
+  const near = known.find((p) => Math.max(Math.abs(p.x - x), Math.abs(p.y - y)) <= 1);
   if (near) throw new Error(`[${x},${y}] is on or next to portal ${near.id} at [${near.x},${near.y}] to map ${near.map}: pick another cell, or pass through_portal to take it`);
   if (!wait) { await control({ op: 'walk', x, y }); return 'walking'; }
   const end = Date.now() + timeout * 1000;
-  // The client gives up on long detours, so a walk that stalls is retried along waypoints from the map grid.
-  let c = await walkLeg(x, y, end);
-  if (c.arrived) return c.character;
+  // With portals around, the route is planned around them up front; otherwise the client's own walk goes first, and
+  // since it gives up on long detours, a stalled walk is retried along waypoints from the map grid.
+  let c = known.length ? null : await walkLeg(x, y, end);
+  if (c?.arrived) return c.character;
+  if (c?.timedOut) throw new Error(`timed out at [${c.character.x},${c.character.y}] on the way to [${x},${y}]`);
+  const from = c?.character ?? (await control({ op: 'state', kinds: ['none'] })).character;
   const grid = await control({ op: 'grid' });
   if (grid && grid.rows[y]?.[x] !== '.') throw new Error(`[${x},${y}] is not walkable`);
-  const path = gridPath(grid, c.character, { x, y });
-  if (!path) throw new Error(`no walkable path from [${c.character.x},${c.character.y}] to [${x},${y}]`);
-  for (let i = WAYPOINT; i < path.length + WAYPOINT - 1; i += WAYPOINT) {
-    const p = path[Math.min(i, path.length - 1)];
+  // Leaving an arrival portal is allowed: around the portal the character stands next to, only its own cell is avoided.
+  const reach = (p, cx, cy) => Math.max(Math.abs(p.x - cx), Math.abs(p.y - cy)) <= (reach.start.has(p) ? 0 : 1);
+  reach.start = new Set(known.filter((p) => Math.max(Math.abs(p.x - from.x), Math.abs(p.y - from.y)) <= 1));
+  const avoid = (cx, cy) => known.some((p) => reach(p, cx, cy));
+  const path = gridPath(grid, from, { x, y }, avoid);
+  if (!path) throw new Error(`no walkable path from [${from.x},${from.y}] to [${x},${y}]${known.length ? ' that keeps off the portals' : ''}`);
+  if (!path.length) return from;
+  for (let i = Math.min(WAYPOINT, path.length) - 1; ; i = Math.min(i + WAYPOINT, path.length - 1)) {
+    const p = path[i];
     c = await walkLeg(p.x, p.y, end);
     if (!c.arrived) throw new Error(`stopped at [${c.character.x},${c.character.y}] on the way to [${x},${y}] (waypoint [${p.x},${p.y}]${c.timedOut ? ', timed out' : ''})`);
+    if (i === path.length - 1) return c.character;
   }
-  return c.character;
 }
 const WAYPOINT = 8;
 
 async function walkLeg(x, y, end) {
+  if (Date.now() >= end) return { arrived: false, timedOut: true, character: (await control({ op: 'state', kinds: ['none'] })).character };
   await control({ op: 'walk', x, y });
   let last = null, still = 0, c = null;
   for (; Date.now() < end; await sleep(500)) {
@@ -482,9 +493,10 @@ async function walkLeg(x, y, end) {
 }
 
 // Breadth-first search over the walkability grid, eight directions, no corner cutting.
-function gridPath(grid, from, to) {
+function gridPath(grid, from, to, avoid = () => false) {
   if (!grid) return null;
-  const { width: w, height: h, rows } = grid, open = (x, y) => x >= 0 && y >= 0 && x < w && y < h && rows[y][x] === '.';
+  const { width: w, height: h, rows } = grid;
+  const open = (x, y) => x >= 0 && y >= 0 && x < w && y < h && rows[y][x] === '.' && !avoid(x, y);
   if (!open(to.x, to.y)) return null;
   const prev = new Int32Array(w * h).fill(-1), start = from.y * w + from.x, goal = to.y * w + to.x;
   prev[start] = start;
