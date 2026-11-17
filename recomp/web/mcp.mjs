@@ -12,8 +12,10 @@ import { createInterface } from 'node:readline';
 
 const require = createRequire(import.meta.url);
 const windows = process.platform === 'win32';
-const { chromium } = require(process.env.PLAYWRIGHT_PATH
-  || (windows ? 'C:/Program Files/nodejs/node_modules/@playwright/cli/node_modules/playwright' : 'playwright'));
+const PLAYWRIGHT = process.env.PLAYWRIGHT_PATH
+  || (windows ? 'C:/Program Files/nodejs/node_modules/@playwright/cli/node_modules/playwright' : 'playwright');
+const { chromium } = require(PLAYWRIGHT);
+const { ws: WebSocket } = require(require.resolve('playwright-core/lib/utilsBundle', { paths: [require.resolve(PLAYWRIGHT)] }));
 
 const arg = (name, fallback) => {
   const i = process.argv.indexOf(name);
@@ -79,9 +81,15 @@ const watch = (p) => {
 // Attaching leaves the app's own window and session alone: close() only disconnects.
 async function attach(endpoint) {
   await close();
-  browser = await chromium.connectOverCDP(endpoint);
-  for (const p of browser.contexts().flatMap((c) => c.pages())) {
-    if (await p.evaluate(() => !!window.clientControl).catch(() => false)) { page = p; break; }
+  try {
+    browser = await chromium.connectOverCDP(endpoint);
+    for (const p of browser.contexts().flatMap((c) => c.pages())) {
+      if (await p.evaluate(() => !!window.clientControl).catch(() => false)) { page = p; break; }
+    }
+  } catch {
+    // CEF in the desktop app refuses Playwright's connectOverCDP (Browser.setDownloadBehavior is not supported).
+    browser = null;
+    page = await cdpGamePage(endpoint);
   }
   if (!page) { await close(); throw new Error(`no game page at ${endpoint}`); }
   layout = LAYOUT[/PORT_SCREEN=(\d+x\d+)/.exec(page.url())?.[1]] || LAYOUT.default;
@@ -109,7 +117,101 @@ async function open({ url = defaults.url, params = defaults.params, headed = def
 async function close() {
   // Closing a CDP connection only disconnects; the attached app keeps running.
   if (browser) await browser.close().catch(() => { });
+  page?.disconnect?.();
   browser = page = null;
+}
+
+// Raw CDP on the game page, with the page calls the tools use: evaluate, focus, url, on, screenshot, mouse and keyboard.
+const NAMED_KEYS = { Escape: [27, 'Escape'], Enter: [13, 'Enter', '\r'], Tab: [9, 'Tab'], Backspace: [8, 'Backspace'],
+  Delete: [46, 'Delete'], Space: [32, 'Space', ' '], ' ': [32, 'Space', ' '], ArrowLeft: [37, 'ArrowLeft'], ArrowUp: [38, 'ArrowUp'],
+  ArrowRight: [39, 'ArrowRight'], ArrowDown: [40, 'ArrowDown'], Shift: [16, 'ShiftLeft'], Control: [17, 'ControlLeft'], Alt: [18, 'AltLeft'] };
+function keyInfo(key) {
+  const named = NAMED_KEYS[key];
+  if (named) return { key: named[2] ?? key, code: named[1], vk: named[0], text: named[2] };
+  const f = /^F(\d{1,2})$/.exec(key);
+  if (f) return { key, code: key, vk: 111 + Number(f[1]) };
+  if (key.length !== 1) throw new Error(`unknown key ${key}`);
+  const upper = key.toUpperCase();
+  const code = /\d/.test(key) ? `Digit${key}` : /[A-Z]/.test(upper) ? `Key${upper}` : '';
+  return { key, code, vk: /[A-Z0-9]/.test(upper) ? upper.charCodeAt(0) : key.charCodeAt(0), text: key };
+}
+
+async function cdpGamePage(endpoint) {
+  const targets = await (await fetch(new URL('/json/list', endpoint))).json();
+  for (const t of targets.filter((t) => t.type === 'page' && t.webSocketDebuggerUrl)) {
+    const p = await cdpPage(t).catch(() => null);
+    if (!p) continue;
+    if (await p.evaluate(() => !!window.clientControl).catch(() => false)) return p;
+    p.disconnect();
+  }
+  return null;
+}
+
+async function cdpPage(target) {
+  const ws = new WebSocket(target.webSocketDebuggerUrl, { perMessageDeflate: false, maxPayload: 256 * 1024 * 1024 });
+  await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); });
+  let id = 0;
+  const pending = new Map(), handlers = { console: [], pageerror: [] };
+  ws.on('message', (data) => {
+    const m = JSON.parse(data.toString());
+    if (m.id && pending.has(m.id)) {
+      const { resolve, reject } = pending.get(m.id);
+      pending.delete(m.id);
+      if (m.error) reject(new Error(m.error.message)); else resolve(m.result);
+    } else if (m.method === 'Runtime.exceptionThrown') {
+      const d = m.params.exceptionDetails;
+      for (const h of handlers.pageerror) h({ message: d.exception?.description || d.text });
+    } else if (m.method === 'Runtime.consoleAPICalled') {
+      const type = m.params.type, text = m.params.args.map((a) => a.value ?? a.description ?? '').join(' ');
+      for (const h of handlers.console) h({ type: () => type, text: () => text });
+    }
+  });
+  ws.on('close', () => { for (const { reject } of pending.values()) reject(new Error('CDP connection closed')); pending.clear(); });
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    pending.set(++id, { resolve, reject });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+  let mouse = { x: 0, y: 0 };
+  const mouseEvent = (type, button = 'none', clickCount = 0) =>
+    send('Input.dispatchMouseEvent', { type, x: mouse.x, y: mouse.y, button, buttons: type === 'mousePressed' ? (button === 'right' ? 2 : 1) : 0, clickCount });
+  const keyEvent = (type, key) => {
+    const k = keyInfo(key);
+    return send('Input.dispatchKeyEvent', { type: type === 'keyDown' && !k.text ? 'rawKeyDown' : type, key: k.key, code: k.code,
+      windowsVirtualKeyCode: k.vk, nativeVirtualKeyCode: k.vk, ...(type === 'keyDown' && k.text ? { text: k.text, unmodifiedText: k.text } : {}) });
+  };
+  const p = {
+    url: () => target.url,
+    disconnect: () => ws.close(),
+    on: (event, handler) => handlers[event]?.push(handler),
+    evaluate: async (fn, arg) => {
+      const expression = typeof fn === 'function' ? `(${fn})(${arg === undefined ? '' : JSON.stringify(arg)})` : fn;
+      const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, userGesture: true });
+      if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
+      return r.result.value;
+    },
+    focus: (selector) => p.evaluate((s) => document.querySelector(s)?.focus(), selector),
+    screenshot: async ({ clip }) => Buffer.from((await send('Page.captureScreenshot', { format: 'png', clip: { ...clip, scale: 1 } })).data, 'base64'),
+    mouse: {
+      move: async (x, y, { steps = 1 } = {}) => {
+        const from = mouse;
+        for (let i = 1; i <= steps; i++) {
+          mouse = { x: from.x + ((x - from.x) * i) / steps, y: from.y + ((y - from.y) * i) / steps };
+          await mouseEvent('mouseMoved');
+        }
+      },
+      down: ({ button = 'left' } = {}) => mouseEvent('mousePressed', button, 1),
+      up: ({ button = 'left' } = {}) => mouseEvent('mouseReleased', button, 1),
+    },
+    keyboard: {
+      down: (key) => keyEvent('keyDown', key),
+      up: (key) => keyEvent('keyUp', key),
+      type: async (text, { delay = 0 } = {}) => {
+        for (const ch of text) { await keyEvent('keyDown', ch); await keyEvent('keyUp', ch); if (delay) await sleep(delay); }
+      },
+    },
+  };
+  await send('Runtime.enable');
+  return p;
 }
 
 const ensurePage = async () => { if (!page) await open(); return page; };
