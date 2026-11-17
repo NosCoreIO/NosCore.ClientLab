@@ -206,6 +206,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
   // ---- actions: the calls the client's own clicks and keys end in ----
   const call = (fn, a = 0, d = 0, c = 0, stack = []) => {
     if (!fn) throw new Error('client function not found in this build');
+    if (stack.length > 3) throw new Error('at most three stack arguments are supported');
     return Module._control_call(fn, a, d, c, stack.length, stack[0] ?? 0, stack[1] ?? 0, stack[2] ?? 0) >>> 0;
   };
   const findIn = (list, id) => {

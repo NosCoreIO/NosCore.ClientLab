@@ -505,21 +505,25 @@
     renderer?.postMessage({type:'profile', enabled:rendererProfileDetailed});
   };
   // Automation (control.js): one JSON request at a time, answered by the game thread between window messages.
-  let controlBuf = null, controlQueue = Promise.resolve();
+  let controlBuf = null, controlQueue = Promise.resolve(), controlPending = 0;
   window.clientControl = {
     request(req) {
       const run = async () => {
         if (!controlBuf) throw new Error('the game has not started');
         const head = new Int32Array(controlBuf, 0, 4), body = new Uint8Array(controlBuf, 16);
+        // A timed-out request still owns the buffer until the game thread answers it.
+        if (controlPending && Atomics.load(head, 1) !== controlPending) throw new Error('the game thread has not answered the previous request');
         const bytes = new TextEncoder().encode(JSON.stringify(req));
         body.set(bytes);
         head[2] = bytes.length;
         const seq = (Atomics.load(head, 0) + 1) | 0;
         Atomics.store(head, 0, seq);
+        controlPending = seq;
         for (const started = performance.now(); Atomics.load(head, 1) !== seq;) {
           if (performance.now() - started > 30000) throw new Error('the game thread did not answer');
           await Atomics.waitAsync(head, 1, Atomics.load(head, 1), 1000).value;
         }
+        controlPending = 0;
         const answer = JSON.parse(new TextDecoder().decode(body.slice(0, head[3])));
         if (answer.error) throw new Error(answer.error);
         return answer.result;

@@ -201,6 +201,7 @@ const TOOLS = [
 // ---- JSON-RPC over stdio, one message per line ----
 const send = (m) => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...m })}\n`);
 async function handle(m) {
+  if (m === null || typeof m !== 'object' || Array.isArray(m)) return send({ id: null, error: { code: -32600, message: 'invalid request' } });
   if (m.id === undefined) return;
   try {
     switch (m.method) {
@@ -232,6 +233,6 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   if (!line.trim()) return;
   let m;
   try { m = JSON.parse(line); } catch { return send({ id: null, error: { code: -32700, message: 'parse error' } }); }
-  queue = queue.then(() => handle(m));
+  queue = queue.then(() => handle(m)).catch(() => { });
 }).on('close', () => queue.then(close).then(() => process.exit(0)));
 process.on('SIGTERM', () => close().then(() => process.exit(0)));
