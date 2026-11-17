@@ -221,10 +221,10 @@ const ensurePage = async () => { if (!page) await open(); return page; };
 const control = async (req) => (await ensurePage()).evaluate((r) => window.clientControl.request(r), req);
 const logText = () => page.evaluate(() => (window.allLog || []).join('\n'));
 
-async function waitLog(re, seconds) {
+async function waitLog(re, seconds, after = 0) {
   for (let i = 0; i < seconds; i++) {
     const t = await logText();
-    if (re.test(t)) return true;
+    if (re.test(t.slice(after))) return true;
     if (/FATAL/.test(t)) throw new Error(t.split('\n').find((l) => /FATAL/.test(l)));
     await sleep(1000);
   }
@@ -276,12 +276,14 @@ async function screenshot() {
 
 async function enterWorld({ slot } = {}) {
   await ensurePage();
-  if (!await waitLog(/closesocket 00000100/, 240)) throw new Error('login did not complete');
+  if (!await waitLog(/closesocket /, 240)) throw new Error('login did not complete');
   await sleep(4000);
   await click(layout.server);
   await sleep(2000);
+  const before = (await logText()).length;
   await click(layout.channel);
-  if (!await waitLog(/connect 127\.0\.0\.1:1337/, 60)) throw new Error('no world connection');
+  // The world server's address depends on the server list, so any new connection counts.
+  if (!await waitLog(/connect \S+ -> ok/, 60, before)) throw new Error('no world connection');
   await sleep(3000);
   for (let attempt = 0; attempt < 2; attempt++) {
     await click(slot || layout.slot);
