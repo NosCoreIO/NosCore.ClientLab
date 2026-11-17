@@ -22,7 +22,8 @@ const arg = (name, fallback) => {
   return i > 0 ? process.argv[i + 1] : fallback;
 };
 const defaults = { url: arg('--url', 'http://127.0.0.1:8090/'), params: arg('--params', ''), headed: process.argv.includes('--headed'),
-  attach: arg('--attach', process.env.CLIENTLAB_ATTACH || ''), log: arg('--log', process.env.CLIENTLAB_ACTION_LOG || '') };
+  attach: arg('--attach', process.env.CLIENTLAB_ATTACH || ''), log: arg('--log', process.env.CLIENTLAB_ACTION_LOG || ''),
+  slot: (arg('--slot', process.env.CLIENTLAB_SLOT || '') || null)?.split(',').map(Number) };
 // Reads (state, screenshots, memory) are left out of the action log.
 const QUIET = new Set(['client_state', 'skills', 'inventory', 'map_grid', 'dialogs', 'screenshot', 'client_log', 'read_memory',
   'find_signature', 'client_api', 'packets', 'wait_for']);
@@ -278,16 +279,19 @@ async function canvasOrigin() {
       c.style.width = `${width}px`;
       c.style.height = `${height}px`;
     }
-    const b = c.getBoundingClientRect();
-    return { x: b.left, y: b.top, sx: b.width / width, sy: b.height / height, width: b.width, height: b.height };
+    const b = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    return { x: b.left, y: b.top, sx: b.width / width, sy: b.height / height, width: b.width, height: b.height, dpr,
+      shot: { width: Math.round(b.width * dpr), height: Math.round(b.height * dpr) } };
   }, { ...CANVAS, resize: !attached });
 }
 
-// Held for about a frame each way: the client samples input once per frame.
-async function click([x, y], { button = 'left', double = false } = {}) {
+// Held for about a frame each way: the client samples input once per frame. [x,y] are screenshot pixels; the login
+// layout positions pass layout: true and are in the 1680x1050 space.
+async function click([x, y], { button = 'left', double = false, layout: scaled = false } = {}) {
   await ensurePage();
   const o = await canvasOrigin();
-  await page.mouse.move(o.x + x * o.sx, o.y + y * o.sy, { steps: 5 });
+  const [px, py] = scaled ? [x * o.sx, y * o.sy] : [x / o.dpr, y / o.dpr];
+  await page.mouse.move(o.x + px, o.y + py, { steps: 5 });
   await sleep(300);
   for (let k = 0; k < (double ? 2 : 1); k++) {
     await page.mouse.down({ button });
@@ -301,28 +305,29 @@ async function screenshot() {
   await ensurePage();
   const o = await canvasOrigin();
   const png = await page.screenshot({ clip: { x: o.x, y: o.y, width: o.width, height: o.height } });
-  return { type: 'image', data: png.toString('base64'), mimeType: 'image/png' };
+  return [{ type: 'image', data: png.toString('base64'), mimeType: 'image/png' },
+    json(`${o.shot.width}x${o.shot.height}: click and enter_world's slot take these pixel coordinates`)];
 }
 
-async function enterWorld({ slot } = {}) {
+async function enterWorld({ slot = defaults.slot } = {}) {
   await ensurePage();
   if (!await waitLog(/closesocket /, 240)) throw new Error('login did not complete');
   await sleep(4000);
-  await click(layout.server);
+  await click(layout.server, { layout: true });
   await sleep(2000);
   const before = (await logText()).length;
-  await click(layout.channel);
+  await click(layout.channel, { layout: true });
   // The world server's address depends on the server list, so any new connection counts.
   if (!await waitLog(/connect \S+ -> ok/, 60, before)) throw new Error('no world connection');
   await sleep(3000);
   for (let attempt = 0; attempt < 2; attempt++) {
-    await click(slot || layout.slot);
+    await (slot ? click(slot) : click(layout.slot, { layout: true }));
     await sleep(2000);
-    await click(layout.start);
+    await click(layout.start, { layout: true });
     const s = await waitState((st) => st.inWorld, 30);
     if (s) return s.character;
   }
-  throw new Error('did not enter the world');
+  throw new Error('did not enter the world: if the slot was empty, pass slot as the character\'s [x,y] on a character-select screenshot (or start the MCP with --slot x,y)');
 }
 
 // The guard eats or drinks below an HP or MP percentage and accepts chosen yes/no boxes. It runs before every tool,
@@ -365,6 +370,22 @@ function setGuard(a) {
   return { ...config, events: events.slice(-10) };
 }
 
+// The client walks up to the entity before it acts, so this returns once the character has stood still for a second.
+async function interact({ id, wait = true, timeout = 20 }) {
+  await control({ op: 'interact', id });
+  if (!wait) return 'walking';
+  let last = null, still = 0;
+  for (const end = Date.now() + timeout * 1000; Date.now() < end; await sleep(250)) {
+    await guardTick();
+    const c = (await control({ op: 'state', kinds: ['none'] })).character;
+    if (!c) break;
+    still = last && last.x === c.x && last.y === c.y ? still + 1 : 0;
+    if (still >= 4) return c;
+    last = c;
+  }
+  return { ...(await control({ op: 'state', kinds: ['none'] })).character, timedOut: true };
+}
+
 async function walk({ x, y, wait = true, timeout = 30 }) {
   await control({ op: 'walk', x, y });
   if (!wait) return 'walking';
@@ -393,7 +414,7 @@ const TOOLS = [
     run: (a) => open(a).then(json) },
   { name: 'client_close', description: 'Close the browser client, or disconnect from an attached desktop app without closing it.', inputSchema: obj(), run: () => close().then(() => json('closed')) },
   { name: 'enter_world', description: 'Pick the first server and channel and enter the world with a character slot. Returns the character.',
-    inputSchema: obj({ slot: { type: 'array', items: { type: 'integer' }, description: 'Character slot position [x,y] on the 1680x1050 screen' } }),
+    inputSchema: obj({ slot: { type: 'array', items: { type: 'integer' }, description: 'The character\'s [x,y] on a character-select screenshot; defaults to --slot, else the first NosCore slot' } }),
     run: (a) => enterWorld(a).then(json) },
   { name: 'client_state', description: 'Character (id, name, map, cell, level, HP/MP, sitting), current target, and the monsters, NPCs, players and ground items the client knows on this map.',
     inputSchema: obj({ radius: { type: 'integer', description: 'Only entities within this many cells of the character' },
@@ -407,8 +428,8 @@ const TOOLS = [
     inputSchema: obj({ x: { type: 'integer' }, y: { type: 'integer' }, wait: { type: 'boolean' }, timeout: { type: 'number', description: 'Seconds' } }, ['x', 'y']),
     run: (a) => walk(a).then(json) },
   { name: 'select', description: 'Select a monster, NPC or player as the target, like clicking it once.', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'select', id: a.id }).then(json) },
-  { name: 'interact', description: 'Act on an entity like clicking it: walk up to it, then attack a monster with the armed skill or talk to an NPC.',
-    inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'interact', id: a.id }).then(json) },
+  { name: 'interact', description: 'Act on an entity like clicking it: walk up to it, then attack a monster with the armed skill or talk to an NPC. Waits until the character has stopped walking unless wait is false.',
+    inputSchema: obj({ id, wait: { type: 'boolean' }, timeout: { type: 'number', description: 'Seconds' } }, ['id']), run: (a) => interact(a).then(json) },
   { name: 'use_skill', description: 'Arm a skill by cast id (0 is the basic attack) and use it on a target, like the skill bar.',
     inputSchema: obj({ cast_id: { type: 'integer' }, target: id }, ['cast_id']), run: (a) => control({ op: 'skill', castId: a.cast_id, target: a.target ?? 0 }).then(json) },
   { name: 'pick_up', description: 'Pick up a ground item by id.', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'pickup', id: a.id }).then(json) },
@@ -436,8 +457,8 @@ const TOOLS = [
       last: { type: 'integer', description: 'How many, default 30' } }),
     run: async (a) => { await ensurePage(); return json((await packetsSince(0, a)).list.slice(-(a.last || 30)).map((p) => `${p.direction} ${p.raw}`)); } },
   { name: 'rest', description: 'Sit down or stand up.', inputSchema: obj(), run: () => control({ op: 'rest' }).then(json) },
-  { name: 'screenshot', description: 'The game screen (1680x1050).', inputSchema: obj(), run: () => screenshot() },
-  { name: 'click', description: 'Click the game screen at [x,y] in 1680x1050 coordinates, for windows and dialogues.',
+  { name: 'screenshot', description: 'The game screen, with its size in pixels; click takes the same pixel coordinates.', inputSchema: obj(), run: () => screenshot() },
+  { name: 'click', description: 'Click the game screen at [x,y] in screenshot pixels, for windows and dialogues.',
     inputSchema: obj({ x: { type: 'integer' }, y: { type: 'integer' }, button: { type: 'string', enum: ['left', 'right'] }, double: { type: 'boolean' } }, ['x', 'y']),
     run: (a) => click([a.x, a.y], a).then(() => json('clicked')) },
   { name: 'press_key', description: 'Press a key (Playwright key name, e.g. i, Escape, Enter, F1).',
@@ -487,7 +508,7 @@ async function handle(m) {
           if (!QUIET.has(tool.name)) actionSeq = await packetSeq();
           const content = await tool.run(args);
           logAction(tool.name, args, content);
-          return send({ id: m.id, result: { content: [content] } });
+          return send({ id: m.id, result: { content: [content].flat() } });
         } catch (e) {
           logAction(tool.name, args, null, String(e?.message || e));
           return send({ id: m.id, result: { content: [json(String(e?.message || e))], isError: true } });

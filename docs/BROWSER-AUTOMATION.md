@@ -109,7 +109,9 @@ claude mcp add clientlab -- node /path/to/NosCore.ClientLab/recomp/web/mcp.mjs -
 ```
 
 `enter_world` picks the first server and channel and the character slot; the other tools then work on the character
-in the world.
+in the world. On another server's character select, pass `slot` (or start the MCP with `--slot x,y`) as the
+character's position on a screenshot. `screenshot` returns its size, and `click` and `slot` take that screenshot's
+pixel coordinates, whatever the window size.
 
 To drive the desktop app instead, start it with `CLIENTLAB_DEVTOOLS_PORT=9222` and attach to it; `client_close` then
 only disconnects and leaves the app running:
