@@ -45,7 +45,8 @@ if (defaults.log) {
 }
 
 // The argument checks the tool schemas here need: required keys and the four scalar/array types.
-const TYPES = { integer: Number.isInteger, boolean: (v) => typeof v === 'boolean', string: (v) => typeof v === 'string', array: Array.isArray };
+const TYPES = { integer: Number.isInteger, number: Number.isFinite, boolean: (v) => typeof v === 'boolean', string: (v) => typeof v === 'string',
+  array: Array.isArray };
 function invalidArgs(schema, args) {
   if (args === null || typeof args !== 'object' || Array.isArray(args)) return 'arguments must be an object';
   for (const key of schema.required || []) if (args[key] === undefined) return `${key} is required`;
@@ -251,7 +252,7 @@ async function waitFor({ header, direction, contains, dialog, timeout = 30 }) {
   for (const end = Date.now() + timeout * 1000; ; await sleep(250)) {
     if (header || contains) {
       const { list } = await packetsSince(actionSeq, { header, direction, contains });
-      if (list.length) { actionSeq = list[0].seq; return list[0]; }
+      if (list.length) return list[0];
     }
     if (dialog) {
       const box = (await control({ op: 'dialogs' })).find((d) => [d.text, d.yes, d.no].some((t) => t.toLowerCase().includes(dialog.toLowerCase())));
@@ -553,10 +554,11 @@ async function handle(m) {
 }
 
 // Tool calls run one after another: they share one page and one game thread.
-let queue = Promise.resolve(), pending = 0;
+let queue = Promise.resolve(), pending = 0, idleTick = false;
 setInterval(() => {
-  if (pending) return;
-  queue = queue.then(guardTick).catch(() => { });
+  if (pending || idleTick) return;
+  idleTick = true;
+  queue = queue.then(guardTick).catch(() => { }).finally(() => { idleTick = false; });
 }, 1000).unref();
 createInterface({ input: process.stdin }).on('line', (line) => {
   if (!line.trim()) return;

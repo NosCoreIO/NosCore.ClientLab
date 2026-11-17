@@ -27,10 +27,12 @@ EM_JS(void, js_control_poll, (void), {
     if (globalThis.controlPoll) globalThis.controlPoll();
 });
 
+/* A client function called from a request can pump messages and land here again: keep the outer CPU for the rest of it. */
 void port_control_poll(CPU* c) {
+    CPU* outer = control_cpu;
     control_cpu = c;
     js_control_poll();
-    control_cpu = 0;
+    control_cpu = outer;
 }
 
 #else

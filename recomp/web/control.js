@@ -404,14 +404,19 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
   }
 
   // Called by the game thread (hle_control.c) on every message-loop turn, so the idle path stays a single load.
+  // A request being served is not served again from a message pump inside one of its client calls.
+  let serving = false;
   self.controlPoll = () => {
     const seq = Atomics.load(head, 0);
-    if (seq === Atomics.load(head, 1)) return;
+    if (serving || seq === Atomics.load(head, 1)) return;
     let answer;
+    serving = true;
     try {
       answer = { result: serve(JSON.parse(utf8.decode(body.slice(0, head[2])))) };
     } catch (e) {
       answer = { error: String(e?.message || e) };
+    } finally {
+      serving = false;
     }
     let bytes = encoder.encode(JSON.stringify(answer));
     if (bytes.length > body.length) bytes = encoder.encode(JSON.stringify({ error: 'answer too large' }));
