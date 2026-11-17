@@ -257,6 +257,7 @@ async function waitFor({ header, direction, contains, dialog, timeout = 30 }) {
       if (box) return box;
     }
     if (Date.now() >= end) throw new Error(`nothing matched within ${timeout} s`);
+    await guardTick();
   }
 }
 
@@ -324,12 +325,53 @@ async function enterWorld({ slot } = {}) {
   throw new Error('did not enter the world');
 }
 
+// The guard eats or drinks below an HP or MP percentage and accepts chosen yes/no boxes. It runs before every tool,
+// inside walk and wait_for loops, and once a second while the MCP is idle.
+const guard = { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, accept: [], cooldown: 4, events: [], used: {} };
+let guarding = false;
+async function guardTick() {
+  if (!page || guarding || !(guard.hpItem || guard.mpItem || guard.accept.length)) return;
+  guarding = true;
+  try {
+    const note = (event) => {
+      guard.events.push({ time: new Date().toISOString(), ...event });
+      guard.events.splice(0, Math.max(0, guard.events.length - 50));
+      logAction('guard', {}, json(event));
+    };
+    const s = await control({ op: 'state', kinds: ['none'] });
+    if (s.inWorld) {
+      for (const [stat, below, vnum] of [['hp', guard.hpBelow, guard.hpItem], ['mp', guard.mpBelow, guard.mpItem]]) {
+        if (!vnum || below === null || s.character[stat] > below || Date.now() - (guard.used[stat] || 0) < guard.cooldown * 1000) continue;
+        guard.used[stat] = Date.now();
+        const used = await control({ op: 'use_item', vnum }).then(() => true, (e) => { note({ stat, vnum, error: String(e?.message || e) }); return false; });
+        if (used) note({ stat, percent: s.character[stat], used: vnum });
+      }
+    }
+    if (guard.accept.length) {
+      for (const d of await control({ op: 'dialogs' })) {
+        const rule = guard.accept.find((t) => [d.text, d.yes, d.no].some((x) => x.toLowerCase().includes(t.toLowerCase())));
+        if (!rule) continue;
+        await control({ op: 'answer', index: d.index, yes: true });
+        note({ accepted: d.text, rule });
+      }
+    }
+  } catch { } finally { guarding = false; }
+}
+function setGuard(a) {
+  if (a.off) Object.assign(guard, { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, accept: [] });
+  for (const [arg, key] of [['hp_below', 'hpBelow'], ['hp_item', 'hpItem'], ['mp_below', 'mpBelow'], ['mp_item', 'mpItem'], ['accept', 'accept'],
+    ['cooldown', 'cooldown']]) if (a[arg] !== undefined && a[arg] !== null) guard[key] = a[arg];
+  const { events, used, ...config } = guard;
+  return { ...config, events: events.slice(-10) };
+}
+
 async function walk({ x, y, wait = true, timeout = 30 }) {
   await control({ op: 'walk', x, y });
   if (!wait) return 'walking';
   let last = null, still = 0;
   for (const end = Date.now() + timeout * 1000; Date.now() < end; await sleep(500)) {
-    const c = (await control({ op: 'state' })).character;
+    await guardTick();
+    const c = (await control({ op: 'state', kinds: ['none'] })).character;
     if (!c) break;
     if (c.x === x && c.y === y) return c;
     // Stopped short: the path is blocked or the walk was refused.
@@ -380,6 +422,11 @@ const TOOLS = [
     inputSchema: obj({ yes: { type: 'boolean' }, text: { type: 'string', description: 'Part of the box text or of its answers, e.g. "Continue here" or "#revival"' },
       index: { type: 'integer' } }, ['yes']),
     run: (a) => control({ op: 'answer', yes: a.yes, text: a.text, index: a.index }).then(json) },
+  { name: 'guard', description: 'Keep the character alive between calls: use hp_item (a potion or food vnum) when HP is at or below hp_below percent, the same for MP, and press Yes on any box whose text or answers contain one of accept (e.g. "Teleport", "#revival^0"). Checked before every tool, during walk and wait_for, and every second when idle. No arguments returns the settings and the last things it did; off clears it.',
+    inputSchema: obj({ hp_below: { type: 'integer' }, hp_item: { type: 'integer' }, mp_below: { type: 'integer' }, mp_item: { type: 'integer' },
+      accept: { type: 'array', items: { type: 'string' } }, cooldown: { type: 'number', description: 'Seconds between two uses, default 4' },
+      off: { type: 'boolean' } }),
+    run: async (a) => json(setGuard(a)) },
   { name: 'wait_for', description: 'Wait for a packet (by header, direction and/or text) sent or received since the last action, or for a yes/no box whose text contains dialog. Returns the packet or the box.',
     inputSchema: obj({ header: { type: 'string', description: 'Packet header, e.g. at, c_info, sayi' }, direction: { type: 'string', enum: ['send', 'recv'] },
       contains: { type: 'string' }, dialog: { type: 'string' }, timeout: { type: 'number', description: 'Seconds, default 30' } }),
@@ -436,6 +483,7 @@ async function handle(m) {
         const invalid = invalidArgs(tool.inputSchema, args);
         if (invalid) return send({ id: m.id, error: { code: -32602, message: `${tool.name}: ${invalid}` } });
         try {
+          if (tool.name !== 'guard' && tool.name !== 'client_close' && tool.name !== 'client_open') await guardTick();
           if (!QUIET.has(tool.name)) actionSeq = await packetSeq();
           const content = await tool.run(args);
           logAction(tool.name, args, content);
@@ -453,11 +501,16 @@ async function handle(m) {
 }
 
 // Tool calls run one after another: they share one page and one game thread.
-let queue = Promise.resolve();
+let queue = Promise.resolve(), pending = 0;
+setInterval(() => {
+  if (pending) return;
+  queue = queue.then(guardTick).catch(() => { });
+}, 1000).unref();
 createInterface({ input: process.stdin }).on('line', (line) => {
   if (!line.trim()) return;
   let m;
   try { m = JSON.parse(line); } catch { return send({ id: null, error: { code: -32700, message: 'parse error' } }); }
-  queue = queue.then(() => handle(m)).catch(() => { });
+  pending++;
+  queue = queue.then(() => handle(m)).catch(() => { }).finally(() => pending--);
 }).on('close', () => queue.then(close).then(() => process.exit(0)));
 process.on('SIGTERM', () => close().then(() => process.exit(0)));

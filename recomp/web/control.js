@@ -212,10 +212,13 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     const scene = obj('scene');
     const selected = inRange(target) ? entityInfo(target) : null;
     const me = { x: u16(self_ + ENT.x), y: u16(self_ + ENT.y) };
-    const keep = (e) => (radius === undefined || radius === null || cells(me, e) <= radius)
-      && (!vnums?.length || vnums.includes(e.vnum));
+    const keep = (e) => {
+      e.distance = cells(me, e);
+      return (radius === undefined || radius === null || e.distance <= radius) && (!vnums?.length || vnums.includes(e.vnum));
+    };
     const want = (k) => (!kinds?.length || kinds.includes(k));
-    const list = (k, kind) => (want(k) ? entities(ptr(scene + SCENE[k]), kind, id, keep) : undefined);
+    const nearest = (l) => l.sort((a, b) => a.distance - b.distance);
+    const list = (k, kind) => (want(k) ? nearest(entities(ptr(scene + SCENE[k]), kind, id, keep)) : undefined);
     return {
       inWorld: true,
       character: { id, name: str(ptr(self_ + ENT.playerName)), map: i32(self_ + ENT.map), x: u16(self_ + ENT.x),
@@ -225,7 +228,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       monsters: list('monsters', 'monster'),
       npcs: list('npcs', 'npc'),
       players: list('players', 'player'),
-      items: want('items') ? groundItems(ptr(scene + SCENE.items), keep) : undefined,
+      items: want('items') ? nearest(groundItems(ptr(scene + SCENE.items), keep)) : undefined,
     };
   }
 

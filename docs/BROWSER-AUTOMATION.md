@@ -89,7 +89,7 @@ a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
 
 | Request | What it does |
 |---|---|
-| `{op:'state', radius, vnums, kinds}` | Character (id, name, map, cell, level, HP/MP, sitting), target, monsters, NPCs, players, ground items; the optional filters keep entities within `radius` cells, with those `vnums`, or only some lists |
+| `{op:'state', radius, vnums, kinds}` | Character (id, name, map, cell, level, HP/MP, sitting), target, monsters, NPCs, players, ground items, nearest first with their `distance`; the optional filters keep entities within `radius` cells, with those `vnums`, or only some lists |
 | `{op:'skills'}`, `{op:'inventory'}`, `{op:'grid'}` | Learned skills, inventory, the map's walkability grid |
 | `{op:'walk', x, y}` | A floor click on that cell |
 | `{op:'select', id}` | Selects the entity as the target |
@@ -125,6 +125,12 @@ With the packet log on (`PORT_PACKET_LOG=1`, which the MCP adds to the pages it 
 setting), the page keeps the last 2000 cleartext packets. `packets` lists them and `wait_for` waits for one by header,
 direction or text, counted from just before the last action so a fast reply is not missed. `wait_for` also takes
 `dialog` to wait for a yes/no box.
+
+`guard` keeps a character alive while an agent thinks: below `hp_below` or `mp_below` percent it uses `hp_item` or
+`mp_item` from the inventory, and it presses Yes on any box whose text or answers contain one of `accept` (a teleport
+offer, `#revival^0`). It runs before each tool, inside `walk` and `wait_for`, and every second while the MCP is idle;
+`guard` with no arguments shows what it did. `client_state` lists entities nearest first with their distance in cells,
+so an agent can pull the closest group instead of a whole room.
 
 On a Linux machine without a GPU, headless Chromium stops updating the canvas after the login screen, although the
 game keeps running. Run it headed under Xvfb with ANGLE on Mesa's GL instead:
