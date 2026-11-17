@@ -2185,7 +2185,7 @@ static void mouse_event(CPU* c, int kind, int button, int sx, int sy, int wheel,
     }
 }
 
-enum { IN_MOVE = 1, IN_DOWN, IN_UP, IN_WHEEL, IN_KEYDOWN, IN_KEYUP, IN_CHAR, IN_DUMP_FRAME, IN_PROFILE };
+enum { IN_MOVE = 1, IN_DOWN, IN_UP, IN_WHEEL, IN_KEYDOWN, IN_KEYUP, IN_CHAR, IN_DUMP_FRAME, IN_PROFILE, IN_CLOSE };
 
 /* A button or key press and its release must not land in the same frame: the game also polls the key state once a
    frame, so only one state change goes through per Present. */
@@ -2219,6 +2219,8 @@ static void pump_input(CPU* c) {
             break;
         case IN_DUMP_FRAME: r_dump_next_frame(); break;
         case IN_PROFILE: r_toggle_profile(); break;
+        /* The window's close button: the client asks the player to confirm, and saves its options while shutting down. */
+        case IN_CLOSE: post(root_of(display_hwnd), WM_SYSCOMMAND, 0xF060, 0); break;
         }
     }
 }

@@ -97,7 +97,16 @@ internal static class GameSettingsChecks
             if (Directory.EnumerateFiles(Path.GetDirectoryName(store.FilePath)!, "*.tmp").Any()) throw new Exception("A settings write left temporary files behind.");
             await reopened.WriteAsync(Array.Empty<byte>());
             if ((await new GameSettingsStore(dataDirectory).ReadAsync())?.Length != 0) throw new Exception("An intentionally empty preferences file was replaced by imported defaults.");
-            Console.WriteLine("PASS: exact official INI import, music/display persistence across launches and patches, original-install preservation, atomic concurrent writes and bounded settings files.");
+            var inGameOptions = Enumerable.Range(0, 1024).Select(index => (byte)(index % 251)).ToArray();
+            await File.WriteAllBytesAsync(Path.Combine(originalDirectory, "Config.dat"), inGameOptions);
+            if (!(await new GameSettingsStore(dataDirectory).ReadAsync("Config.dat", [originalDirectory]))!.SequenceEqual(inGameOptions))
+                throw new Exception("The official client's in-game options were not imported.");
+            var changedOptions = inGameOptions.Select(value => (byte)~value).ToArray();
+            await reopened.WriteAsync("Config.dat", changedOptions);
+            if (!(await new GameSettingsStore(dataDirectory).ReadAsync("Config.dat", [originalDirectory]))!.SequenceEqual(changedOptions))
+                throw new Exception("In-game options did not survive reopening.");
+            if ((await reopened.ReadAsync())?.Length != 0) throw new Exception("Saving the in-game options changed Config.ini.");
+            Console.WriteLine("PASS: exact official INI import, music/display and in-game option persistence across launches and patches, original-install preservation, atomic concurrent writes and bounded settings files.");
             Console.WriteLine("PASS: launcher options round-trip through the official INI flags while preserving other keys, Unicode, comments and line endings.");
             Console.WriteLine("PASS: Save stays enabled during preparation/gameplay; settings persist without changing the active preparation's snapshot.");
         }

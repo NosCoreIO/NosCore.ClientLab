@@ -2,31 +2,41 @@ using System.Diagnostics;
 
 namespace NosCore.ClientLab.Launcher.Services;
 
-/// <summary>Preserves the client's own Config.ini bytes independently of patches and runtime versions.</summary>
+/// <summary>Preserves the client's own settings files (Config.ini, and the in-game options it writes to Config.dat)
+/// byte for byte, independently of patches and runtime versions.</summary>
 public sealed class GameSettingsStore(string dataDirectory)
 {
     public const int MaximumBytes = 1024 * 1024;
+    public const string IniFile = "Config.ini";
+    public static readonly IReadOnlyList<string> Files = [IniFile, "Config.dat"];
     private readonly string directory = Path.Combine(Path.GetFullPath(dataDirectory), "game-settings");
-    public string FilePath => Path.Combine(directory, "Config.ini");
+    public string FilePath => PathOf(IniFile);
 
-    public async Task<byte[]?> ReadAsync(IEnumerable<string>? gameDirectories = null)
+    public string PathOf(string file) => Path.Combine(directory, Files.Single(name => name == file));
+
+    public Task<byte[]?> ReadAsync(IEnumerable<string>? gameDirectories = null) => ReadAsync(IniFile, gameDirectories);
+
+    public async Task<byte[]?> ReadAsync(string file, IEnumerable<string>? gameDirectories = null)
     {
-        if (File.Exists(FilePath)) return await ReadFileAsync(FilePath);
+        var path = PathOf(file);
+        if (File.Exists(path)) return await ReadFileAsync(path);
         foreach (var gameDirectory in gameDirectories ?? [])
         {
             if (string.IsNullOrWhiteSpace(gameDirectory)) continue;
-            foreach (var candidate in CandidateFiles(gameDirectory))
+            foreach (var candidate in CandidateFiles(gameDirectory, file))
             {
                 if (!File.Exists(candidate)) continue;
                 var bytes = await ReadFileAsync(candidate);
-                await WriteAsync(bytes, onlyIfMissing: true);
-                return await ReadFileAsync(FilePath);
+                await WriteAsync(file, bytes, onlyIfMissing: true);
+                return await ReadFileAsync(path);
             }
         }
         return null;
     }
 
-    public Task WriteAsync(ReadOnlyMemory<byte> bytes) => WriteAsync(bytes, onlyIfMissing: false);
+    public Task WriteAsync(ReadOnlyMemory<byte> bytes) => WriteAsync(IniFile, bytes);
+
+    public Task WriteAsync(string file, ReadOnlyMemory<byte> bytes) => WriteAsync(file, bytes, onlyIfMissing: false);
 
     public async Task<GameOptions> ReadOptionsAsync(IEnumerable<string>? gameDirectories = null) => GameOptionsIni.Read(await ReadAsync(gameDirectories));
 
@@ -36,26 +46,27 @@ public sealed class GameSettingsStore(string dataDirectory)
         Directory.CreateDirectory(directory);
         await using var lease = await AcquireLeaseAsync();
         var current = File.Exists(FilePath) ? await ReadFileAsync(FilePath) : null;
-        await ReplaceAsync(GameOptionsIni.Update(current, options));
+        await ReplaceAsync(FilePath, GameOptionsIni.Update(current, options));
     }
 
-    private async Task WriteAsync(ReadOnlyMemory<byte> bytes, bool onlyIfMissing)
+    private async Task WriteAsync(string file, ReadOnlyMemory<byte> bytes, bool onlyIfMissing)
     {
         if (bytes.Length > MaximumBytes) throw new InvalidDataException("The game's settings file is too large.");
+        var path = PathOf(file);
         Directory.CreateDirectory(directory);
         await using var lease = await AcquireLeaseAsync();
-        if (onlyIfMissing && File.Exists(FilePath)) return;
-        await ReplaceAsync(bytes);
+        if (onlyIfMissing && File.Exists(path)) return;
+        await ReplaceAsync(path, bytes);
     }
 
-    private async Task ReplaceAsync(ReadOnlyMemory<byte> bytes)
+    private async Task ReplaceAsync(string path, ReadOnlyMemory<byte> bytes)
     {
         if (bytes.Length > MaximumBytes) throw new InvalidDataException("The game's settings file is too large.");
         var temporary = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
             await File.WriteAllBytesAsync(temporary, bytes.ToArray());
-            File.Move(temporary, FilePath, overwrite: true);
+            File.Move(temporary, path, overwrite: true);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
@@ -82,17 +93,17 @@ public sealed class GameSettingsStore(string dataDirectory)
         return result;
     }
 
-    private static IEnumerable<string> CandidateFiles(string gameDirectory)
+    private static IEnumerable<string> CandidateFiles(string gameDirectory, string file)
     {
         var full = Path.GetFullPath(gameDirectory);
-        yield return Path.Combine(full, "Config.ini");
-        if (!OperatingSystem.IsWindows()) yield return Path.Combine(full, "config.ini");
+        yield return Path.Combine(full, file);
+        if (!OperatingSystem.IsWindows()) yield return Path.Combine(full, file.ToLowerInvariant());
         else if (Path.GetPathRoot(full) is { Length: > 0 } root)
         {
             // A non-elevated official Windows client can be redirected here when
-            // its installation is under Program Files. Import only Config.ini.
+            // its installation is under Program Files.
             yield return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "VirtualStore", full[root.Length..], "Config.ini");
+                "VirtualStore", full[root.Length..], file);
         }
     }
 }

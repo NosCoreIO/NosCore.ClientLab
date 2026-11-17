@@ -149,15 +149,17 @@ public sealed class GameHost : IAsyncDisposable
                 packets.Add(packet["kind"]!.GetValue<int>(), packet["raw"]!.GetValue<string>(), packet["timestamp"]!.GetValue<DateTimeOffset>());
                 Reply(context, 204); return;
             }
-            if (path == "/game-settings/config.ini")
+            if (path.StartsWith("/game-settings/", StringComparison.Ordinal))
             {
+                var file = GameSettingsStore.Files.FirstOrDefault(name => "/game-settings/" + name.ToLowerInvariant() == path);
+                if (file is null) { Reply(context, 404); return; }
                 if (gameSettings is null) { Reply(context, 404); return; }
                 context.Response.Headers["X-ClientLab-Settings"] = "enabled";
                 if (context.Request.HttpMethod == "GET")
                 {
                     try
                     {
-                        var bytes = await gameSettings.ReadAsync([settingsImportDirectory, gameDir]);
+                        var bytes = await gameSettings.ReadAsync(file, [settingsImportDirectory, gameDir]);
                         Reply(context, bytes is null ? 404 : 200, bytes); return;
                     }
                     catch (Exception error) when (error is IOException or UnauthorizedAccessException)
@@ -171,7 +173,7 @@ public sealed class GameHost : IAsyncDisposable
                 using var settingsBytes = new MemoryStream();
                 await context.Request.InputStream.CopyToAsync(settingsBytes);
                 if (settingsBytes.Length > GameSettingsStore.MaximumBytes) { Reply(context, 413); return; }
-                try { await gameSettings.WriteAsync(settingsBytes.ToArray()); }
+                try { await gameSettings.WriteAsync(file, settingsBytes.ToArray()); }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException)
                 {
                     log?.Invoke("Game settings could not be saved. Check the data folder's write permissions.");
