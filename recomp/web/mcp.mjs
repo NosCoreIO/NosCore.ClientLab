@@ -170,6 +170,7 @@ async function cdpPage(target) {
   });
   ws.on('close', () => { for (const { reject } of pending.values()) reject(new Error('CDP connection closed')); pending.clear(); });
   const send = (method, params = {}) => new Promise((resolve, reject) => {
+    if (ws.readyState !== ws.OPEN) return reject(new Error('CDP connection closed'));
     pending.set(++id, { resolve, reject });
     ws.send(JSON.stringify({ id, method, params }));
   });
