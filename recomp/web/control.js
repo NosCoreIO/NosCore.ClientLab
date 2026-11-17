@@ -85,6 +85,12 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     // Every yes/no box (qna, dlg and their i18n forms) comes from one pool; this takes the next box and stores its answer callback.
     dialogs: '55 8B EC 53 A1 ?? ?? ?? ?? 8B 00 E8 ?? ?? ?? ?? 8B D8 8B 83 ?? ?? ?? ?? 05 ?? ?? ?? ?? E8 ?? ?? ?? ?? 8B 45 08 89 83',
     // A yes/no box button: hide the box, then call its callback with the button's tag (1 yes, 0 no).
+    // What a double click on an inventory slot calls: (game, slot record) where the record is item, kind, pocket, slot.
+    useItem: '53 56 8B DA 8B F0 83 3B 00 0F 84 ?? ?? ?? ?? E8 ?? ?? ?? ?? 31 03',
+    // Its callers load the game object behind `mov eax, [slot]` right after `lea edx, [esi+0xb0]`.
+    game: '8D 96 B0 00 00 00 A1 ?? ?? ?? ?? 8B 00 E8',
+    // The client's string allocator, used for a small scratch record the client's own code can read.
+    newString: '85 C0 7E ?? 50 83 C0 0A 83 E0 FE 50 E8',
     dialogButton: '53 56 8B F2 8B D8 8A 15 ?? ?? ?? ?? 8B C3 8B 08 FF 51 ?? 66 83 BB ?? ?? ?? ?? 00 74 ?? 8B 46 ?? 50 8B 4B ?? 8B D3 8B 83 ?? ?? ?? ?? FF 93',
   };
   let api = null;
@@ -98,6 +104,9 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       pickup: scan(SIG.pickup), collect: scan(SIG.collect), rest: scan(SIG.rest), select: scan(SIG.select),
       dialogs: (() => { const site = scan(SIG.dialogs); return site ? ptr(u32(site + 5)) : 0; })(),
       dialogButton: scan(SIG.dialogButton),
+      useItem: scan(SIG.useItem),
+      game: (() => { const site = scan(SIG.game); return site ? ptr(u32(site + 7)) : 0; })(),
+      newString: scan(SIG.newString),
     };
     return api;
   }
@@ -149,6 +158,18 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     return out;
   }
 
+  function inventoryItems() {
+    const inv = obj('inventory'), out = [];
+    if (!inv) return out;
+    for (const pocket of [0x228, 0x22c, 0x230]) {
+      const list = ptr(inv + pocket);
+      for (let i = 0, n = listCount(list); i < n; i++) {
+        const item = ptr(listItem(list, i)), def = ptr(item + 0x08);
+        if (item && def) out.push({ item, def });
+      }
+    }
+    return out;
+  }
   function inventory() {
     const inv = obj('inventory'), out = [];
     if (!inv) return out;
@@ -263,7 +284,23 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     return out;
   }
 
+  let scratch = 0;
+  const scratchRecord = () => (scratch ||= call(need(resolve().newString, 'string allocator not found in this build'), 16));
+
   const actions = {
+    // What a double click on the item in the inventory does: potions, scrolls, wings, boxes, quest items.
+    use_item({ vnum, pocket, slot }) {
+      const found = inventoryItems().find(({ item, def }) => (vnum !== undefined && vnum !== null
+        ? i32(def + 0x30) === vnum : s8(item + 0x1c) === pocket && s16(item + 0x1e) === slot));
+      const { item, def } = need(found, vnum !== undefined && vnum !== null ? `no item ${vnum} in the inventory` : `no item in pocket ${pocket} slot ${slot}`);
+      const rec = scratchRecord();
+      dv().setUint32(rec, item, true);
+      HEAPU8[rec + 4] = 1;
+      dv().setInt16(rec + 6, s8(item + 0x1c), true);
+      dv().setInt16(rec + 8, s16(item + 0x1e), true);
+      call(need(resolve().useItem, 'use item code not found in this build'), need(obj('game'), 'not in the world'), rec);
+      return { used: { vnum: i32(def + 0x30), name: str(ptr(def + 0x38)), pocket: s8(item + 0x1c), slot: s16(item + 0x1e) } };
+    },
     // Press the box's own Yes or No button.
     answer({ index, yes }) {
       const pool = need(obj('dialogs'), 'no dialog pool');

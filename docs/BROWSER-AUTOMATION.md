@@ -96,6 +96,7 @@ a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
 | `{op:'interact', id}` | A click on the entity: walk up, then attack with the armed skill or talk |
 | `{op:'skill', castId, target}` | Arms the skill from the skill bar and uses it on the target |
 | `{op:'pickup', id}`, `{op:'collect', id}`, `{op:'rest'}` | Picks up, collects from a map object, sits or stands |
+| `{op:'use_item', vnum}` or `{op:'use_item', pocket, slot}` | A double click on the inventory item |
 | `{op:'dialogs'}` | Open yes/no boxes (revive, teleport offers, confirmations): their text and what Yes and No answer |
 | `{op:'answer', yes, index}` | Presses the box's own Yes or No button |
 | `{op:'read', address, length}`, `{op:'scan', signature}`, `{op:'call', address, eax, edx, ecx, stack}` | For finding new structures and functions |
