@@ -5,9 +5,10 @@
 // usage: node mcp.mjs [--url http://127.0.0.1:8090/] [--params PORT_SCREEN=1280x720] [--headed]
 //        node mcp.mjs --attach http://127.0.0.1:9222   (drive a running desktop app started with CLIENTLAB_DEVTOOLS_PORT=9222)
 //        --log actions.jsonl   appends every action (walk, answer_dialog, ...) with its arguments and result
+//        --guard guard.json    keeps the guard settings across restarts (default: next to --log)
 // Register it with an MCP client, for example: claude mcp add clientlab -- node /path/to/recomp/web/mcp.mjs
 import { createRequire } from 'node:module';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const require = createRequire(import.meta.url);
@@ -24,6 +25,7 @@ const arg = (name, fallback) => {
 const defaults = { url: arg('--url', 'http://127.0.0.1:8090/'), params: arg('--params', ''), headed: process.argv.includes('--headed'),
   attach: arg('--attach', process.env.CLIENTLAB_ATTACH || ''), log: arg('--log', process.env.CLIENTLAB_ACTION_LOG || ''),
   slot: (arg('--slot', process.env.CLIENTLAB_SLOT || '') || null)?.split(',').map(Number) };
+defaults.guard = arg('--guard', process.env.CLIENTLAB_GUARD || (defaults.log ? `${defaults.log}.guard.json` : ''));
 // Reads (state, screenshots, memory) are left out of the action log.
 const QUIET = new Set(['client_state', 'skills', 'inventory', 'map_grid', 'dialogs', 'screenshot', 'client_log', 'read_memory',
   'find_signature', 'client_api', 'packets', 'wait_for', 'portals']);
@@ -336,6 +338,10 @@ async function enterWorld({ slot = defaults.slot } = {}) {
 const guard = { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, foodBelow: null, foodItem: null, safeRadius: 6, accept: [],
   cooldown: 4, events: [], used: {} };
 let guarding = false;
+// A restart of the MCP must not leave a character unguarded mid-fight.
+if (defaults.guard && existsSync(defaults.guard)) {
+  try { Object.assign(guard, JSON.parse(readFileSync(defaults.guard, 'utf8'))); } catch (e) { console.error(`guard settings in ${defaults.guard} not read: ${e.message}`); }
+}
 async function guardTick() {
   if (!page || guarding || !(guard.hpItem || guard.mpItem || guard.foodItem || guard.accept.length)) return;
   guarding = true;
@@ -381,6 +387,7 @@ function setGuard(a) {
   for (const [arg, key] of [['hp_below', 'hpBelow'], ['hp_item', 'hpItem'], ['mp_below', 'mpBelow'], ['mp_item', 'mpItem'], ['food_below', 'foodBelow'],
     ['food_item', 'foodItem'], ['safe_radius', 'safeRadius'], ['accept', 'accept'], ['cooldown', 'cooldown']]) if (a[arg] !== undefined && a[arg] !== null) guard[key] = a[arg];
   const { events, used, ...config } = guard;
+  if (defaults.guard) writeFileSync(defaults.guard, JSON.stringify(config));
   return { ...config, events: events.slice(-10) };
 }
 

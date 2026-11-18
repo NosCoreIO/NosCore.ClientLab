@@ -136,7 +136,8 @@ direction or text, counted from just before the last action so a fast reply is n
 `guard` keeps a character alive while an agent thinks: below `hp_below` or `mp_below` percent it uses `hp_item` or
 `mp_item` from the inventory, and it presses Yes on any box whose text or answers contain one of `accept` (a teleport
 offer, `#revival^0`). It runs before each tool, inside `walk` and `wait_for`, and every second while the MCP is idle;
-`guard` with no arguments shows what it did. `client_state` lists entities nearest first with their distance in cells,
+`guard` with no arguments shows what it did. Its settings are kept in `--guard <file>` (by default next to the `--log`
+file) and restored when the MCP restarts. `client_state` lists entities nearest first with their distance in cells,
 so an agent can pull the closest group instead of a whole room.
 
 `walk` refuses a cell on or next to a portal of the current map (the client's own portal list, shown by `portals`)
