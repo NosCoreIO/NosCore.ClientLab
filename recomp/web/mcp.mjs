@@ -541,13 +541,21 @@ async function afterPortal(arrived, end) {
   return arrived;
 }
 
-// After a map change, the character's cell once it has stopped moving on the new map.
+// After a map change, the character's cell once it has stopped moving on the new map. The client keeps walking toward
+// the old target on the new map, so it is sent to its own cell as soon as the new map's cell shows up: the first one
+// read can still be the old map's for a moment, and is trusted only once it has held for a second and a half.
 async function settled(c) {
-  for (let i = 0; i < 20; i++) {
+  const first = { x: c.x, y: c.y };
+  let stopped = false;
+  for (let i = 0; i < 24; i++) {
     await sleep(250);
     const n = (await control({ op: 'state', kinds: ['none'] })).character;
-    if (n && n.map === c.map && n.x === c.x && n.y === c.y) return { ...n, changedMap: true };
-    if (n) c = n;
+    if (!n || n.map !== c.map) { if (n) c = n; continue; }
+    if (!stopped && (n.x !== first.x || n.y !== first.y || i >= 5)) {
+      stopped = true;
+      await control({ op: 'walk', x: n.x, y: n.y });
+    } else if (stopped && n.x === c.x && n.y === c.y) return { ...n, changedMap: true };
+    c = n;
   }
   return { ...c, changedMap: true };
 }
