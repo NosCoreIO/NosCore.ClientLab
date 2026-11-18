@@ -95,25 +95,9 @@ public sealed class GameforgeAuthentication : IDisposable
         {
             var result = await RequestAsync("v2/authProviders/credentials/sessions", userAgent, HttpMethod.Post, credentials);
             var token = result["token"]?.GetValue<string>() ?? throw new InvalidOperationException("Gameforge did not return a session token.");
-            await RequestAsync("user/me", userAgent, token: token);
-            var linked = await RequestAsync("user/accounts", userAgent, token: token); var accounts = new JsonArray();
-            if (linked is JsonObject dictionary)
-            {
-                foreach (var (key, item) in dictionary)
-                    if (item is JsonObject account && account["guls"]?["game"]?.GetValue<string>() == "nostale")
-                        accounts.Add(new JsonObject { ["id"] = account["id"]?.ToString() ?? key, ["name"] = account["displayName"]?.ToString() ?? account["name"]?.ToString() ?? key });
-            }
-            else if (linked is JsonArray array)
-                foreach (var element in array)
-                {
-                    var id = element?["platformGameAccountId"]?.ToString() ?? element?["id"]?.ToString() ?? element?["accountId"]?.ToString();
-                    if (id is not null) accounts.Add(new JsonObject { ["id"] = id, ["name"] = element?["displayName"]?.ToString() ?? id });
-                }
-            if (accounts.Count == 0) throw new InvalidOperationException("No linked NosTale accounts were returned.");
+            var opened = await OpenSessionAsync(token, userAgent, retained: false);
             if (flow is not null) challenges.TryRemove(flow, out _);
-            var idSession = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
-            sessions[idSession] = new(token, accounts, DateTimeOffset.UtcNow);
-            return new JsonObject { ["sessionId"] = idSession, ["accounts"] = accounts.DeepClone() };
+            return opened;
         }
         catch (GameforgeException error)
         {
@@ -144,6 +128,38 @@ public sealed class GameforgeAuthentication : IDisposable
             }
             throw;
         }
+    }
+
+    /// <summary>Continues a sign-in from a token kept since an earlier one, as the official client does after a restart.</summary>
+    public async Task<JsonObject> ResumeAsync(string token, string userAgent)
+    {
+        Expire();
+        try { return await OpenSessionAsync(token, userAgent, retained: true); }
+        catch (GameforgeException error) when (error.Status is 401 or 403) { throw new SessionExpiredException(); }
+    }
+
+    public string? TokenOf(string sessionId) => sessions.TryGetValue(sessionId, out var session) ? session.Token : null;
+
+    private async Task<JsonObject> OpenSessionAsync(string token, string userAgent, bool retained)
+    {
+        await RequestAsync("user/me", userAgent, token: token);
+        var linked = await RequestAsync("user/accounts", userAgent, token: token); var accounts = new JsonArray();
+        if (linked is JsonObject dictionary)
+        {
+            foreach (var (key, item) in dictionary)
+                if (item is JsonObject account && account["guls"]?["game"]?.GetValue<string>() == "nostale")
+                    accounts.Add(new JsonObject { ["id"] = account["id"]?.ToString() ?? key, ["name"] = account["displayName"]?.ToString() ?? account["name"]?.ToString() ?? key });
+        }
+        else if (linked is JsonArray array)
+            foreach (var element in array)
+            {
+                var id = element?["platformGameAccountId"]?.ToString() ?? element?["id"]?.ToString() ?? element?["accountId"]?.ToString();
+                if (id is not null) accounts.Add(new JsonObject { ["id"] = id, ["name"] = element?["displayName"]?.ToString() ?? id });
+            }
+        if (accounts.Count == 0) throw new InvalidOperationException("No linked NosTale accounts were returned.");
+        var idSession = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+        sessions[idSession] = new(token, accounts, DateTimeOffset.UtcNow) { Retained = retained };
+        return new JsonObject { ["sessionId"] = idSession, ["accounts"] = accounts.DeepClone() };
     }
 
     public async Task<JsonObject> ChallengeAsync(JsonObject payload)

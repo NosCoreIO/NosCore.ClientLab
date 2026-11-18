@@ -134,8 +134,11 @@ dotnet run --project desktop/ClientLab.Launcher -- --data-dir C:/dev/ClientLab-d
   fresh identity data; failed or cancelled work never advances sign-in, and repeated challenges have a bounded retry
   count.
 - Remember me stores credentials in Windows Credential Manager, the macOS Keychain, or a Linux Secret Service keyring
-  (`secret-tool` from libsecret-tools); signing out or disabling it removes the entry. The Windows vault is tested;
-  macOS and Linux vaults need platform validation.
+  (`secret-tool` from libsecret-tools); signing out or disabling it removes the entry. Like the official Gameforge
+  Client, which keeps its session token for about 90 days, the launcher also keeps the Gameforge session token and the
+  last game account in the same vault, so a restart is signed in without the password, CAPTCHA or MFA; when Gameforge
+  stops accepting the token, the sign-in form comes back. The Windows vault is tested; macOS and Linux vaults need
+  platform validation.
 
 **Artwork and news**: NosCore branding, NosTale artwork fetched directly from the CDN linked by the official landing
 page, and Gameforge's English product-news API (444×250 card images, official fallback artwork, four cards per page,
