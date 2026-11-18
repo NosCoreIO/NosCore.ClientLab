@@ -100,6 +100,7 @@ a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
 | `{op:'dialogs'}` | Open yes/no boxes (revive, teleport offers, confirmations): their text and what Yes and No answer |
 | `{op:'answer', yes, text, index}` | Presses the Yes or No button of the box whose text or answers contain `text` (or the one at `index`) |
 | `{op:'npc_dialog'}`, `{op:'close_npc_dialog'}` | Whether the NPC talk window is open, and closing it (`interact` closes a leftover one first) |
+| `{op:'reward_window'}`, `{op:'draw_item'}` | Whether the reward window (time-space score, raid box) is open and drawn, and its Draw Item button (closes a talk window first, which would swallow the click) |
 | `{op:'mates'}` | The mates the client drives: entity info plus their current order and stance |
 | `{op:'pet_attack', target, pet}` | A click on a monster with the mates in control: each mate (or only `pet`) attacks it until it dies or gets a new order |
 | `{op:'pet_move', x, y, pet}` | A floor click with the mates in control: each mate (or only `pet`) walks to the cell |

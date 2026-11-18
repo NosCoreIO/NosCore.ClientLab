@@ -696,6 +696,8 @@ const TOOLS = [
     inputSchema: obj(), run: async () => {
       const boxes = await control({ op: 'dialogs' });
       if ((await control({ op: 'npc_dialog' })).open) boxes.push({ talk: true, text: 'an NPC talk window is open: close_talk closes it' });
+      const reward = await control({ op: 'reward_window' });
+      if (reward.open && !reward.drawn) boxes.push({ reward: true, text: 'the reward window is open: draw_item presses Draw Item' });
       return json(boxes);
     } },
   { name: 'close_talk', description: 'Close the NPC talk window (a leftover time-space guide line blocks the next NPC menu). interact closes it on its own.',
@@ -719,6 +721,8 @@ const TOOLS = [
     inputSchema: obj({ header: { type: 'string' }, direction: { type: 'string', enum: ['send', 'recv'] }, contains: { type: 'string' },
       last: { type: 'integer', description: 'How many, default 30' } }),
     run: async (a) => { await ensurePage(); return json((await packetsSince(0, a)).list.slice(-(a.last || 30)).map((p) => `${p.direction} ${p.raw}`)); } },
+  { name: 'draw_item', description: 'Press Draw Item on the reward window (time-space score, raid box), as its button does: the client sends rsel and the server answers with repay. Closes a talk window first.',
+    inputSchema: obj(), run: () => control({ op: 'draw_item' }).then(json) },
   { name: 'pets', description: 'The mates (pets and partners) the client drives: id, vnum, name, cell, HP %, current order and stance.',
     inputSchema: obj(), run: () => control({ op: 'mates' }).then(json) },
   { name: 'pet_attack', description: 'Order the mates to attack a monster, as a click on it with the mates in control does (the client then sends suctl). A monster with a dialog is hit this way only.',

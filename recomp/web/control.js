@@ -103,6 +103,10 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     mateMove: '55 8B EC 83 C4 E4 53 56 57 8B F9 89 55 FC 8B D8 C6 45 FB 00',
     // Drops a mate's current target before a new order.
     mateStop: 'C6 40 13 00 C7 40 14 FF FF FF FF 33 D2 88 50 11',
+    // The score handler opening the reward window (time-space score, raid box) behind this slot.
+    rewardWindow: '8B 80 A4 00 00 00 8B 48 28 A1 ?? ?? ?? ?? 8B 00 E8',
+    // The reward window's Draw Item button handler: (window, button); it sends rsel once per window.
+    drawItem: '80 B8 A0 01 00 00 00 75 ?? C6 80 A0 01 00 00 01 8A 52 60',
     dialogButton: '53 56 8B F2 8B D8 8A 15 ?? ?? ?? ?? 8B C3 8B 08 FF 51 ?? 66 83 BB ?? ?? ?? ?? 00 74 ?? 8B 46 ?? 50 8B 4B ?? 8B D3 8B 83 ?? ?? ?? ?? FF 93',
   };
   let api = null;
@@ -117,6 +121,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       dialogs: (() => { const site = scan(SIG.dialogs); return site ? ptr(u32(site + 5)) : 0; })(),
       dialogButton: scan(SIG.dialogButton),
       useItem: scan(SIG.useItem),
+      rewardWindow: (() => { const site = scan(SIG.rewardWindow); return site ? ptr(u32(site + 10)) : 0; })(),
+      drawItem: scan(SIG.drawItem),
       mateAttack: scan(SIG.mateAttack), mateMove: scan(SIG.mateMove), mateStop: scan(SIG.mateStop),
       game: (() => { const site = scan(SIG.game); return site ? ptr(u32(site + 7)) : 0; })(),
       newString: scan(SIG.newString),
@@ -432,6 +438,15 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
         return { ordered: true };
       });
     },
+    // The reward window's Draw Item button: a talk window left open would swallow the click, so it is closed first.
+    draw_item() {
+      const w = need(obj('rewardWindow'), 'no reward window');
+      if (!u8(w + REWARD.visible)) throw new Error('the reward window is not open');
+      if (u8(w + REWARD.drawn)) throw new Error('the item was already drawn in this window');
+      closeNpcDialog();
+      call(resolve().drawItem, w, need(ptr(w + REWARD.buttons), 'the reward window has no Draw Item button'));
+      return { drawn: !!u8(w + REWARD.drawn) };
+    },
     rest() { call(resolve().rest, need(obj('skillUi'), 'no skill bar')); },
   };
 
@@ -465,6 +480,12 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     });
   }
 
+  const REWARD = { visible: 0x18, buttons: 0x15c, drawn: 0x1a0 };
+  function rewardWindow() {
+    const w = obj('rewardWindow');
+    return { open: !!(w && u8(w + REWARD.visible)), drawn: !!(w && u8(w + REWARD.drawn)) };
+  }
+
   const NPC_DIALOG = { visible: 0x18, close: 0x50 };
   const npcDialogOpen = () => { const w = obj('npcDialog'); return !!(w && u8(w + NPC_DIALOG.visible)); };
   function closeNpcDialog() {
@@ -484,6 +505,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       case 'skills': return skills();
       case 'dialogs': return dialogs();
       case 'mates': return mates();
+      case 'reward_window': return rewardWindow();
       case 'npc_dialog': return { open: npcDialogOpen() };
       case 'close_npc_dialog': return { closed: closeNpcDialog() };
       case 'api': return Object.fromEntries(Object.entries(resolve()).map(([k, v]) => [k, v >>> 0]));
