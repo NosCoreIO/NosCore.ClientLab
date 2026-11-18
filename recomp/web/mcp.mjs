@@ -441,11 +441,16 @@ async function useSkill({ cast_id: castId, target = 0, wait = 5 }) {
   }
   const seq = await packetSeq();
   await control({ op: 'skill', castId, target });
-  // With the packet log on, the cast counts only once the client has sent it.
+  // With the packet log on, the cast counts only once the client has sent it. A hit can delay or cancel the cast, so
+  // it is tried once more while the skill is still off cooldown.
   if (seq) {
-    for (const end = Date.now() + 2000; Date.now() < end; await sleep(100)) {
-      const { list } = await packetsSince(seq, { direction: 'send' });
-      if (list.some((p) => /^(\d+ )?u_(s|as) /.test(p.raw))) return 'cast';
+    for (let attempt = 0; attempt < 2; attempt++) {
+      for (const end = Date.now() + 3000; Date.now() < end; await sleep(100)) {
+        const { list } = await packetsSince(seq, { direction: 'send' });
+        if (list.some((p) => /^(\d+ )?u_(s|as) /.test(p.raw))) return attempt ? 'cast on the second try' : 'cast';
+      }
+      if (attempt || !(await control({ op: 'skills' })).find((k) => k.castId === castId)?.ready) break;
+      await control({ op: 'skill', castId, target });
     }
     throw new Error(`the client sent no u_s for skill ${castId}${target ? ` on ${target}` : ''}`);
   }
