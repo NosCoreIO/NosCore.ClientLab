@@ -89,6 +89,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     useItem: '53 56 8B DA 8B F0 83 3B 00 0F 84 ?? ?? ?? ?? E8 ?? ?? ?? ?? 31 03',
     // Its callers load the game object behind `mov eax, [slot]` right after `lea edx, [esi+0xb0]`.
     game: '8D 96 B0 00 00 00 A1 ?? ?? ?? ?? 8B 00 E8',
+    // The gp handler growing the map's portal array (28-byte records) by one before filling it.
+    portals: 'A1 ?? ?? ?? ?? 8B 00 E8 ?? ?? ?? ?? 8B D8 8D 43 01 50 A1 ?? ?? ?? ?? B9 01 00 00 00 8B 15 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 C4 04 8D 4D D4',
     // The client's string allocator, used for a small scratch record the client's own code can read.
     newString: '85 C0 7E ?? 50 83 C0 0A 83 E0 FE 50 E8',
     dialogButton: '53 56 8B F2 8B D8 8A 15 ?? ?? ?? ?? 8B C3 8B 08 FF 51 ?? 66 83 BB ?? ?? ?? ?? 00 74 ?? 8B 46 ?? 50 8B 4B ?? 8B D3 8B 83 ?? ?? ?? ?? FF 93',
@@ -107,6 +109,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       useItem: scan(SIG.useItem),
       game: (() => { const site = scan(SIG.game); return site ? ptr(u32(site + 7)) : 0; })(),
       newString: scan(SIG.newString),
+      portals: global(SIG.portals),
     };
     return api;
   }
@@ -118,7 +121,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     untargetable: 0x194, map: 0x1a4, morph: 0x1b9, vnum: 0x1c2, def: 0x1c4, displayName: 0x1dc, playerName: 0x1f8,
     level: 0x150, heroLevel: 0x151 };
   const DEF = { name: 0x04, race: 0x0c, flags: 0x2f, boss: 0x3a0 };
-  const MGR = { action: 0x14, entity: 0x20, id: 0x24, sitting: 0xa9 };
+  const MGR = { action: 0x14, entity: 0x20, id: 0x24, kind: 0x28, sitting: 0xa9 };
   const OBJECT_RACE = 8, UNTARGETABLE = 0x10;
   const TARGET_UI = { entity: 0x34, selected: 0x38 };
   const SKILL = { def: 0x08, cooldown: 0x24, name: 0x14, castId: 0x18, self: 0x1c, range: 0x30, target: 0x38, area: 0x40,
@@ -232,6 +235,19 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     };
   }
 
+  // The portals of the current map as the client keeps them from its gp packets.
+  const PORTAL = { size: 28, x: 0x00, y: 0x02, map: 0x10, type: 0x14, id: 0x18 };
+  function portals() {
+    const arr = obj('portals'), out = [];
+    if (!arr) return out;
+    const n = Math.min(i32(arr - 4), 1024);
+    for (let i = 0; i < n; i++) {
+      const p = arr + i * PORTAL.size;
+      out.push({ id: s16(p + PORTAL.id), x: s16(p + PORTAL.x), y: s16(p + PORTAL.y), map: i32(p + PORTAL.map), type: s16(p + PORTAL.type) });
+    }
+    return out;
+  }
+
   function grid() {
     const g = ptr(obj('scene') + SCENE.grid), w = u16(g), h = u16(g + 2);
     if (!g || !w || !h || w > 1024 || h > 1024) return null;
@@ -317,6 +333,10 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       const found = inventoryItems().find(({ item, def }) => (vnum !== undefined && vnum !== null
         ? i32(def + 0x30) === vnum : s8(item + 0x1c) === pocket && s16(item + 0x1e) === slot));
       const { item, def } = need(found, vnum !== undefined && vnum !== null ? `no item ${vnum} in the inventory` : `no item in pocket ${pocket} slot ${slot}`);
+      // u_i names its user from the player's entity reference; outside the character it would name someone else.
+      const mgr = player(), me = ptr(mgr + MGR.entity);
+      if (u8(mgr + MGR.kind) !== 1 || !me || i32(mgr + MGR.id) !== i32(me + ENT.id))
+        throw new Error(`the client would use the item as entity ${i32(mgr + MGR.id)} of kind ${u8(mgr + MGR.kind)}, not the character: not used`);
       const rec = scratchRecord();
       dv().setUint32(rec, item, true);
       // The record's source: 0 wears an equipment item, 1 (the worn-equipment source) would take it off; other pockets use 1.
@@ -386,6 +406,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     switch (req.op) {
       case 'state': return state(req);
       case 'grid': return grid();
+      case 'portals': return portals();
       case 'inventory': return inventory();
       case 'skills': return skills();
       case 'dialogs': return dialogs();

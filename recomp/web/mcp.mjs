@@ -358,7 +358,7 @@ async function guardTick() {
       const food = guard.foodItem, hp = s.character.hp;
       if (food && guard.foodBelow !== null && hp <= guard.foodBelow && !s.character.sitting
         && Date.now() - (guard.used.food || 0) >= guard.cooldown * 1000) {
-        const near = (await control({ op: 'state', kinds: ['monsters'], radius: guard.safeRadius })).monsters ?? [];
+        const near = (await worldState({ kinds: ['monsters'], radius: guard.safeRadius })).monsters ?? [];
         if (!near.length) {
           guard.used.food = Date.now();
           const used = await control({ op: 'use_item', vnum: food }).then(() => true, (e) => { note({ stat: 'food', vnum: food, error: String(e?.message || e) }); return false; });
@@ -402,11 +402,7 @@ async function interact({ id, wait = true, timeout = 20 }) {
 
 // Portals of the current map: the gp packets since the last at (map change) in the packet log.
 async function portals() {
-  const lines = await page.evaluate(() => window.mapPortals ?? []);
-  return lines.map((raw) => {
-    const [, x, y, map, type, id] = raw.split(' ').map(Number);
-    return { id, x, y, map, type };
-  });
+  return control({ op: 'portals' });
 }
 
 // Sitting and standing take a server round trip; the character's flag flips when it lands.
@@ -442,6 +438,16 @@ async function pickUp({ id, timeout = 15 }) {
   throw new Error(`item ${id} is still on the ground after ${timeout} s`);
 }
 
+// Monsters the server has reported dead (packet log) are left out, though the client still draws them.
+async function worldState(filters) {
+  const s = await control({ op: 'state', ...filters });
+  const dead = await page.evaluate(() => window.deadEntities ?? {});
+  const alive = (e) => !(e.kind === 'monster' && dead[`3:${e.id}`]);
+  if (s.monsters) s.monsters = s.monsters.filter(alive);
+  if (s.target && !alive(s.target)) s.target = { ...s.target, dead: true };
+  return s;
+}
+
 async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPortal = false }) {
   await ensurePage();
   // Stepping on (or next to) a portal cell sends the character through it.
@@ -465,7 +471,8 @@ async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPo
   // With portals around, the route is planned around them up front; otherwise the client's own walk goes first, and
   // since it gives up on long detours, a stalled walk is retried along waypoints from the map grid.
   let c = known.length ? null : await walkLeg(x, y, end);
-  if (c?.arrived) return c.character;
+  if (c?.changedMap) return c.character;
+  if (c?.arrived) return throughPortal ? afterPortal(c.character, end) : c.character;
   if (c?.timedOut) throw new Error(`timed out at [${c.character.x},${c.character.y}] on the way to [${x},${y}]`);
   const from = c?.character ?? (await control({ op: 'state', kinds: ['none'] })).character;
   const grid = await control({ op: 'grid' });
@@ -482,11 +489,32 @@ async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPo
     const p = path[i];
     at = p;
     c = await walkLeg(p.x, p.y, end);
+    if (c.changedMap) return c.character;
     if (!c.arrived) throw new Error(`stopped at [${c.character.x},${c.character.y}] on the way to [${x},${y}] (waypoint [${p.x},${p.y}]${c.timedOut ? ', timed out' : ''})`);
-    if (i === path.length - 1) return c.character;
+    if (i === path.length - 1) return throughPortal ? afterPortal(c.character, end) : c.character;
   }
 }
 const WAYPOINT = 8;
+
+// The server moves the character a moment after it steps on a portal; until then the client still shows the old map.
+async function afterPortal(arrived, end) {
+  for (const stop = Math.min(end, Date.now() + 10000); Date.now() < stop; await sleep(250)) {
+    const c = (await control({ op: 'state', kinds: ['none'] })).character;
+    if (c && c.map !== arrived.map) return settled(c);
+  }
+  return arrived;
+}
+
+// After a map change, the character's cell once it has stopped moving on the new map.
+async function settled(c) {
+  for (let i = 0; i < 20; i++) {
+    await sleep(250);
+    const n = (await control({ op: 'state', kinds: ['none'] })).character;
+    if (n && n.map === c.map && n.x === c.x && n.y === c.y) return { ...n, changedMap: true };
+    if (n) c = n;
+  }
+  return { ...c, changedMap: true };
+}
 
 // Leaving an arrival portal is allowed: around the portal the character stands next to, only its own cell is avoided.
 function portalAvoid(known, from) {
@@ -513,12 +541,15 @@ function legSafe(grid, a, b, avoid, steps) {
 
 async function walkLeg(x, y, end) {
   if (Date.now() >= end) return { arrived: false, timedOut: true, character: (await control({ op: 'state', kinds: ['none'] })).character };
+  const map = (await control({ op: 'state', kinds: ['none'] })).character?.map;
   await control({ op: 'walk', x, y });
-  let last = null, still = 0, c = null;
+  let last = null, still = 0, c = null, away = 0;
   for (; Date.now() < end; await sleep(500)) {
     await guardTick();
     c = (await control({ op: 'state', kinds: ['none'] })).character;
-    if (!c) throw new Error('not in the world');
+    // A portal on the way loads another map; the character is missing from the state while it loads.
+    if (!c) { if (++away > 20) throw new Error('not in the world'); continue; }
+    if (c.map !== map) return { arrived: false, changedMap: true, character: await settled(c) };
     if (c.x === x && c.y === y) return { arrived: true, character: c };
     still = last && last.x === c.x && last.y === c.y ? still + 1 : 0;
     if (still >= 6) return { arrived: false, character: c };
@@ -569,7 +600,7 @@ const TOOLS = [
     inputSchema: obj({ radius: { type: 'integer', description: 'Only entities within this many cells of the character' },
       vnums: { type: 'array', items: { type: 'integer' }, description: 'Only these monster, NPC or item vnums' },
       kinds: { type: 'array', items: { type: 'string' }, description: 'Only these lists: monsters, npcs, players, items' } }),
-    run: (a) => control({ op: 'state', radius: a.radius, vnums: a.vnums, kinds: a.kinds }).then(json) },
+    run: (a) => worldState({ radius: a.radius, vnums: a.vnums, kinds: a.kinds }).then(json) },
   { name: 'skills', description: 'Learned skills with cast id, range, area, MP cost and whether each is off cooldown.', inputSchema: obj(), run: () => control({ op: 'skills' }).then(json) },
   { name: 'inventory', description: 'Inventory items (vnum, pocket, slot, amount, name).', inputSchema: obj(), run: () => control({ op: 'inventory' }).then(json) },
   { name: 'map_grid', description: 'The walkability grid of the current map: one row string per y, "." walkable, "#" blocked.', inputSchema: obj(), run: () => control({ op: 'grid' }).then(json) },
@@ -585,7 +616,7 @@ const TOOLS = [
     run: (a) => useSkill(a).then(json) },
   { name: 'pick_up', description: 'Pick up a ground item by id: walks to it and waits until it has left the ground.',
     inputSchema: obj({ id, timeout: { type: 'number', description: 'Seconds' } }, ['id']), run: (a) => pickUp(a).then(json) },
-  { name: 'portals', description: 'Portals of the current map (from the packet log): id, cell, destination map, type.', inputSchema: obj(),
+  { name: 'portals', description: 'Portals of the current map as the client keeps them: id, cell, destination map, type.', inputSchema: obj(),
     run: async () => { await ensurePage(); return json(await portals()); } },
   { name: 'collect', description: 'Collect from a collectable map object (an NPC entry).', inputSchema: obj({ id }, ['id']), run: (a) => control({ op: 'collect', id: a.id }).then(json) },
   { name: 'use_item', description: 'Use an inventory item the way a double click does (wear equipment; potion, scroll, wing, box, quest item), by vnum or by pocket and slot.',

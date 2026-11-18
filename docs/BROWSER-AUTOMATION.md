@@ -134,11 +134,16 @@ offer, `#revival^0`). It runs before each tool, inside `walk` and `wait_for`, an
 `guard` with no arguments shows what it did. `client_state` lists entities nearest first with their distance in cells,
 so an agent can pull the closest group instead of a whole room.
 
-`walk` refuses a cell on or next to a portal of the current map (the `gp` packets since the last `at`, listed by
-`portals`) unless `through_portal` is set, so a character is not sent through one by accident. Around known portals it plans the
-route itself, in legs short enough that no route the client could pick between them passes one, and a `walk` with
-`wait` off is refused when it could. `interact` and `pick_up`
-return once the walk to the target is over and, for `pick_up`, once the item has left the ground. `rest` returns once
+`walk` refuses a cell on or next to a portal of the current map (the client's own portal list, shown by `portals`)
+unless `through_portal` is set, so a character is not sent through one by accident. Around portals it plans the route
+itself, in legs short enough that no route the client could pick between them passes one, and a `walk` with `wait`
+off is refused when it could. A walk that ends on another map returns the character there with `changedMap`.
+
+`client_state` leaves out monsters the server has reported dead (an `su` whose target is no longer alive, or `die`)
+until they appear again, since the client keeps drawing them; this needs the packet log. `use_item` refuses when the
+client would name another entity than the character as the item's user.
+
+`interact` and `pick_up` return once the walk to the target is over and, for `pick_up`, once the item has left the ground. `rest` returns once
 the server has sat or stood the character, and `use_skill` waits up to `wait` seconds for the skill's cooldown.
 
 The client gives up on a long detour without moving. When a `walk` stalls, the MCP finds a path on the map grid and

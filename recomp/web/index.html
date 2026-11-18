@@ -141,14 +141,19 @@
   // The last cleartext packets for tools that wait on the server (PORT_PACKET_LOG=1); seq keeps counting past the cap.
   const PACKET_LINES = 2000;
   window.packetLog = { seq: 0, list: [] };
-  // The current map's portals are kept apart from the bounded log, so a long stay on one map does not lose them.
-  window.mapPortals = [];
+  // Monsters the server reported dead on this map, kept apart from the bounded log.
+  window.deadEntities = {};
   function recordPacket(direction, raw) {
     window.packetLog.list.push({ seq: ++window.packetLog.seq, direction, raw });
     if (window.packetLog.list.length > PACKET_LINES) window.packetLog.list.splice(0, window.packetLog.list.length - PACKET_LINES);
     if (direction !== 'recv') return;
-    if (raw.startsWith('at ')) window.mapPortals = [];
-    else if (raw.startsWith('gp ')) window.mapPortals.push(raw);
+    const f = raw.split(' ');
+    if (f[0] === 'at') window.deadEntities = {};
+    // A kill can arrive only as an su whose target is no longer alive; the client keeps drawing it until it leaves.
+    else if (f[0] === 'su' && f[11] === '0') window.deadEntities[`${f[3]}:${f[4]}`] = true;
+    else if (f[0] === 'die') window.deadEntities[`${f[1]}:${f[2]}`] = true;
+    else if (f[0] === 'in') delete window.deadEntities[`${f[1]}:${f[1] === '1' ? f[4] : f[3]}`];
+    else if (f[0] === 'out') delete window.deadEntities[`${f[1]}:${f[2]}`];
   }
   function flushLog() {
     flushQueued = false;
