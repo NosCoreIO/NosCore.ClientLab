@@ -97,7 +97,8 @@ VerifiedClientChecks.Run();
 if (OperatingSystem.IsWindows())
 {
     // An isolated target in the real Windows vault; never reads or changes the user's launcher login.
-    var vault = new CredentialStore(Path.Combine(Path.GetTempPath(), "ClientLab-vault-test-" + Guid.NewGuid().ToString("N")));
+    var vaultDirectory = Path.Combine(Path.GetTempPath(), "ClientLab-vault-test-" + Guid.NewGuid().ToString("N"));
+    var vault = new CredentialStore(vaultDirectory);
     try
     {
         Check(await vault.ReadAsync() is null, "A fresh credential target was not empty.");
@@ -106,9 +107,15 @@ if (OperatingSystem.IsWindows())
         Check(credential == new SavedCredentials("test@example.invalid", "test-only-密碼-🔒"), "Credential vault round-trip failed.");
         await vault.SaveAsync("other@example.invalid", "updated-test-password");
         Check((await vault.ReadAsync())?.Email == "other@example.invalid", "Credential vault update failed.");
+        var sessions = new CredentialStore(vaultDirectory, "session");
+        await sessions.SaveAsync("session", new SavedSession("test-token", "test-account"));
+        Check(await sessions.ReadAsync<SavedSession>() == new SavedSession("test-token", "test-account") && (await vault.ReadAsync())?.Email == "other@example.invalid",
+            "The kept Gameforge session did not round-trip beside the saved account.");
+        await sessions.DeleteAsync();
+        Check(await sessions.ReadAsync<SavedSession>() is null && await vault.ReadAsync() is not null, "Forgetting the session touched the saved account.");
         await vault.DeleteAsync();
         Check(await vault.ReadAsync() is null, "Credential vault delete failed.");
-        Console.WriteLine("PASS: Windows credential store save, read, update and delete.");
+        Console.WriteLine("PASS: Windows credential store save, read, update and delete, with the Gameforge session kept apart from the account.");
     }
-    finally { await vault.DeleteAsync(); }
+    finally { await vault.DeleteAsync(); await new CredentialStore(vaultDirectory, "session").DeleteAsync(); }
 }
