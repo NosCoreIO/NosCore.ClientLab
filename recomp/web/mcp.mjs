@@ -481,6 +481,8 @@ async function worldState(filters) {
 
 async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPortal = false }) {
   await ensurePage();
+  // A sitting character ignores floor clicks, so the walk would only report a stall: stand up first.
+  if ((await control({ op: 'state', kinds: ['none'] })).character?.sitting) await rest();
   // Stepping on (or next to) a portal cell sends the character through it.
   const known = throughPortal ? [] : await portals();
   const near = known.find((p) => Math.max(Math.abs(p.x - x), Math.abs(p.y - y)) <= 1);
@@ -638,7 +640,7 @@ const TOOLS = [
   { name: 'skills', description: 'Learned skills with cast id, range, area, MP cost and whether each is off cooldown.', inputSchema: obj(), run: () => control({ op: 'skills' }).then(json) },
   { name: 'inventory', description: 'Inventory items (vnum, pocket, slot, amount, name).', inputSchema: obj(), run: () => control({ op: 'inventory' }).then(json) },
   { name: 'map_grid', description: 'The walkability grid of the current map: one row string per y, "." walkable, "#" blocked.', inputSchema: obj(), run: () => control({ op: 'grid' }).then(json) },
-  { name: 'walk', description: 'Walk to a cell like a floor click. Waits for arrival unless wait is false.',
+  { name: 'walk', description: 'Walk to a cell like a floor click (standing up first if sitting). Waits for arrival unless wait is false.',
     inputSchema: obj({ x: { type: 'integer' }, y: { type: 'integer' }, wait: { type: 'boolean' }, timeout: { type: 'number', description: 'Seconds' },
       through_portal: { type: 'boolean', description: 'Allow a cell on or next to a portal (refused otherwise)' } }, ['x', 'y']),
     run: (a) => walk(a).then(json) },
