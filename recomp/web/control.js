@@ -105,6 +105,10 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     mateStop: 'C6 40 13 00 C7 40 14 FF FF FF FF 33 D2 88 50 11',
     // A click on a line of the NPC talk window: (window, line); sends the line's command with the NPC, then closes it.
     talkOption: '55 8B EC B9 0B 00 00 00 6A 00 6A 00 49 75 F9 51 53 56 57 89 55 FC 8B F0 33 C0 55 68 ?? ?? ?? ?? 64 FF 30 64 89 20 E8 ?? ?? ?? ?? 8B 96 44 01 00 00',
+    // Some talk lines (Get Quest) open an offer window holding the line's command; its button handler sends that command
+    // for the button tagged 0 and goes back to the talk for 1. The slot is where the offer stores the command.
+    offerWindow: 'A1 ?? ?? ?? ?? 8B 00 05 1C 01 00 00 8B 55 FC E8',
+    offerButton: '53 8B D8 8B 42 60 83 E8 01 72 04 74 16 EB 20',
     // The score handler opening the reward window (time-space score, raid box) behind this slot.
     rewardWindow: '8B 80 A4 00 00 00 8B 48 28 A1 ?? ?? ?? ?? 8B 00 E8',
     // The reward window's Draw Item button handler: (window, button); it sends rsel once per window.
@@ -125,6 +129,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       useItem: scan(SIG.useItem),
       rewardWindow: (() => { const site = scan(SIG.rewardWindow); return site ? ptr(u32(site + 10)) : 0; })(),
       drawItem: scan(SIG.drawItem), talkOption: scan(SIG.talkOption),
+      offerWindow: global(SIG.offerWindow), offerButton: scan(SIG.offerButton),
       mateAttack: scan(SIG.mateAttack), mateMove: scan(SIG.mateMove), mateStop: scan(SIG.mateStop),
       game: (() => { const site = scan(SIG.game); return site ? ptr(u32(site + 7)) : 0; })(),
       newString: scan(SIG.newString),
@@ -509,8 +514,21 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     const pick = text ? lines.find((l) => l.text.includes(text)) : lines[index];
     need(pick, text ? `no talk option contains "${text}"` : `no talk option ${index}`);
     call(resolve().talkOption, obj('npcDialog'), pick.line);
-    return { text: pick.text, command: pick.command, stillOpen: npcDialogOpen() };
+    return { text: pick.text, command: pick.command, stillOpen: npcDialogOpen(), offer: offer() };
   }
+  const OFFER = { visible: 0x18, buttons: 0x104, command: 0x11c };
+  function offer() {
+    const w = obj('offerWindow');
+    return w && u8(w + OFFER.visible) ? { open: true, command: delphiString(ptr(w + OFFER.command)) } : { open: false };
+  }
+  function answerOffer({ accept }) {
+    const w = obj('offerWindow');
+    if (!w || !u8(w + OFFER.visible)) throw new Error('no offer window is open');
+    const command = delphiString(ptr(w + OFFER.command));
+    call(resolve().offerButton, w, need(ptr(w + OFFER.buttons + (accept ? 0 : 4)), 'the offer window has no such button'));
+    return { command, accepted: !!accept };
+  }
+
   // The last line is the one that ends the talk (End Dialogue): pressing it sends what the server waits for, such as
   // the n_run that spawns a time-space room. Only a window with no line is closed without a command.
   function closeNpcDialog() {
@@ -535,6 +553,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       case 'reward_window': return rewardWindow();
       case 'npc_dialog': return { open: npcDialogOpen(), options: talkOptions() };
       case 'talk_choose': return chooseTalk(req);
+      case 'offer': return offer();
+      case 'answer_offer': return answerOffer(req);
       case 'close_npc_dialog': return { closed: closeNpcDialog() };
       case 'api': return Object.fromEntries(Object.entries(resolve()).map(([k, v]) => [k, v >>> 0]));
       case 'read': {

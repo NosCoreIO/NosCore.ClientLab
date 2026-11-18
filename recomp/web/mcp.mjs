@@ -336,14 +336,15 @@ async function enterWorld({ slot = defaults.slot } = {}) {
 // The guard eats or drinks below an HP or MP percentage and accepts chosen yes/no boxes. It runs before every tool,
 // inside walk and wait_for loops, and once a second while the MCP is idle.
 const guard = { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, foodBelow: null, foodItem: null, safeRadius: 6, accept: [],
-  cooldown: 4, events: [], used: {} };
+  endTalkAfter: null, cooldown: 4, events: [], used: {} };
+let talkSince = 0;
 let guarding = false;
 // A restart of the MCP must not leave a character unguarded mid-fight.
 if (defaults.guard && existsSync(defaults.guard)) {
   try { Object.assign(guard, JSON.parse(readFileSync(defaults.guard, 'utf8'))); } catch (e) { console.error(`guard settings in ${defaults.guard} not read: ${e.message}`); }
 }
 async function guardTick() {
-  if (!page || guarding || !(guard.hpItem || guard.mpItem || guard.foodItem || guard.accept.length)) return;
+  if (!page || guarding || !(guard.hpItem || guard.mpItem || guard.foodItem || guard.accept.length || guard.endTalkAfter !== null)) return;
   guarding = true;
   try {
     const note = (event) => {
@@ -372,6 +373,17 @@ async function guardTick() {
         }
       }
     }
+    // The client drops a talk window by itself after 30 s without sending its End Dialogue command, which a
+    // time-space room waits for.
+    if (guard.endTalkAfter !== null) {
+      if (!(await control({ op: 'npc_dialog' })).open) talkSince = 0;
+      else if (!talkSince) talkSince = Date.now();
+      if (talkSince && Date.now() - talkSince >= guard.endTalkAfter * 1000) {
+        talkSince = 0;
+        const ended = await control({ op: 'close_npc_dialog' });
+        note({ endedTalk: ended.closed });
+      }
+    }
     if (guard.accept.length) {
       for (const d of await control({ op: 'dialogs' })) {
         const rule = guard.accept.find((t) => [d.text, d.yes, d.no].some((x) => x.toLowerCase().includes(t.toLowerCase())));
@@ -383,9 +395,9 @@ async function guardTick() {
   } catch { } finally { guarding = false; }
 }
 function setGuard(a) {
-  if (a.off) Object.assign(guard, { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, foodBelow: null, foodItem: null, accept: [] });
+  if (a.off) Object.assign(guard, { hpBelow: null, hpItem: null, mpBelow: null, mpItem: null, foodBelow: null, foodItem: null, accept: [], endTalkAfter: null });
   for (const [arg, key] of [['hp_below', 'hpBelow'], ['hp_item', 'hpItem'], ['mp_below', 'mpBelow'], ['mp_item', 'mpItem'], ['food_below', 'foodBelow'],
-    ['food_item', 'foodItem'], ['safe_radius', 'safeRadius'], ['accept', 'accept'], ['cooldown', 'cooldown']]) if (a[arg] !== undefined && a[arg] !== null) guard[key] = a[arg];
+    ['food_item', 'foodItem'], ['safe_radius', 'safeRadius'], ['accept', 'accept'], ['end_talk_after', 'endTalkAfter'], ['cooldown', 'cooldown']]) if (a[arg] !== undefined && a[arg] !== null) guard[key] = a[arg];
   const { events, used, ...config } = guard;
   if (defaults.guard) writeFileSync(defaults.guard, JSON.stringify(config));
   return { ...config, events: events.slice(-10) };
@@ -713,23 +725,28 @@ const TOOLS = [
       const boxes = await control({ op: 'dialogs' });
       const talk = await control({ op: 'npc_dialog' });
       if (talk.open) boxes.push({ talk: true, text: 'an NPC talk window is open: talk_choose presses a line, close_talk presses the last (End Dialogue)', options: talk.options });
+      const offer = await control({ op: 'offer' });
+      if (offer.open) boxes.push({ offer: true, text: `an offer window waits to send "${offer.command}": answer_offer accepts or goes back`, command: offer.command });
       const reward = await control({ op: 'reward_window' });
       if (reward.open && !reward.drawn) boxes.push({ reward: true, text: 'the reward window is open: draw_item presses Draw Item' });
       return json(boxes);
     } },
   { name: 'close_talk', description: 'End the NPC talk by pressing its last line (End Dialogue), which sends what the server waits for, such as the n_run that starts a time-space room. A window with no line is just closed. interact and draw_item do this first.',
     inputSchema: obj(), run: () => control({ op: 'close_npc_dialog' }).then(json) },
-  { name: 'talk_choose', description: 'Press a line of the NPC talk window, by index or by part of its text, as a click on it does; dialogs lists the lines with the command each sends.',
+  { name: 'answer_offer', description: 'Answer the offer window some talk lines open (Get Quest): accept sends the line\'s command, as its first button does; otherwise it goes back to the talk.',
+    inputSchema: obj({ accept: { type: 'boolean' } }, ['accept']), run: (a) => control({ op: 'answer_offer', accept: a.accept }).then(json) },
+  { name: 'talk_choose', description: 'Press a line of the NPC talk window, by index or by part of its text, as a click on it does; dialogs lists the lines with the command each sends. A line such as Get Quest opens an offer window instead (reported as offer): answer_offer then sends it.',
     inputSchema: obj({ index: { type: 'integer' }, text: { type: 'string' } }), run: (a) => control({ op: 'talk_choose', index: a.index ?? 0, text: a.text }).then(json) },
   { name: 'answer_dialog', description: 'Press Yes or No on an open yes/no box: the one whose text or answers contain text, else the one at index, else the first.',
     inputSchema: obj({ yes: { type: 'boolean' }, text: { type: 'string', description: 'Part of the box text or of its answers, e.g. "Continue here" or "#revival"' },
       index: { type: 'integer' } }, ['yes']),
     run: (a) => control({ op: 'answer', yes: a.yes, text: a.text, index: a.index }).then(json) },
-  { name: 'guard', description: 'Keep the character alive between calls: use hp_item (a potion) when HP is at or below hp_below percent, the same for MP, eat food_item out of combat, and press Yes on any box whose text or answers contain one of accept (e.g. "Teleport", "#revival^0"). Checked before every tool, during walk and wait_for, and every second when idle. No arguments returns the settings and the last things it did; off clears it.',
+  { name: 'guard', description: 'Keep the character alive between calls: use hp_item (a potion) when HP is at or below hp_below percent, the same for MP, eat food_item out of combat, and press Yes on any box whose text or answers contain one of accept (e.g. "Teleport", "#revival^0"), and end a talk window left open end_talk_after seconds. Checked before every tool, during walk and wait_for, and every second when idle. No arguments returns the settings and the last things it did; off clears it.',
     inputSchema: obj({ hp_below: { type: 'integer' }, hp_item: { type: 'integer' }, mp_below: { type: 'integer' }, mp_item: { type: 'integer' },
       accept: { type: 'array', items: { type: 'string' } },
       food_item: { type: 'integer', description: 'Food to eat at or below food_below percent HP, only with no monster within safe_radius cells (it sits the character down)' },
       food_below: { type: 'integer' }, safe_radius: { type: 'integer', description: 'Default 6' }, cooldown: { type: 'number', description: 'Seconds between two uses, default 4' },
+      end_talk_after: { type: 'number', description: 'End any NPC talk window open this many seconds through its End Dialogue line (0 = at once); the client drops it after 30 s without sending it' },
       off: { type: 'boolean' } }),
     run: async (a) => json(setGuard(a)) },
   { name: 'wait_for', description: 'Wait for a packet (by header, direction and/or text) sent or received since the last action, or for a yes/no box whose text contains dialog. Returns the packet or the box.',

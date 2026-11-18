@@ -100,6 +100,7 @@ a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
 | `{op:'dialogs'}` | Open yes/no boxes (revive, teleport offers, confirmations): their text and what Yes and No answer |
 | `{op:'answer', yes, text, index}` | Presses the Yes or No button of the box whose text or answers contain `text` (or the one at `index`) |
 | `{op:'npc_dialog'}`, `{op:'talk_choose', index, text}`, `{op:'close_npc_dialog'}` | Whether the NPC talk window is open with its lines and the command each sends, a click on one line, and ending the talk by clicking its last line (End Dialogue), which sends what the server waits for, such as the `n_run` that spawns a time-space room (`interact` and `draw_item` end a leftover talk first) |
+| `{op:'offer'}`, `{op:'answer_offer', accept}` | The offer window a talk line such as Get Quest opens instead of sending its command, and its buttons: accept sends the command, otherwise back to the talk |
 | `{op:'reward_window'}`, `{op:'draw_item'}` | Whether the reward window (time-space score, raid box) is open and drawn, and its Draw Item button (closes a talk window first, which would swallow the click) |
 | `{op:'mates'}` | The mates the client drives: entity info plus their current order and stance |
 | `{op:'pet_attack', target, pet}` | A click on a monster with the mates in control: each mate (or only `pet`) attacks it until it dies or gets a new order |
@@ -141,7 +142,7 @@ direction or text, counted from just before the last action so a fast reply is n
 `guard` keeps a character alive while an agent thinks: below `hp_below` or `mp_below` percent it uses `hp_item` or
 `mp_item` from the inventory, and it presses Yes on any box whose text or answers contain one of `accept` (a teleport
 offer, `#revival^0`). It runs before each tool, inside `walk` and `wait_for`, and every second while the MCP is idle;
-`guard` with no arguments shows what it did. Its settings are kept in `--guard <file>` (by default next to the `--log`
+With `end_talk_after`, it also ends a talk window left open that many seconds through its End Dialogue line: the client drops one by itself after 30 s without sending the command a time-space room waits for. `guard` with no arguments shows what it did. Its settings are kept in `--guard <file>` (by default next to the `--log`
 file) and restored when the MCP restarts. `client_state` lists entities nearest first with their distance in cells,
 so an agent can pull the closest group instead of a whole room.
 
