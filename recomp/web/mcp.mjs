@@ -462,6 +462,7 @@ async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPo
       const avoid = portalAvoid(known, from);
       const path = gridPath(grid, from, { x, y }, avoid);
       if (!path) throw new Error(`no walkable path from [${from.x},${from.y}] to [${x},${y}] that keeps off the portals`);
+      if (path.length < 2 && known.some((p) => p.x === from.x && p.y === from.y)) throw new Error('one step off the portal the character stands on can take it back: walk at least two cells');
       if (!legSafe(grid, from, { x, y }, avoid, path.length)) throw new Error(`the way to [${x},${y}] may pass a portal: walk with wait to follow a route around it`);
     }
     await control({ op: 'walk', x, y });
@@ -483,9 +484,11 @@ async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPo
   if (!path.length) return from;
   // The client picks its own route between waypoints, so near portals a leg is shortened until none of its routes
   // can pass one; a single step is always safe.
+  // A walk that ends one step off the portal the character stands on can take it back, so that first leg is longer.
+  const onPortal = known.some((p) => p.x === from.x && p.y === from.y);
   for (let at = from, i = Math.min(WAYPOINT, path.length) - 1; ; i = Math.min(i + WAYPOINT, path.length - 1)) {
-    const first = path.indexOf(at) + 1;
-    while (known.length && i > first && !legSafe(grid, at, path[i], avoid, i - first + 1)) i--;
+    const first = path.indexOf(at) + 1 + (onPortal && at === from && path.length > 1 ? 1 : 0);
+    while (known.length && i > first && !legSafe(grid, at, path[i], avoid, i - path.indexOf(at))) i--;
     const p = path[i];
     at = p;
     c = await walkLeg(p.x, p.y, end);
@@ -533,7 +536,7 @@ function legSafe(grid, a, b, avoid, steps) {
   for (let cy = Math.min(a.y, b.y) - d; cy <= Math.max(a.y, b.y) + d; cy++)
     for (let cx = Math.min(a.x, b.x) - d; cx <= Math.max(a.x, b.x) + d; cx++) {
       const c = { x: cx, y: cy };
-      if (cells(a, c) + cells(c, b) !== d) continue;
+      if ((cx === a.x && cy === a.y) || cells(a, c) + cells(c, b) !== d) continue;
       if (grid.rows[cy]?.[cx] === '.' && avoid(cx, cy)) return false;
     }
   return true;

@@ -113,6 +113,11 @@ in the world. On another server's character select, pass `slot` (or start the MC
 character's position on a screenshot. `screenshot` returns its size, and `click` and `slot` take that screenshot's
 pixel coordinates, whatever the window size.
 
+The launcher serves the web files built into it, extracted under `%LOCALAPPDATA%\NosCore.ClientLab\sources\<hash>`;
+a rebuilt launcher extracts a new copy. To try edits to `recomp/web` without rebuilding, start it with
+`--source-root <path to this repository>`, then close the game and press Play again: reloading the page alone signs
+the character out mid-session.
+
 To drive the desktop app instead, start it with `CLIENTLAB_DEVTOOLS_PORT=9222` and attach to it; `client_close` then
 only disconnects and leaves the app running:
 
