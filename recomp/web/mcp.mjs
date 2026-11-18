@@ -667,7 +667,13 @@ const TOOLS = [
     inputSchema: obj({ vnum: { type: 'integer' }, pocket: { type: 'integer' }, slot: { type: 'integer' } }),
     run: (a) => control({ op: 'use_item', vnum: a.vnum, pocket: a.pocket, slot: a.slot }).then(json) },
   { name: 'dialogs', description: 'Open yes/no boxes (questions, confirmations, revive, teleport offers): their text and what Yes and No would answer.',
-    inputSchema: obj(), run: () => control({ op: 'dialogs' }).then(json) },
+    inputSchema: obj(), run: async () => {
+      const boxes = await control({ op: 'dialogs' });
+      if ((await control({ op: 'npc_dialog' })).open) boxes.push({ talk: true, text: 'an NPC talk window is open: close_talk closes it' });
+      return json(boxes);
+    } },
+  { name: 'close_talk', description: 'Close the NPC talk window (a leftover time-space guide line blocks the next NPC menu). interact closes it on its own.',
+    inputSchema: obj(), run: () => control({ op: 'close_npc_dialog' }).then(json) },
   { name: 'answer_dialog', description: 'Press Yes or No on an open yes/no box: the one whose text or answers contain text, else the one at index, else the first.',
     inputSchema: obj({ yes: { type: 'boolean' }, text: { type: 'string', description: 'Part of the box text or of its answers, e.g. "Continue here" or "#revival"' },
       index: { type: 'integer' } }, ['yes']),

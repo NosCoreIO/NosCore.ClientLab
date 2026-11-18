@@ -91,6 +91,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     game: '8D 96 B0 00 00 00 A1 ?? ?? ?? ?? 8B 00 E8',
     // Where u_i reads its user from: the type byte at +0x28 of the object behind this slot, then its id at +0x24.
     itemUser: '6A 64 68 ?? ?? ?? ?? A1 ?? ?? ?? ?? 8B 00 8A 40 28 E8',
+    // The npc_req handler closing the NPC talk window (visible at +0x18, closed by its virtual +0x50) before a dialog.
+    npcDialog: '83 7D FC FF 75 ?? A1 ?? ?? ?? ?? 8B 00 33 D2 E8',
     // The gp handler growing the map's portal array (28-byte records) by one before filling it.
     portals: 'A1 ?? ?? ?? ?? 8B 00 E8 ?? ?? ?? ?? 8B D8 8D 43 01 50 A1 ?? ?? ?? ?? B9 01 00 00 00 8B 15 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 C4 04 8D 4D D4',
     // The client's string allocator, used for a small scratch record the client's own code can read.
@@ -112,6 +114,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       game: (() => { const site = scan(SIG.game); return site ? ptr(u32(site + 7)) : 0; })(),
       newString: scan(SIG.newString),
       portals: global(SIG.portals),
+      npcDialog: (() => { const site = scan(SIG.npcDialog); return site ? ptr(u32(site + 7)) : 0; })(),
       itemUser: (() => { const site = scan(SIG.itemUser); return site ? ptr(u32(site + 8)) : 0; })(),
     };
     return api;
@@ -375,6 +378,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     interact({ id }) {
       const e = need(entity(id), `no entity ${id} on this map`);
       standing();
+      // A talk window left open (a time-space guide's line) swallows the next NPC's menu.
+      closeNpcDialog();
       if (u8(e + ENT.kind) !== 3) selectEntity(e);
       call(resolve().interact, player(), e);
     },
@@ -407,6 +412,15 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     rest() { call(resolve().rest, need(obj('skillUi'), 'no skill bar')); },
   };
 
+  const NPC_DIALOG = { visible: 0x18, close: 0x50 };
+  const npcDialogOpen = () => { const w = obj('npcDialog'); return !!(w && u8(w + NPC_DIALOG.visible)); };
+  function closeNpcDialog() {
+    if (!npcDialogOpen()) return false;
+    const w = obj('npcDialog');
+    call(u32(u32(w) + NPC_DIALOG.close), w, 0);
+    return true;
+  }
+
   // ---- requests ----
   function serve(req) {
     switch (req.op) {
@@ -416,6 +430,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       case 'inventory': return inventory();
       case 'skills': return skills();
       case 'dialogs': return dialogs();
+      case 'npc_dialog': return { open: npcDialogOpen() };
+      case 'close_npc_dialog': return { closed: closeNpcDialog() };
       case 'api': return Object.fromEntries(Object.entries(resolve()).map(([k, v]) => [k, v >>> 0]));
       case 'read': {
         const n = Math.min(req.length >>> 0, 1 << 20);

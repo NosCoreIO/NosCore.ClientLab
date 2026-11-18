@@ -99,6 +99,7 @@ a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
 | `{op:'use_item', vnum}` or `{op:'use_item', pocket, slot}` | A double click on the inventory item |
 | `{op:'dialogs'}` | Open yes/no boxes (revive, teleport offers, confirmations): their text and what Yes and No answer |
 | `{op:'answer', yes, text, index}` | Presses the Yes or No button of the box whose text or answers contain `text` (or the one at `index`) |
+| `{op:'npc_dialog'}`, `{op:'close_npc_dialog'}` | Whether the NPC talk window is open, and closing it (`interact` closes a leftover one first) |
 | `{op:'read', address, length}`, `{op:'scan', signature}`, `{op:'call', address, eax, edx, ecx, stack}` | For finding new structures and functions |
 
 `recomp/web/mcp.mjs` wraps these, plus screenshots, clicks and keys for the windows that have no call yet, as an MCP
