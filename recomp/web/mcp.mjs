@@ -430,7 +430,26 @@ async function useSkill({ cast_id: castId, target = 0, wait = 5 }) {
     if (!skill || skill.ready || Date.now() >= end) break;
     await guardTick();
   }
-  return control({ op: 'skill', castId, target });
+  // The client casts at its selected target, and a selection made in the same call is not in place yet.
+  if (target) {
+    let s = await worldState({ kinds: ['none'] });
+    if (s.target?.id !== target) {
+      await control({ op: 'select', id: target });
+      for (const end = Date.now() + 2000; (s = await worldState({ kinds: ['none'] })).target?.id !== target && Date.now() < end;) await sleep(100);
+      if (s.target?.id !== target) throw new Error(`could not select ${target}`);
+    }
+  }
+  const seq = await packetSeq();
+  await control({ op: 'skill', castId, target });
+  // With the packet log on, the cast counts only once the client has sent it.
+  if (seq) {
+    for (const end = Date.now() + 2000; Date.now() < end; await sleep(100)) {
+      const { list } = await packetsSince(seq, { direction: 'send' });
+      if (list.some((p) => /^(\d+ )?u_(s|as) /.test(p.raw))) return 'cast';
+    }
+    throw new Error(`the client sent no u_s for skill ${castId}${target ? ` on ${target}` : ''}`);
+  }
+  return 'cast';
 }
 
 // The pickup walks to the item first; done once the item has left the ground.

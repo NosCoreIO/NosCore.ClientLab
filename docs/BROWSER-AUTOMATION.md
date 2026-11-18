@@ -151,7 +151,8 @@ character is dead or a revival box is open, and whenever the client would name a
 the item's user.
 
 `interact` and `pick_up` return once the walk to the target is over and, for `pick_up`, once the item has left the ground. `rest` returns once
-the server has sat or stood the character, and `use_skill` waits up to `wait` seconds for the skill's cooldown.
+the server has sat or stood the character, and `use_skill` waits up to `wait` seconds for the skill's cooldown,
+selects the target first, and with the packet log on fails unless the client actually sent the cast.
 
 The client gives up on a long detour without moving. When a `walk` stalls, the MCP finds a path on the map grid and
 walks it in short legs; if that fails too, `walk` returns an error with where the character stopped. The guard's
