@@ -542,8 +542,8 @@ async function afterPortal(arrived, end) {
 }
 
 // After a map change, the character's cell once it has stopped moving on the new map. The client keeps walking toward
-// the old target on the new map, so it is sent to its own cell as soon as the new map's cell shows up: the first one
-// read can still be the old map's for a moment, and is trusted only once it has held for a second and a half.
+// the old target on the new map, so it is stopped as soon as the new map's cell shows up: the first one read can still
+// be the old map's for a moment, and is trusted only once it has held for a second and a half.
 async function settled(c) {
   const first = { x: c.x, y: c.y };
   let stopped = false;
@@ -553,11 +553,37 @@ async function settled(c) {
     if (!n || n.map !== c.map) { if (n) c = n; continue; }
     if (!stopped && (n.x !== first.x || n.y !== first.y || i >= 5)) {
       stopped = true;
-      await control({ op: 'walk', x: n.x, y: n.y });
+      await stopWalk(n);
     } else if (stopped && n.x === c.x && n.y === c.y) return { ...n, changedMap: true };
     c = n;
   }
   return { ...c, changedMap: true };
+}
+
+// A walk that ends on or next to a portal arms the client's portal request, so the character standing on an arrival
+// portal would go straight back. Near a portal it is stopped on the closest cell two away from every portal instead,
+// reached in one leg no route of which passes another portal; elsewhere on its own cell.
+async function stopWalk(at) {
+  const known = await portals();
+  if (!known.some((p) => cells(p, at) <= 1)) return control({ op: 'walk', x: at.x, y: at.y });
+  const grid = await control({ op: 'grid' });
+  const to = clearOfPortals(grid, at, known);
+  if (to) await control({ op: 'walk', x: to.x, y: to.y });
+}
+
+function clearOfPortals(grid, from, known) {
+  if (!grid) return null;
+  const avoid = portalAvoid(known, from);
+  let best = null;
+  for (let d = 2; d <= 6 && !best; d++)
+    for (let cy = from.y - d; cy <= from.y + d; cy++)
+      for (let cx = from.x - d; cx <= from.x + d; cx++) {
+        const c = { x: cx, y: cy };
+        if (cells(c, from) !== d || grid.rows[cy]?.[cx] !== '.' || known.some((p) => cells(p, c) < 2)) continue;
+        const path = gridPath(grid, from, c, avoid);
+        if (path && legSafe(grid, from, c, avoid, path.length) && (!best || Math.abs(cx - from.x) + Math.abs(cy - from.y) < Math.abs(best.x - from.x) + Math.abs(best.y - from.y))) best = c;
+      }
+  return best;
 }
 
 // Leaving an arrival portal is allowed: around the portal the character stands next to, only its own cell is avoided.

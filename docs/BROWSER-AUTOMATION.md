@@ -147,7 +147,7 @@ so an agent can pull the closest group instead of a whole room.
 `walk` refuses a cell on or next to a portal of the current map (the client's own portal list, shown by `portals`)
 unless `through_portal` is set, so a character is not sent through one by accident. Around portals it plans the route
 itself, in legs short enough that no route the client could pick between them passes one, and a `walk` with `wait`
-off is refused when it could. A walk that ends on another map returns the character there with `changedMap`.
+off is refused when it could. A walk that ends on another map returns the character there with `changedMap`; when it arrives on or next to a portal, it is stopped two cells away from every portal, since a walk that ends on one can send it straight back.
 
 `client_state` leaves out monsters the server has reported dead (an `su` whose target is no longer alive, or `die`)
 until they appear again, since the client keeps drawing them; this needs the packet log. `use_item` refuses while the
