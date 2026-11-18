@@ -97,6 +97,12 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     portals: 'A1 ?? ?? ?? ?? 8B 00 E8 ?? ?? ?? ?? 8B D8 8D 43 01 50 A1 ?? ?? ?? ?? B9 01 00 00 00 8B 15 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 C4 04 8D 4D D4',
     // The client's string allocator, used for a small scratch record the client's own code can read.
     newString: '85 C0 7E ?? 50 83 C0 0A 83 E0 FE 50 E8',
+    // A mate's order to attack an entity, as a click on a monster with the mates in control gives it: (mate AI, entity).
+    mateAttack: '53 56 8B F2 8B D8 8B C3 E8 ?? ?? ?? ?? 84 C0 74 ?? 83 BB ?? ?? ?? ?? 00 77 ?? 85 F6',
+    // A mate's order to walk to a cell, which sends ptctl: (mate AI, cell as x | y << 16, mode, 1, 1).
+    mateMove: '55 8B EC 83 C4 E4 53 56 57 8B F9 89 55 FC 8B D8 C6 45 FB 00',
+    // Drops a mate's current target before a new order.
+    mateStop: 'C6 40 13 00 C7 40 14 FF FF FF FF 33 D2 88 50 11',
     dialogButton: '53 56 8B F2 8B D8 8A 15 ?? ?? ?? ?? 8B C3 8B 08 FF 51 ?? 66 83 BB ?? ?? ?? ?? 00 74 ?? 8B 46 ?? 50 8B 4B ?? 8B D3 8B 83 ?? ?? ?? ?? FF 93',
   };
   let api = null;
@@ -111,6 +117,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       dialogs: (() => { const site = scan(SIG.dialogs); return site ? ptr(u32(site + 5)) : 0; })(),
       dialogButton: scan(SIG.dialogButton),
       useItem: scan(SIG.useItem),
+      mateAttack: scan(SIG.mateAttack), mateMove: scan(SIG.mateMove), mateStop: scan(SIG.mateStop),
       game: (() => { const site = scan(SIG.game); return site ? ptr(u32(site + 7)) : 0; })(),
       newString: scan(SIG.newString),
       portals: global(SIG.portals),
@@ -409,8 +416,54 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     collect({ id }) {
       call(resolve().collect, player(), need(findIn(sceneList('npcs'), id), `no NPC ${id} on this map`));
     },
+    // What a click on a monster orders the mates in control: the mate attacks it until it dies or a new order comes.
+    pet_attack({ target, pet }) {
+      const e = need(findIn(sceneList('monsters'), target), `no monster ${target} on this map`);
+      return orderMates(pet, 'attack', (ai) => {
+        call(resolve().mateAttack, ai, e);
+        return { ordered: u8(ai + MATE.order) === MATE_ORDER_ATTACK };
+      });
+    },
+    // What a floor click orders the mates in control: the mate walks to the cell.
+    pet_move({ x, y, pet }) {
+      return orderMates(pet, 'move', (ai) => {
+        call(resolve().mateStop, ai);
+        call(resolve().mateMove, ai, ((y & 0xffff) << 16 | (x & 0xffff)) >>> 0, 0, [1, 1]);
+        return { ordered: true };
+      });
+    },
     rest() { call(resolve().rest, need(obj('skillUi'), 'no skill bar')); },
   };
+
+  // The mate list holds one AI record per mate the client drives; its tick sends their suctl and ptctl.
+  const MATE = { entity: 0x7c, order: 0x11, stance: 0x30 };
+  // Stances in which the client's own click orders leave the mate alone.
+  const MATE_BUSY = { attack: [2, 9, 10, 13, 14, 15, 16], move: [9, 10, 13, 14, 15, 16] };
+  const MATE_ORDER_ATTACK = 2, MATE_MIN_HP = 10;
+  function mateList() {
+    const l = obj('mates'), out = [];
+    for (let i = 0, n = listCount(l); i < n; i++) {
+      const ai = listItem(l, i), e = ai && ptr(ai + MATE.entity);
+      if (e) out.push({ ai, e });
+    }
+    return out;
+  }
+  function mates() {
+    return mateList().map(({ ai, e }) => ({ ...entityInfo(e), order: u8(ai + MATE.order), stance: u8(ai + MATE.stance) }));
+  }
+  // Runs the order on each chosen mate a click would order, and reports the ones it would skip.
+  function orderMates(pet, kind, order) {
+    const all = mateList();
+    if (!all.length) throw new Error('no mate is out');
+    const chosen = pet ? all.filter(({ e }) => i32(e + ENT.id) === pet) : all;
+    if (!chosen.length) throw new Error(`no mate ${pet} is out`);
+    return chosen.map(({ ai, e }) => {
+      const id = i32(e + ENT.id), stance = u8(ai + MATE.stance);
+      if (MATE_BUSY[kind].includes(stance)) return { id, ordered: false, reason: `busy (stance ${stance})` };
+      if (kind === 'attack' && s8(e + ENT.hp) <= MATE_MIN_HP) return { id, ordered: false, reason: 'HP at 10 % or less' };
+      return { id, ...order(ai) };
+    });
+  }
 
   const NPC_DIALOG = { visible: 0x18, close: 0x50 };
   const npcDialogOpen = () => { const w = obj('npcDialog'); return !!(w && u8(w + NPC_DIALOG.visible)); };
@@ -430,6 +483,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       case 'inventory': return inventory();
       case 'skills': return skills();
       case 'dialogs': return dialogs();
+      case 'mates': return mates();
       case 'npc_dialog': return { open: npcDialogOpen() };
       case 'close_npc_dialog': return { closed: closeNpcDialog() };
       case 'api': return Object.fromEntries(Object.entries(resolve()).map(([k, v]) => [k, v >>> 0]));

@@ -100,6 +100,9 @@ a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
 | `{op:'dialogs'}` | Open yes/no boxes (revive, teleport offers, confirmations): their text and what Yes and No answer |
 | `{op:'answer', yes, text, index}` | Presses the Yes or No button of the box whose text or answers contain `text` (or the one at `index`) |
 | `{op:'npc_dialog'}`, `{op:'close_npc_dialog'}` | Whether the NPC talk window is open, and closing it (`interact` closes a leftover one first) |
+| `{op:'mates'}` | The mates the client drives: entity info plus their current order and stance |
+| `{op:'pet_attack', target, pet}` | A click on a monster with the mates in control: each mate (or only `pet`) attacks it until it dies or gets a new order |
+| `{op:'pet_move', x, y, pet}` | A floor click with the mates in control: each mate (or only `pet`) walks to the cell |
 | `{op:'read', address, length}`, `{op:'scan', signature}`, `{op:'call', address, eax, edx, ecx, stack}` | For finding new structures and functions |
 
 `recomp/web/mcp.mjs` wraps these, plus screenshots, clicks and keys for the windows that have no call yet, as an MCP
@@ -156,6 +159,11 @@ the server has sat or stood the character, and `use_skill` waits up to `wait` se
 selects the target first, and with the packet log on fails unless the client actually sent the cast. A monster whose
 `in` carries a dialog id is talked to rather than hit: every click, interact or skill on it sends `npc_req`, so only a
 pet can attack it.
+
+`pet_attack` and `pet_move` give the order the way the client's clicks do with the mates in control; the client's own mate AI then walks
+the mate, sends `ptctl` for its steps and `suctl` for each hit at the mate's attack speed. A mate whose HP is at 10 %
+or less, or that is busy with a stance those clicks leave alone, is skipped and reported. Without an order, the
+client sends a mate after a monster only in the defending stance, when that monster hits the character.
 
 The client gives up on a long detour without moving. When a `walk` stalls, the MCP finds a path on the map grid and
 walks it in short legs; if that fails too, `walk` returns an error with where the character stopped. The guard's
