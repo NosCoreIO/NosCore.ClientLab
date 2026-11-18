@@ -89,6 +89,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     useItem: '53 56 8B DA 8B F0 83 3B 00 0F 84 ?? ?? ?? ?? E8 ?? ?? ?? ?? 31 03',
     // Its callers load the game object behind `mov eax, [slot]` right after `lea edx, [esi+0xb0]`.
     game: '8D 96 B0 00 00 00 A1 ?? ?? ?? ?? 8B 00 E8',
+    // Where u_i reads its user from: the type byte at +0x28 of the object behind this slot, then its id at +0x24.
+    itemUser: '6A 64 68 ?? ?? ?? ?? A1 ?? ?? ?? ?? 8B 00 8A 40 28 E8',
     // The gp handler growing the map's portal array (28-byte records) by one before filling it.
     portals: 'A1 ?? ?? ?? ?? 8B 00 E8 ?? ?? ?? ?? 8B D8 8D 43 01 50 A1 ?? ?? ?? ?? B9 01 00 00 00 8B 15 ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 C4 04 8D 4D D4',
     // The client's string allocator, used for a small scratch record the client's own code can read.
@@ -110,6 +112,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       game: (() => { const site = scan(SIG.game); return site ? ptr(u32(site + 7)) : 0; })(),
       newString: scan(SIG.newString),
       portals: global(SIG.portals),
+      itemUser: (() => { const site = scan(SIG.itemUser); return site ? ptr(u32(site + 8)) : 0; })(),
     };
     return api;
   }
@@ -333,10 +336,13 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       const found = inventoryItems().find(({ item, def }) => (vnum !== undefined && vnum !== null
         ? i32(def + 0x30) === vnum : s8(item + 0x1c) === pocket && s16(item + 0x1e) === slot));
       const { item, def } = need(found, vnum !== undefined && vnum !== null ? `no item ${vnum} in the inventory` : `no item in pocket ${pocket} slot ${slot}`);
-      // u_i names its user from the player's entity reference; outside the character it would name someone else.
-      const mgr = player(), me = ptr(mgr + MGR.entity);
-      if (u8(mgr + MGR.kind) !== 1 || !me || i32(mgr + MGR.id) !== i32(me + ENT.id))
-        throw new Error(`the client would use the item as entity ${i32(mgr + MGR.id)} of kind ${u8(mgr + MGR.kind)}, not the character: not used`);
+      // u_i names its user from an entity reference that, while the character is dead, can point at someone else.
+      const me = ptr(player() + MGR.entity);
+      if (!me || s8(me + ENT.hp) <= 0) throw new Error('the character is dead: revive first');
+      if (dialogs().some((d) => [d.text, d.yes, d.no].some((t) => t.includes('#revival')))) throw new Error('a revival box is open: answer it first');
+      const user = need(obj('itemUser'), 'item user not found in this build');
+      if (u8(user + MGR.kind) !== 1 || i32(user + MGR.id) !== i32(me + ENT.id))
+        throw new Error(`the client would use the item as entity ${i32(user + MGR.id)} of kind ${u8(user + MGR.kind)}, not the character: not used`);
       const rec = scratchRecord();
       dv().setUint32(rec, item, true);
       // The record's source: 0 wears an equipment item, 1 (the worn-equipment source) would take it off; other pockets use 1.

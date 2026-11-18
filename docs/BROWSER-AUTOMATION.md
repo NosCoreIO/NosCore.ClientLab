@@ -145,8 +145,9 @@ itself, in legs short enough that no route the client could pick between them pa
 off is refused when it could. A walk that ends on another map returns the character there with `changedMap`.
 
 `client_state` leaves out monsters the server has reported dead (an `su` whose target is no longer alive, or `die`)
-until they appear again, since the client keeps drawing them; this needs the packet log. `use_item` refuses when the
-client would name another entity than the character as the item's user.
+until they appear again, since the client keeps drawing them; this needs the packet log. `use_item` refuses while the
+character is dead or a revival box is open, and whenever the client would name another entity than the character as
+the item's user.
 
 `interact` and `pick_up` return once the walk to the target is over and, for `pick_up`, once the item has left the ground. `rest` returns once
 the server has sat or stood the character, and `use_skill` waits up to `wait` seconds for the skill's cooldown.
