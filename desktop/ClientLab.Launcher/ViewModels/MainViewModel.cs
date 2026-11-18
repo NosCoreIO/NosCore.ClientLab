@@ -19,6 +19,7 @@ public partial class MainViewModel : ObservableObject
     private bool loadedSettings;
     private CredentialStore? credentialStore;
     private CredentialStore? sessionStore;
+    private readonly SemaphoreSlim sessionWrites = new(1);
     public event Action<string>? GameRequested;
     public Func<Task<IGameforgeIdentity>>? IdentityRequested { get; set; }
 
@@ -504,13 +505,10 @@ public partial class MainViewModel : ObservableObject
         try
         {
             if (RememberCredentials) await Task.Run(() => credentialStore.SaveAsync(SignInEmail.Trim(), SignInPassword));
-            else
-            {
-                await Task.Run(() => credentialStore.DeleteAsync());
-                await ForgetSessionAsync();
-            }
+            else await Task.Run(() => credentialStore.DeleteAsync());
         }
         catch (Exception) { Notice = "Your account could not be saved to the system credential store."; }
+        if (!RememberCredentials) await ForgetSessionAsync();
     }
 
     /// <summary>Signs in with the Gameforge session kept from the last start, as the official client keeps its sign-in
@@ -544,15 +542,25 @@ public partial class MainViewModel : ObservableObject
 
     private async Task KeepSessionAsync()
     {
-        if (sessionStore is null || !RememberCredentials || signIn?.SessionToken is not { } token || selectedAccountId is not { } account) return;
-        try { await Task.Run(() => sessionStore.SaveAsync("session", new SavedSession(token, account))); }
+        if (sessionStore is not { } store) return;
+        await sessionWrites.WaitAsync();
+        try
+        {
+            // Checked after the wait so a sign-out or Remember me change queued first is not undone.
+            if (!RememberCredentials || signIn?.SessionToken is not { } token || selectedAccountId is not { } account) return;
+            await Task.Run(() => store.SaveAsync("session", new SavedSession(token, account)));
+        }
         catch (Exception) { Notice = "Your Gameforge sign-in could not be kept for the next start."; }
+        finally { sessionWrites.Release(); }
     }
 
     private async Task ForgetSessionAsync()
     {
-        try { if (sessionStore is not null) await Task.Run(() => sessionStore.DeleteAsync()); }
+        if (sessionStore is not { } store) return;
+        await sessionWrites.WaitAsync();
+        try { await Task.Run(() => store.DeleteAsync()); }
         catch (Exception) { Notice = "Your Gameforge sign-in could not be removed from the system credential store."; }
+        finally { sessionWrites.Release(); }
     }
 
     [RelayCommand]
