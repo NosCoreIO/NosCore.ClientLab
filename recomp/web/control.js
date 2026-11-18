@@ -103,6 +103,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     mateMove: '55 8B EC 83 C4 E4 53 56 57 8B F9 89 55 FC 8B D8 C6 45 FB 00',
     // Drops a mate's current target before a new order.
     mateStop: 'C6 40 13 00 C7 40 14 FF FF FF FF 33 D2 88 50 11',
+    // A click on a line of the NPC talk window: (window, line); sends the line's command with the NPC, then closes it.
+    talkOption: '55 8B EC B9 0B 00 00 00 6A 00 6A 00 49 75 F9 51 53 56 57 89 55 FC 8B F0 33 C0 55 68 ?? ?? ?? ?? 64 FF 30 64 89 20 E8 ?? ?? ?? ?? 8B 96 44 01 00 00',
     // The score handler opening the reward window (time-space score, raid box) behind this slot.
     rewardWindow: '8B 80 A4 00 00 00 8B 48 28 A1 ?? ?? ?? ?? 8B 00 E8',
     // The reward window's Draw Item button handler: (window, button); it sends rsel once per window.
@@ -122,7 +124,7 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       dialogButton: scan(SIG.dialogButton),
       useItem: scan(SIG.useItem),
       rewardWindow: (() => { const site = scan(SIG.rewardWindow); return site ? ptr(u32(site + 10)) : 0; })(),
-      drawItem: scan(SIG.drawItem),
+      drawItem: scan(SIG.drawItem), talkOption: scan(SIG.talkOption),
       mateAttack: scan(SIG.mateAttack), mateMove: scan(SIG.mateMove), mateStop: scan(SIG.mateStop),
       game: (() => { const site = scan(SIG.game); return site ? ptr(u32(site + 7)) : 0; })(),
       newString: scan(SIG.newString),
@@ -486,10 +488,35 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
     return { open: !!(w && u8(w + REWARD.visible)), drawn: !!(w && u8(w + REWARD.drawn)) };
   }
 
-  const NPC_DIALOG = { visible: 0x18, close: 0x50 };
+  // The talk window's lines are a dynamic array; each holds its text and the command a click on it sends.
+  const NPC_DIALOG = { visible: 0x18, close: 0x50, lines: 0xe4 };
+  const TALK_LINE = { visible: 0x18, text: 0x118, command: 0x128 };
   const npcDialogOpen = () => { const w = obj('npcDialog'); return !!(w && u8(w + NPC_DIALOG.visible)); };
+  function talkLines() {
+    const w = obj('npcDialog'), arr = w ? ptr(w + NPC_DIALOG.lines) : 0, out = [];
+    for (let i = 0, n = arr ? Math.min(Math.max(i32(arr - 4), 0), 64) : 0; i < n; i++) {
+      const line = ptr(arr + 4 * i);
+      if (line && u8(line + TALK_LINE.visible)) out.push({ line, text: wideString(ptr(line + TALK_LINE.text)), command: delphiString(ptr(line + TALK_LINE.command)) });
+    }
+    return out;
+  }
+  function talkOptions() {
+    return npcDialogOpen() ? talkLines().map(({ text, command }, index) => ({ index, text, command })) : [];
+  }
+  function chooseTalk({ index, text }) {
+    if (!npcDialogOpen()) throw new Error('no NPC talk window is open');
+    const lines = talkLines();
+    const pick = text ? lines.find((l) => l.text.includes(text)) : lines[index];
+    need(pick, text ? `no talk option contains "${text}"` : `no talk option ${index}`);
+    call(resolve().talkOption, obj('npcDialog'), pick.line);
+    return { text: pick.text, command: pick.command, stillOpen: npcDialogOpen() };
+  }
+  // The last line is the one that ends the talk (End Dialogue): pressing it sends what the server waits for, such as
+  // the n_run that spawns a time-space room. Only a window with no line is closed without a command.
   function closeNpcDialog() {
     if (!npcDialogOpen()) return false;
+    const lines = talkLines();
+    if (lines.length) return chooseTalk({ index: lines.length - 1 });
     const w = obj('npcDialog');
     call(u32(u32(w) + NPC_DIALOG.close), w, 0);
     return true;
@@ -506,7 +533,8 @@ self.controlBuf = new SharedArrayBuffer(CONTROL_BYTES);
       case 'dialogs': return dialogs();
       case 'mates': return mates();
       case 'reward_window': return rewardWindow();
-      case 'npc_dialog': return { open: npcDialogOpen() };
+      case 'npc_dialog': return { open: npcDialogOpen(), options: talkOptions() };
+      case 'talk_choose': return chooseTalk(req);
       case 'close_npc_dialog': return { closed: closeNpcDialog() };
       case 'api': return Object.fromEntries(Object.entries(resolve()).map(([k, v]) => [k, v >>> 0]));
       case 'read': {

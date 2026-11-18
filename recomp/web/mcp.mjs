@@ -483,9 +483,11 @@ async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPo
   await ensurePage();
   // A sitting character ignores floor clicks, so the walk would only report a stall: stand up first.
   if ((await control({ op: 'state', kinds: ['none'] })).character?.sitting) await rest();
-  // Stepping on (or next to) a portal cell sends the character through it.
-  const known = throughPortal ? [] : await portals();
-  const near = known.find((p) => Math.max(Math.abs(p.x - x), Math.abs(p.y - y)) <= 1);
+  // Stepping on (or next to) a portal cell sends the character through it. Taking a portal on purpose still keeps the
+  // route off every other one, such as a time-space's exit.
+  const all = await portals();
+  const known = throughPortal ? all.filter((p) => cells(p, { x, y }) > 1) : all;
+  const near = throughPortal ? null : known.find((p) => cells(p, { x, y }) <= 1);
   if (near) throw new Error(`[${x},${y}] is on or next to portal ${near.id} at [${near.x},${near.y}] to map ${near.map}: pick another cell, or pass through_portal to take it`);
   if (!wait) {
     // Without waiting there is a single leg, so with portals around it is only sent when it cannot pass one.
@@ -510,9 +512,11 @@ async function walk({ x, y, wait = true, timeout = 30, through_portal: throughPo
   if (c?.timedOut) throw new Error(`timed out at [${c.character.x},${c.character.y}] on the way to [${x},${y}]`);
   const from = c?.character ?? (await control({ op: 'state', kinds: ['none'] })).character;
   const grid = await control({ op: 'grid' });
-  if (grid && grid.rows[y]?.[x] !== '.') throw new Error(`[${x},${y}] is not walkable`);
+  // A portal's own cell can be marked blocked on the grid: the route then ends next to it and steps on last.
+  const blocked = grid && grid.rows[y]?.[x] !== '.';
+  if (blocked && !throughPortal) throw new Error(`[${x},${y}] is not walkable`);
   const avoid = portalAvoid(known, from);
-  const path = gridPath(grid, from, { x, y }, avoid);
+  const path = blocked ? viaNeighbour(grid, from, { x, y }, avoid) : gridPath(grid, from, { x, y }, avoid);
   if (!path) throw new Error(`no walkable path from [${from.x},${from.y}] to [${x},${y}]${known.length ? ' that keeps off the portals' : ''}`);
   if (!path.length) return from;
   // The client picks its own route between waypoints, so near portals a leg is shortened until none of its routes
@@ -628,6 +632,18 @@ async function walkLeg(x, y, end) {
   return { arrived: false, timedOut: true, character: c ?? (await control({ op: 'state', kinds: ['none'] })).character };
 }
 
+function viaNeighbour(grid, from, to, avoid) {
+  let best = null;
+  for (let dy = -1; dy <= 1; dy++)
+    for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const n = { x: to.x + dx, y: to.y + dy };
+      const path = n.x === from.x && n.y === from.y ? [] : gridPath(grid, from, n, avoid);
+      if (path && (!best || path.length < best.length)) best = path;
+    }
+  return best && [...best, to];
+}
+
 // Breadth-first search over the walkability grid, eight directions, no corner cutting.
 function gridPath(grid, from, to, avoid = () => false) {
   if (!grid) return null;
@@ -695,13 +711,16 @@ const TOOLS = [
   { name: 'dialogs', description: 'Open yes/no boxes (questions, confirmations, revive, teleport offers): their text and what Yes and No would answer.',
     inputSchema: obj(), run: async () => {
       const boxes = await control({ op: 'dialogs' });
-      if ((await control({ op: 'npc_dialog' })).open) boxes.push({ talk: true, text: 'an NPC talk window is open: close_talk closes it' });
+      const talk = await control({ op: 'npc_dialog' });
+      if (talk.open) boxes.push({ talk: true, text: 'an NPC talk window is open: talk_choose presses a line, close_talk presses the last (End Dialogue)', options: talk.options });
       const reward = await control({ op: 'reward_window' });
       if (reward.open && !reward.drawn) boxes.push({ reward: true, text: 'the reward window is open: draw_item presses Draw Item' });
       return json(boxes);
     } },
-  { name: 'close_talk', description: 'Close the NPC talk window (a leftover time-space guide line blocks the next NPC menu). interact closes it on its own.',
+  { name: 'close_talk', description: 'End the NPC talk by pressing its last line (End Dialogue), which sends what the server waits for, such as the n_run that starts a time-space room. A window with no line is just closed. interact and draw_item do this first.',
     inputSchema: obj(), run: () => control({ op: 'close_npc_dialog' }).then(json) },
+  { name: 'talk_choose', description: 'Press a line of the NPC talk window, by index or by part of its text, as a click on it does; dialogs lists the lines with the command each sends.',
+    inputSchema: obj({ index: { type: 'integer' }, text: { type: 'string' } }), run: (a) => control({ op: 'talk_choose', index: a.index ?? 0, text: a.text }).then(json) },
   { name: 'answer_dialog', description: 'Press Yes or No on an open yes/no box: the one whose text or answers contain text, else the one at index, else the first.',
     inputSchema: obj({ yes: { type: 'boolean' }, text: { type: 'string', description: 'Part of the box text or of its answers, e.g. "Continue here" or "#revival"' },
       index: { type: 'integer' } }, ['yes']),

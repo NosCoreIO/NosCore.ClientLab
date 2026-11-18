@@ -99,7 +99,7 @@ a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
 | `{op:'use_item', vnum}` or `{op:'use_item', pocket, slot}` | A double click on the inventory item |
 | `{op:'dialogs'}` | Open yes/no boxes (revive, teleport offers, confirmations): their text and what Yes and No answer |
 | `{op:'answer', yes, text, index}` | Presses the Yes or No button of the box whose text or answers contain `text` (or the one at `index`) |
-| `{op:'npc_dialog'}`, `{op:'close_npc_dialog'}` | Whether the NPC talk window is open, and closing it (`interact` closes a leftover one first) |
+| `{op:'npc_dialog'}`, `{op:'talk_choose', index, text}`, `{op:'close_npc_dialog'}` | Whether the NPC talk window is open with its lines and the command each sends, a click on one line, and ending the talk by clicking its last line (End Dialogue), which sends what the server waits for, such as the `n_run` that spawns a time-space room (`interact` and `draw_item` end a leftover talk first) |
 | `{op:'reward_window'}`, `{op:'draw_item'}` | Whether the reward window (time-space score, raid box) is open and drawn, and its Draw Item button (closes a talk window first, which would swallow the click) |
 | `{op:'mates'}` | The mates the client drives: entity info plus their current order and stance |
 | `{op:'pet_attack', target, pet}` | A click on a monster with the mates in control: each mate (or only `pet`) attacks it until it dies or gets a new order |
@@ -148,7 +148,7 @@ so an agent can pull the closest group instead of a whole room.
 `walk` refuses a cell on or next to a portal of the current map (the client's own portal list, shown by `portals`)
 unless `through_portal` is set, so a character is not sent through one by accident. Around portals it plans the route
 itself, in legs short enough that no route the client could pick between them passes one, and a `walk` with `wait`
-off is refused when it could. A walk that ends on another map returns the character there with `changedMap`; when it arrives on or next to a portal, it is stopped two cells away from every portal, since a walk that ends on one can send it straight back.
+off is refused when it could. With `through_portal`, the route still keeps off every other portal, such as a time-space's exit. A walk that ends on another map returns the character there with `changedMap`; when it arrives on or next to a portal, it is stopped two cells away from every portal, since a walk that ends on one can send it straight back.
 
 `client_state` leaves out monsters the server has reported dead (an `su` whose target is no longer alive, or `die`)
 until they appear again, since the client keeps drawing them; this needs the packet log. `use_item` refuses while the
