@@ -29,12 +29,14 @@ public sealed class GameforgeBrowserIdentity : IGameforgeIdentity, IGameforgeVer
     public Action? CollectionFinished { get; set; }
     public string UserAgent => ready.Task.IsCompletedSuccessfully ? ready.Task.Result : throw new InvalidOperationException("Gameforge identity browser is still starting.");
 
-    public GameforgeBrowserIdentity(string installation, string? dataDirectory = null, string? importedIdentity = null)
+    // officialClientIdentity is injectable so checks can exercise storage precedence without this machine's
+    // real Gameforge client; production defaults to reading the official client's registered device identity.
+    public GameforgeBrowserIdentity(string installation, string? dataDirectory = null, string? importedIdentity = null, Func<JsonObject?>? officialClientIdentity = null)
     {
         if (!Guid.TryParse(installation, out _)) throw new InvalidDataException("A registered Gameforge installation ID is required.");
         InstallationId = installation;
         storageFile = dataDirectory is null ? null : Path.Combine(dataDirectory, "gameforge-browser-state-" + installation + ".json");
-        initialStorage = ReadStorage(storageFile, importedIdentity, installation);
+        initialStorage = ReadStorage(storageFile, importedIdentity, installation, officialClientIdentity ?? GameforgeOfficialClientIdentity.TryRead);
         var socket = new TcpListener(IPAddress.Loopback, 0); socket.Start();
         var port = ((IPEndPoint)socket.LocalEndpoint).Port; socket.Stop();
         authority = $"127.0.0.1:{port}"; origin = "http://" + authority;
@@ -204,20 +206,34 @@ public sealed class GameforgeBrowserIdentity : IGameforgeIdentity, IGameforgeVer
         return result;
     }
 
-    private static JsonObject ReadStorage(string? file, string? importedIdentity, string installation)
+    private static JsonObject ReadStorage(string? file, string? importedIdentity, string installation, Func<JsonObject?> officialClientIdentity)
     {
+        JsonObject? stored = null;
         try
         {
             if (file is not null && File.Exists(file) && JsonNode.Parse(File.ReadAllText(file)) is JsonObject storage)
-            { var filtered = FilterStorage(storage); if (filtered.Count == 2) return filtered; }
+            { var filtered = FilterStorage(storage); if (filtered.Count == 2) stored = filtered; }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException) { }
+
+        var official = officialClientIdentity() is { } raw && FilterStorage(raw) is { Count: 2 } valid ? valid : null;
+        // The official Gameforge client's device id is the one registered with the server. A saved state file
+        // bound to a different id was minted by this collector and will be refused at code creation (HTTP 403),
+        // so the registered id wins; when they already agree, keep the saved file's live vector rotation.
+        if (stored is not null)
+        {
+            if (official is not null && stored["x-game"]?.GetValue<string>() != official["x-game"]?.GetValue<string>()) return official;
+            return stored;
+        }
         if (!string.IsNullOrEmpty(importedIdentity))
         {
             var identity = JsonNode.Parse(File.ReadAllText(importedIdentity))!;
             if (identity["installationId"]?.GetValue<string>() == installation && identity["fingerprint"] is JsonArray fields && fields.Count == 30)
                 return new JsonObject { ["x-game"] = fields[22]!.GetValue<string>(), ["x-vec"] = Encoding.ASCII.GetString(Convert.FromBase64String(fields[25]!.GetValue<string>())) };
         }
+        // No saved state and no imported file: reuse the official client's registered identity rather than let
+        // the collector mint an unregistered one (a guaranteed later HTTP 403).
+        if (official is not null) return official;
         return new JsonObject();
     }
 

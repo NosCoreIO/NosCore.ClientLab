@@ -71,7 +71,9 @@ public sealed class GameforgeSignIn : IDisposable
                 "auth/thin/codes" => "Gameforge refused to issue a game launch code",
                 _ => "Gameforge " + error.Operation + " failed"
             };
-            throw new InvalidOperationException($"{message} (HTTP {error.Status}).", error);
+            // Gameforge's response body is the only clue to why a request was refused; keep it visible.
+            var detail = error.Body?.ToJsonString() is { Length: > 2 } body ? " " + body[..Math.Min(400, body.Length)] : "";
+            throw new InvalidOperationException($"{message} (HTTP {error.Status}).{detail}", error);
         }
     }
 

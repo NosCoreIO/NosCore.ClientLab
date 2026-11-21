@@ -14,7 +14,7 @@ internal static class BrowserIdentityChecks
 
     public static async Task RunAsync()
     {
-        using var identity = new GameforgeBrowserIdentity("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb");
+        using var identity = new GameforgeBrowserIdentity("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb", officialClientIdentity: () => null);
         using var browser = new HttpClient { BaseAddress = new Uri(identity.Url), Timeout = TimeSpan.FromSeconds(5) };
         using (var invalid = await PostAsync(browser, "ready", new { userAgent = "untrusted" }))
             if (invalid.StatusCode != HttpStatusCode.Forbidden) throw new Exception("Foreign bridge request was accepted.");
@@ -40,6 +40,30 @@ internal static class BrowserIdentityChecks
         Console.WriteLine("PASS: browser identity bridge rejects foreign origins, retains real user-agent and request metadata, propagates collector failures, and cancels on shutdown.");
         await CheckPersistenceAsync();
         await CheckVerificationAsync();
+        CheckOfficialClientImport();
+    }
+
+    private static void CheckOfficialClientImport()
+    {
+        // Mimic the official Gameforge client's Local Storage LevelDB framing: the key, a few non-value
+        // bytes, then the value. x-vec carries the rotation timestamp the parser orders by.
+        var latin1 = System.Text.Encoding.GetEncoding(28591);
+        static byte[] Record(string device, string vector, long stamp, System.Text.Encoding enc)
+            => enc.GetBytes($"_https://client-frontend.gameforge.com\0\x01x-game\0\x01{device}\x02\x01x-vec\0\x01{vector} {stamp}\x03\x08\xff");
+
+        var newest = Record("it4va3bgy2ypr371ve1rqypeq1a", "AbC-newfile-vec*/=", 1_700_000_000_000, latin1);
+        // An older file holds a later rotation of the same vector; recency is by timestamp, not file order.
+        var older = Record("it4va3bgy2ypr371ve1rqypeq1a", "AbC-latest-vec*/=", 1_700_000_009_999, latin1);
+        var parsed = GameforgeOfficialClientIdentity.Parse(new[] { newest, older })
+            ?? throw new Exception("Official-client device identity was not recovered from LevelDB bytes.");
+        if (parsed["x-game"]!.GetValue<string>() != "it4va3bgy2ypr371ve1rqypeq1a") throw new Exception("Wrong device identifier parsed from official client storage.");
+        if (parsed["x-vec"]!.GetValue<string>() != "AbC-latest-vec*/= 1700000009999") throw new Exception("Parser did not choose the most recently rotated vector.");
+
+        if (GameforgeOfficialClientIdentity.Parse(new[] { latin1.GetBytes("\x01x-game\0\x01onlythedevicetokenvalue00\x02") }) is not null)
+            throw new Exception("A storage blob missing x-vec must not yield an identity.");
+        if (GameforgeOfficialClientIdentity.Parse(Array.Empty<byte[]>()) is not null)
+            throw new Exception("Empty storage must not yield an identity.");
+        Console.WriteLine("PASS: official Gameforge client device identity is recovered from Local Storage bytes, the latest vector rotation wins, and incomplete storage yields nothing.");
     }
 
     private static async Task CheckPersistenceAsync()
@@ -54,7 +78,7 @@ internal static class BrowserIdentityChecks
             fields[25] = Convert.ToBase64String(System.Text.Encoding.ASCII.GetBytes("existing-vector 123"));
             var imported = Path.Combine(root, "identity.json");
             File.WriteAllText(imported, new JsonObject { ["installationId"] = installation, ["fingerprint"] = fields }.ToJsonString());
-            using (var collector = new GameforgeBrowserIdentity(installation, root, imported))
+            using (var collector = new GameforgeBrowserIdentity(installation, root, imported, () => null))
             using (var page = new HttpClient { BaseAddress = new Uri(collector.Url), Timeout = TimeSpan.FromSeconds(5) })
             {
                 var html = await page.GetStringAsync("");
@@ -66,18 +90,40 @@ internal static class BrowserIdentityChecks
                 using (var response = await PostAsync(page, "result", new { id = job["id"]!.ToString(), blackbox = "tra:test", storage = new Dictionary<string, string> { ["x-game"] = "existing-device", ["x-vec"] = "updated-vector 456", ["unrelated"] = "must-not-persist" } })) response.EnsureSuccessStatusCode();
                 await collection;
             }
-            using var reopened = new GameforgeBrowserIdentity(installation, root, imported);
-            using var nextPage = new HttpClient();
-            var nextHtml = await nextPage.GetStringAsync(reopened.Url);
-            if (!nextHtml.Contains("updated-vector 456") || nextHtml.Contains("must-not-persist")) throw new Exception("Changing loopback origins lost official browser state or persisted unrelated storage.");
+            using (var reopened = new GameforgeBrowserIdentity(installation, root, imported, () => null))
+            using (var nextPage = new HttpClient())
+            {
+                var nextHtml = await nextPage.GetStringAsync(reopened.Url);
+                if (!nextHtml.Contains("updated-vector 456") || nextHtml.Contains("must-not-persist")) throw new Exception("Changing loopback origins lost official browser state or persisted unrelated storage.");
+            }
             Console.WriteLine("PASS: official device identifiers survive changing loopback ports, updated script state is retained, and unrelated browser storage is excluded.");
+
+            // A saved state file bound to a collector-minted id must yield to the official client's registered id;
+            // when the ids already match, the saved file's live vector rotation is kept.
+            JsonObject Official() => new() { ["x-game"] = "existing-device", ["x-vec"] = "registered-vector 999" };
+            using (var healed = new GameforgeBrowserIdentity(installation, root, imported, Official))
+            using (var healPage = new HttpClient())
+            {
+                var html = await healPage.GetStringAsync(healed.Url);
+                if (!html.Contains("updated-vector 456")) throw new Exception("A saved id matching the official client should keep the saved vector rotation.");
+            }
+            File.WriteAllText(Path.Combine(root, "gameforge-browser-state-" + installation + ".json"),
+                new JsonObject { ["x-game"] = "minted-stale-id", ["x-vec"] = "minted-vector 111" }.ToJsonString());
+            using (var healed = new GameforgeBrowserIdentity(installation, root, imported, Official))
+            using (var healPage = new HttpClient())
+            {
+                var html = await healPage.GetStringAsync(healed.Url);
+                if (!html.Contains("existing-device") || !html.Contains("registered-vector 999") || html.Contains("minted-stale-id"))
+                    throw new Exception("A saved id differing from the official client was not replaced by the registered identity.");
+            }
+            Console.WriteLine("PASS: the official Gameforge client's registered device id overrides a stale minted state file but defers to a matching one.");
         }
         finally { Directory.Delete(root, recursive: true); }
     }
 
     private static async Task CheckVerificationAsync()
     {
-        using var collector = new GameforgeBrowserIdentity("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb");
+        using var collector = new GameforgeBrowserIdentity("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb", officialClientIdentity: () => null);
         using var page = new HttpClient { BaseAddress = new Uri(collector.Url), Timeout = TimeSpan.FromSeconds(5) };
         page.DefaultRequestHeaders.Referrer = new Uri(collector.Url);
         using (var ready = await PostAsync(page, "ready", new { userAgent = "test-browser" })) ready.EnsureSuccessStatusCode();

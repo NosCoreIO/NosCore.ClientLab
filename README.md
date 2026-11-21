@@ -110,7 +110,16 @@ an existing identity file. Live Windows validation covers proof-of-work, sign-in
 account lookup, iovation verification, and successful launch-code issuance (HTTP 201).
 Recompiled-game compatibility and macOS/Linux end-to-end execution remain experimental.
 The official script's device identifier and vector are preserved across changing loopback
-ports, with existing identifiers migrated from the configured identity file. Collection
+ports, with existing identifiers migrated from the configured identity file. On Windows, when
+no identity file is configured and no device identifier has been saved yet, the launcher reads
+the device identity (`x-game`/`x-vec`) that the official Gameforge client already registered on
+this machine from its Local Storage, rather than letting the collector mint a fresh identifier.
+A minted identifier passes sign-in and iovation but is refused at launch-code creation with
+HTTP 403 "Not allowed to create code", because Gameforge never registered it for the
+installation. For the same reason, a previously saved device identifier that does not match the
+official client's registered one is replaced by the registered one on the next sign-in; a saved
+identifier that already matches keeps its live vector rotation. If the official Gameforge client
+is not installed on the machine, configure `--gf-identity-file` (see below) instead. Collection
 uses a properly sized verification view; native feature encoding and fixed-length JSON
 framing match the official launcher. Image CAPTCHA and MFA answers are entered in the
 launcher. Proof-of-work challenges run through Gameforge's official hosted widget in
