@@ -282,6 +282,11 @@
   // never blocks on the network.
   const nets = new Map();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // A closed or reloaded page sends no net-close: its sockets would stay open until the relay reaps them, and the
+  // server would keep the account logged in meanwhile, refusing a new login. keepalive lets the requests outlive the page.
+  addEventListener('pagehide', () => {
+    for (const id of nets.keys()) fetch(`/net/close?id=${id}`, { method: 'POST', keepalive: true }).catch(() => { });
+  });
   function netOpen(id, ring) {
     const hdr = new Int32Array(ring, 0, 4), data = new Uint8Array(ring, 16), size = data.length;
     const conn = { open: true, sends: Promise.resolve() };
