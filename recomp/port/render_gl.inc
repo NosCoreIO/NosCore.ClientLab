@@ -60,19 +60,29 @@ EM_JS(void, js_gl_submit, (const uint8_t* q, int len), {
    process until the page itself stalls. The page shows one frame per display refresh from a queue of two and counts
    the frames it has shown in vsync[0]; after posting a frame, Present waits while more than two are in flight (one on
    the renderer thread, two queued), which paces the game to the display and lets one slow frame be absorbed by the
-   spare instead of repeating a refresh. A notify wakes it; the timeout only matters when the page stops refreshing
-   (hidden or covered), where it keeps the game near 60 frames a second, and the count is then resynchronised so a page
-   that refreshes again does not leave every frame waiting. */
+   spare instead of repeating a refresh. A renderer slower than the game (a software GL) still shows frames, so Present
+   keeps waiting while the count moves: resynchronising after one short wait let the queue grow without bound, so the
+   display fell further behind until the page ran out of memory. Only a count that stops for a second (page hidden or
+   covered) resynchronises it, and until it moves again each frame waits one refresh at most, which keeps the game
+   near 60 frames a second. */
 EM_JS(void, js_gl_frame_posted, (void), {
     const V = self.vsync;
     self.glPosted = (self.glPosted || 0) + 1;
     if (!V) return;
     let shown = Atomics.load(V, 0);
-    if (self.glPosted - shown > 2) {
-        Atomics.wait(V, 0, shown, 16);
-        shown = Atomics.load(V, 0);
-        if (self.glPosted - shown > 2) self.glPosted = shown + 2;
+    if (self.glPosted - shown <= 2) return;
+    const patience = self.glStalledAt === shown ? 16 : 1000;
+    let deadline = performance.now() + patience;
+    for (;;) {
+        const left = deadline - performance.now();
+        if (left <= 0) break;
+        Atomics.wait(V, 0, shown, Math.min(left, 16));
+        const now = Atomics.load(V, 0);
+        if (now !== shown) { shown = now; deadline = performance.now() + patience; }
+        if (self.glPosted - shown <= 2) return;
     }
+    self.glStalledAt = shown;
+    self.glPosted = shown + 2;
 });
 
 /* The frame as 32-bit BGRA rows, top row first, read by the renderer thread after everything posted before. */
