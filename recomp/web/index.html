@@ -209,8 +209,11 @@
       pending.push(m.text);
       window.allLog.push(m.text);
       if (!flushQueued) { flushQueued = true; requestAnimationFrame(flushLog); }
+    } else if (m.type === 'login-refused') {
+      loginRefusal = m.code;
     } else if (m.type === 'exited') {
       window.gameExited = true;
+      if (loginRefusal !== null) showLoginRefusal(loginRefusal);
     } else if (m.type === 'input') {
       ring = m.ring;
       audioDone = m.audioDone;
@@ -390,6 +393,28 @@
   const stage = document.getElementById('stage');
   const autoDismiss = new URLSearchParams(location.search).has('autodismiss');
   const BUTTON = { 1: 'OK', 2: 'Cancel', 3: 'Abort', 4: 'Retry', 5: 'Ignore', 6: 'Yes', 7: 'No', 10: 'Try Again', 11: 'Continue' };
+  // The client quits without a word on some login refusals (a banned account, maintenance): the page says why.
+  const LOGIN_REFUSALS = {
+    1: 'This version of the game is out of date.',
+    2: 'The login server ran into an error.',
+    3: 'The server is under maintenance.',
+    4: 'This account is already connected.',
+    5: 'The account name or password is wrong.',
+    6: 'The login server cannot be reached.',
+    7: 'This account is banned.',
+    8: 'This server does not accept players from your country.',
+  };
+  let loginRefusal = null;
+  function showLoginRefusal(code) {
+    const box = stage.appendChild(document.createElement('div'));
+    box.className = 'msgbox';
+    const panel = box.appendChild(document.createElement('div'));
+    panel.setAttribute('role', 'alert');
+    panel.appendChild(document.createElement('h1')).textContent = 'Login refused';
+    panel.appendChild(document.createElement('p')).textContent =
+      `${LOGIN_REFUSALS[code] ?? 'The login server refused the login.'} (failc ${code})`;
+  }
+
   function messageBox(d, done) {
     const fallback = d.buttons[d.default < d.buttons.length ? d.default : 0];
     if (autoDismiss) { window.allLog.push(`message box "${d.caption}" dismissed with ${BUTTON[fallback]}: ${d.text}`); done(fallback); return; }
