@@ -607,8 +607,31 @@
     return [Math.round((e.clientX - r.left) * canvas.width / r.width), Math.round((e.clientY - r.top) * canvas.height / r.height)];
   }
   canvas.addEventListener('mousemove', (e) => send(IN.move, 0, ...pos(e), e.timeStamp));
-  canvas.addEventListener('mousedown', (e) => { canvas.focus(); send(IN.down, e.button, ...pos(e), e.timeStamp); e.preventDefault(); });
-  canvas.addEventListener('mouseup', (e) => send(IN.up, e.button, ...pos(e), e.timeStamp));
+  // Keys and buttons the game has seen go down and not yet up. When the page loses focus (a screenshot shortcut,
+  // Cmd+Tab, a click outside the window) their release goes elsewhere, so the game is told they went up.
+  const heldKeys = new Set(), heldButtons = new Set();
+  let lastPos = [0, 0];
+  function releaseHeld() {
+    for (const button of heldButtons) send(IN.up, button, ...lastPos);
+    for (const key of heldKeys) send(IN.keyup, key);
+    heldButtons.clear();
+    heldKeys.clear();
+  }
+  addEventListener('blur', releaseHeld);
+  canvas.addEventListener('blur', releaseHeld);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) releaseHeld(); });
+  canvas.addEventListener('mousedown', (e) => {
+    canvas.focus();
+    lastPos = pos(e);
+    heldButtons.add(e.button);
+    send(IN.down, e.button, ...lastPos, e.timeStamp);
+    e.preventDefault();
+  });
+  canvas.addEventListener('mouseup', (e) => {
+    lastPos = pos(e);
+    heldButtons.delete(e.button);
+    send(IN.up, e.button, ...lastPos, e.timeStamp);
+  });
   canvas.addEventListener('wheel', (e) => { send(IN.wheel, e.deltaY < 0 ? 120 : -120, ...pos(e)); e.preventDefault(); }, { passive: false });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   const charKeys = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27 };
@@ -624,6 +647,7 @@
     // F9 is not a game key: it asks the renderer to log every draw of the next frame.
     if (e.key === 'F9') { send(IN.dumpFrame, 0); e.preventDefault(); return; }
     const press = () => {
+      heldKeys.add(e.keyCode);
       send(IN.keydown, e.keyCode);
       const ch = keyChar(e);
       if (ch !== undefined) send(IN.char, ch);
@@ -636,7 +660,7 @@
     press();
     e.preventDefault();
   });
-  canvas.addEventListener('keyup', (e) => { send(IN.keyup, e.keyCode); e.preventDefault(); });
+  canvas.addEventListener('keyup', (e) => { heldKeys.delete(e.keyCode); send(IN.keyup, e.keyCode); e.preventDefault(); });
 
   const loginPanel = document.getElementById('login-panel');
   const game = document.getElementById('game');
