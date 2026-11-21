@@ -29,7 +29,7 @@
     <ProjectReference Include="../../recomp/dotnet/ClientLab.Recompiler/ClientLab.Recompiler.csproj" />
     <EmbeddedResource Include="../../recomp/port/*.c;../../recomp/port/*.h;../../recomp/port/*.inc" LogicalName="Source/recomp/port/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../recomp/runtime/*.c;../../recomp/runtime/*.h" LogicalName="Source/recomp/runtime/%(Filename)%(Extension)" />
-    <EmbeddedResource Include="../../recomp/web/index.html;../../recomp/web/worker.js;../../recomp/web/gl.js" LogicalName="Source/recomp/web/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../recomp/web/index.html;../../recomp/web/worker.js;../../recomp/web/gl.js;../../recomp/web/control.js" LogicalName="Source/recomp/web/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../symbols/**/*.txt" LogicalName="Source/symbols/%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>
