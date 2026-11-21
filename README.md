@@ -119,7 +119,11 @@ work never advances sign-in, and repeated challenges have a bounded retry count.
 The sign-in page offers Remember me: credentials use Windows Credential Manager,
 macOS Keychain, or a Linux Secret Service keyring (`secret-tool` from libsecret-tools).
 They are restored on startup; signing out or disabling Remember me removes the saved
-entry. Windows vault operations are tested; macOS/Linux vaults need platform validation.
+entry. Like the official Gameforge Client, which keeps its session token for about
+90 days, the desktop launcher also keeps the Gameforge session token and the last game
+account in the same vault, so a restart is signed in without the password, CAPTCHA or
+MFA. When Gameforge stops accepting the token, the sign-in form comes back.
+Windows vault operations are tested; macOS/Linux vaults need platform validation.
 
 To create a single executable, run PowerShell 7 **on the target operating system**:
 

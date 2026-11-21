@@ -9,12 +9,21 @@ namespace NosCore.ClientLab.Launcher.Services;
 
 public sealed record SavedCredentials(string Email, string Password);
 
-/// <summary>Stores credentials in the user's OS vault, never in launcher settings or release files.</summary>
-public sealed class CredentialStore(string dataDirectory)
-{
-    private readonly string target = "NosCore.ClientLab/" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(dataDirectory))))[..16];
+/// <summary>A Gameforge session token and the game account it last launched, kept like the official client keeps its
+/// sign-in so a restart does not ask for the password again.</summary>
+public sealed record SavedSession(string Token, string AccountId);
 
-    public async Task<SavedCredentials?> ReadAsync()
+/// <summary>Stores credentials in the user's OS vault, never in launcher settings or release files.</summary>
+public sealed class CredentialStore(string dataDirectory, string kind = "credentials")
+{
+    private readonly string target = "NosCore.ClientLab/" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(dataDirectory))))[..16]
+        + (kind == "credentials" ? "" : "/" + kind);
+
+    public Task<SavedCredentials?> ReadAsync() => ReadAsync<SavedCredentials>();
+
+    public Task SaveAsync(string email, string password) => SaveAsync(email, new SavedCredentials(email, password));
+
+    public async Task<T?> ReadAsync<T>() where T : class
     {
         string? value;
         if (OperatingSystem.IsWindows())
@@ -37,12 +46,12 @@ public sealed class CredentialStore(string dataDirectory)
         }
         else if (OperatingSystem.IsMacOS()) value = MacRead();
         else value = await SecretToolAsync(["lookup", "service", target]);
-        return string.IsNullOrWhiteSpace(value) ? null : JsonSerializer.Deserialize<SavedCredentials>(value);
+        return string.IsNullOrWhiteSpace(value) ? null : JsonSerializer.Deserialize<T>(value);
     }
 
-    public async Task SaveAsync(string email, string password)
+    public async Task SaveAsync<T>(string userName, T value)
     {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(new SavedCredentials(email, password));
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
         try
         {
             if (OperatingSystem.IsWindows())
@@ -51,7 +60,7 @@ public sealed class CredentialStore(string dataDirectory)
                 try
                 {
                     Marshal.Copy(bytes, 0, blob, bytes.Length);
-                    var credential = new Credential { Type = 1, TargetName = target, UserName = email, BlobSize = (uint)bytes.Length, Blob = blob, Persist = 2 };
+                    var credential = new Credential { Type = 1, TargetName = target, UserName = userName, BlobSize = (uint)bytes.Length, Blob = blob, Persist = 2 };
                     if (!CredWrite(ref credential, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
                 }
                 finally { Marshal.Copy(new byte[bytes.Length], 0, blob, bytes.Length); Marshal.FreeCoTaskMem(blob); }
@@ -102,7 +111,7 @@ public sealed class CredentialStore(string dataDirectory)
 
     private int MacFind(out uint length, out IntPtr data, out IntPtr item)
     {
-        var service = Encoding.UTF8.GetBytes(target); var account = Encoding.UTF8.GetBytes("credentials");
+        var service = Encoding.UTF8.GetBytes(target); var account = Encoding.UTF8.GetBytes(kind);
         return SecKeychainFindGenericPassword(IntPtr.Zero, (uint)service.Length, service, (uint)account.Length, account, out length, out data, out item);
     }
     private string? MacRead()
@@ -118,7 +127,7 @@ public sealed class CredentialStore(string dataDirectory)
         var status = MacFind(out _, out var data, out var item);
         if (status == -25300)
         {
-            var service = Encoding.UTF8.GetBytes(target); var account = Encoding.UTF8.GetBytes("credentials");
+            var service = Encoding.UTF8.GetBytes(target); var account = Encoding.UTF8.GetBytes(kind);
             MacCheck(SecKeychainAddGenericPassword(IntPtr.Zero, (uint)service.Length, service, (uint)account.Length, account, (uint)bytes.Length, bytes, IntPtr.Zero));
             return;
         }

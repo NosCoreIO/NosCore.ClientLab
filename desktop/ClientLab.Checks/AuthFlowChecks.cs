@@ -39,8 +39,29 @@ internal static class AuthFlowChecks
             try { await persistent.ChooseAccountAsync(Server.Account); throw new Exception("An expired Gameforge token launched."); }
             catch (GameforgeAuthentication.SessionExpiredException) { }
         Check(persistentServer.Codes == 2, "A code was requested with an expired Gameforge token.");
+
+        var keptIdentity = new Identity(); var keptServer = new Server(keptIdentity);
+        string kept;
+        using (var first = new GameforgeSignIn(new JsonObject(), keptIdentity, keptServer))
+        {
+            await first.SignInAsync("test@example.invalid", "mock-only");
+            kept = first.SessionToken!;
+        }
+        using (var restarted = new GameforgeSignIn(new JsonObject(), keptIdentity, keptServer))
+        {
+            await restarted.ResumeAsync(kept);
+            Check(restarted.Stage == SignInStage.ChooseAccount && keptServer.SignIns == 1, "A kept token did not restore the account list without signing in again.");
+            await restarted.ChooseAccountAsync(Server.Account);
+            await restarted.ChooseAccountAsync(Server.Account);
+            Check(keptServer.Codes == 2, "A restored sign-in could not launch more than once.");
+        }
+        keptServer.TokenRevoked = true;
+        using (var revoked = new GameforgeSignIn(new JsonObject(), keptIdentity, keptServer))
+            try { await revoked.ResumeAsync(kept); throw new Exception("A revoked Gameforge token was restored."); }
+            catch (GameforgeAuthentication.SessionExpiredException) { }
         Console.WriteLine("PASS: official identity provider is shared through sign-in and account-bound launch, failed verification stops code creation, and consumed sessions cannot be reused.");
         Console.WriteLine("PASS: trusted launcher sign-in survives issuing a code and performs fresh verification for each subsequent launch; a rejected token reports an expired sign-in.");
+        Console.WriteLine("PASS: a kept Gameforge token restores the sign-in after a restart without the password, and a revoked one asks to sign in again.");
     }
 
     private static void Check(bool condition, string error) { if (!condition) throw new Exception(error); }
@@ -58,8 +79,8 @@ internal static class AuthFlowChecks
     private sealed class Server(Identity identity) : HttpMessageHandler
     {
         public const string Account = "25222222-3333-4444-5555-666666666666";
-        public int Codes;
-        public bool RejectIdentity, TokenExpired;
+        public int Codes, SignIns;
+        public bool RejectIdentity, TokenExpired, TokenRevoked;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             JsonNode? body = request.Content is null ? null : JsonNode.Parse(await request.Content.ReadAsStringAsync(cancellationToken));
@@ -69,7 +90,8 @@ internal static class AuthFlowChecks
             var path = request.RequestUri!.AbsolutePath;
             if (path.EndsWith("/clientversioninfo.json")) return Json(200, "{\"version\":\"3.0.4.2238\"}");
             Check(request.Headers.GetValues("TNT-Installation-Id").Single() == identity.InstallationId, "Provider installation changed.");
-            if (path.EndsWith("/sessions")) return Json(201, "{\"token\":\"mock-token\"}");
+            if (path.EndsWith("/sessions")) { SignIns++; return Json(201, "{\"token\":\"mock-token\"}"); }
+            if (TokenRevoked) return Json(401, "{\"errorTypes\":[\"UNAUTHORIZED\"]}");
             Check(request.Headers.Authorization?.Parameter == "mock-token", "Session token changed.");
             if (path.EndsWith("/user/me")) return Json(200, "{}");
             if (path.EndsWith("/user/accounts")) return Json(200, "{\"account\":{\"id\":\"" + Account + "\",\"displayName\":\"EN_test\",\"guls\":{\"game\":\"nostale\"}}}");
