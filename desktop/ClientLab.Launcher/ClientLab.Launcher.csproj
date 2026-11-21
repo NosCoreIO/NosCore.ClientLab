@@ -27,6 +27,7 @@
     <EmbeddedResource Include="Assets/packet-logger.html" LogicalName="PacketLogger.html" />
     <EmbeddedResource Include="Assets/noscore.png" LogicalName="LauncherLogo.png" />
     <ProjectReference Include="../../recomp/dotnet/ClientLab.Recompiler/ClientLab.Recompiler.csproj" />
+    <ProjectReference Include="../ClientLab.Plugins/ClientLab.Plugins.csproj" />
     <EmbeddedResource Include="../../recomp/port/*.c;../../recomp/port/*.h;../../recomp/port/*.inc" LogicalName="Source/recomp/port/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../recomp/runtime/*.c;../../recomp/runtime/*.h" LogicalName="Source/recomp/runtime/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../recomp/web/index.html;../../recomp/web/worker.js;../../recomp/web/gl.js" LogicalName="Source/recomp/web/%(Filename)%(Extension)" />

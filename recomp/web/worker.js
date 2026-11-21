@@ -11,7 +11,72 @@ self.audioDone = new Int32Array(new SharedArrayBuffer(128 * 4));
 self.pasteBuf = new Int32Array(new SharedArrayBuffer(8 + 2 * 65536));
 // The page counts the frames it has shown here (one per display refresh at most); Present stays two frames ahead.
 self.vsync = new Int32Array(new SharedArrayBuffer(4));
-postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone, paste: self.pasteBuf, vsync: self.vsync });
+// Packet logger plugin requests (PORT_PLUGIN=1), relayed by the page from the launcher one at a time and answered by the
+// game thread between window messages (hle_plugin.c), where a called client function runs like the client's own input
+// handlers. Int32 [0] = request sequence, [1] = answered sequence, [2] = request length, [3] = answer length, then the
+// UTF-8 JSON bytes from offset 16. A read or write moves at most 1 MB, sent as hex.
+// <plugin-runtime>
+if (params.get('PORT_PLUGIN') === '1') {
+  const buffer = new SharedArrayBuffer(16 + (5 << 20)), head = new Int32Array(buffer, 0, 4), body = new Uint8Array(buffer, 16);
+  const encoder = new TextEncoder(), decoder = new TextDecoder();
+  const HEX = Array.from({ length: 256 }, (_, b) => b.toString(16).padStart(2, '0'));
+  const range = (address, length) => {
+    if (!Number.isSafeInteger(address) || !Number.isSafeInteger(length) || length < 0 || length > 1 << 20 ||
+        address < 0x10000 || address + length > HEAPU8.length) throw new Error('address out of range');
+  };
+  const servePlugin = (req) => {
+    switch (req.op) {
+      case 'read': {
+        range(req.address, req.length);
+        const out = new Array(req.length);
+        for (let i = 0; i < req.length; i++) out[i] = HEX[HEAPU8[req.address + i]];
+        return { hex: out.join('') };
+      }
+      case 'write': {
+        const hex = String(req.hex);
+        if (hex.length % 2 || /[^0-9a-f]/i.test(hex)) throw new Error('write data is not hex');
+        range(req.address, hex.length / 2);
+        for (let i = 0; i < hex.length / 2; i++) HEAPU8[req.address + i] = parseInt(hex.substr(2 * i, 2), 16);
+        return {};
+      }
+      case 'call': {
+        const stack = Array.isArray(req.stack) ? req.stack : [];
+        if (stack.length > 3) throw new Error('at most three stack arguments are supported');
+        return { eax: Module._plugin_call(req.address >>> 0, req.eax >>> 0, req.edx >>> 0, req.ecx >>> 0, stack.length,
+          stack[0] >>> 0, stack[1] >>> 0, stack[2] >>> 0) >>> 0 };
+      }
+      case 'packet': {
+        const bytes = encoder.encode(String(req.raw));
+        const text = Module._plugin_string(bytes.length) >>> 0;
+        if (!text) throw new Error('packet too long');
+        HEAPU8.set(bytes, text);
+        return { ok: Module._plugin_packet(req.kind | 0, text) === 1 };
+      }
+      default: throw new Error(`unknown plugin request ${req.op}`);
+    }
+  };
+  // A request being served is not served again from a message pump inside one of its client calls.
+  let serving = false;
+  self.pluginPoll = () => {
+    const seq = Atomics.load(head, 0);
+    if (serving || seq === Atomics.load(head, 1)) return;
+    let answer;
+    serving = true;
+    try { answer = { result: servePlugin(JSON.parse(decoder.decode(body.slice(0, head[2])))) }; }
+    catch (e) { answer = { error: String(e?.message || e) }; }
+    finally { serving = false; }
+    let bytes = encoder.encode(JSON.stringify(answer));
+    if (bytes.length > body.length) bytes = encoder.encode(JSON.stringify({ error: 'answer too large' }));
+    body.set(bytes);
+    head[3] = bytes.length;
+    Atomics.store(head, 1, seq);
+    Atomics.notify(head, 1);
+  };
+  self.pluginBuf = buffer;
+}
+// </plugin-runtime>
+postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone, paste: self.pasteBuf, vsync: self.vsync,
+  plugin: self.pluginBuf });
 
 // The page's renderer worker (gl.js) does the WebGL calls; its port arrives right after start, and the game waits
 // for it because this worker stops receiving messages once the game runs.

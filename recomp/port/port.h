@@ -51,11 +51,14 @@ void port_host_path(const char* guest, char* out, size_t n);
 void port_log(const char* fmt, ...);
 void port_capture_packet(uint32_t packet, int kind);
 void port_capture_login_packet(CPU* c);
+void port_capture_world_packet(CPU* c, int kind, uint32_t fn);
+void port_plugin_poll(CPU* c);
 void port_fatal(const char* fmt, ...);
 
 uint32_t guest_alloc(uint32_t size, uint32_t align);
 void guest_free(uint32_t p);
 uint32_t guest_call(CPU* c, uint32_t fn, int n, ...);
+uint32_t guest_call_register(CPU* c, uint32_t fn, uint32_t a, uint32_t d, uint32_t cx, int n, const uint32_t* stack);
 uint32_t guest_strdup(const char* s);
 
 int port_file_fd(uint32_t handle);

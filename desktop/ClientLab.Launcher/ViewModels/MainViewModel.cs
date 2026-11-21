@@ -78,6 +78,7 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private bool gameSpatialSound = true;
     [ObservableProperty] private bool gameFullScreen;
     [ObservableProperty] private bool packetLogger;
+    [ObservableProperty] private string packetPlugin = "";
     [ObservableProperty] private string gamePreferencesStatus = "Changes are saved automatically for the next game launch.";
     private bool loadingGameOptions;
     private Task gameOptionsSave = Task.CompletedTask;
@@ -266,6 +267,7 @@ public partial class MainViewModel : ObservableObject
                 PrivateServerHost = settings["private_server_host"]!.GetValue<string>();
                 PrivatePortRemap = settings["private_port_remap"]!.GetValue<string>();
                 PacketLogger = settings["packet_logger"]?.GetValue<string>() == "true";
+                PacketPlugin = settings["packet_plugin"]?.GetValue<string>() ?? "";
                 PythonPath = settings["python"]!.GetValue<string>(); GhidraPath = settings["ghidra"]!.GetValue<string>();
                 JavaPath = settings["java"]!.GetValue<string>(); EmccPath = settings["emcc"]!.GetValue<string>();
                 loadedSettings = true;
@@ -385,7 +387,7 @@ public partial class MainViewModel : ObservableObject
             ["import_dir"] = ImportDirectory, ["identity_file"] = IdentityFile,
             ["installation_id"] = InstallationId, ["provider"] = UseGameforge ? "gameforge" : "noscore",
             ["private_auth_url"] = PrivateAuthUrl, ["private_server_host"] = PrivateServerHost, ["private_port_remap"] = PrivatePortRemap,
-            ["packet_logger"] = PacketLogger ? "true" : "false",
+            ["packet_logger"] = PacketLogger ? "true" : "false", ["packet_plugin"] = PacketPlugin,
             ["python"] = PythonPath, ["ghidra"] = GhidraPath, ["java"] = JavaPath, ["emcc"] = EmccPath,
         });
         await FlushGamePreferencesAsync();

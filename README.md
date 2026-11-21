@@ -83,7 +83,8 @@ across desktop/browser launches and client updates. Existing settings are import
 the selected installation on first use. Settings includes Music, Sound effects,
 3D sound and Full screen controls; see [Game preferences](docs/GAME-SETTINGS.md).
 Settings also offers an opt-in packet logger window with timestamped, live-readable
-JSONL files; see [Packet logger](docs/PACKET-LOGGER.md).
+JSONL files, or a packet logger plugin of your choice in its place; see
+[Packet logger](docs/PACKET-LOGGER.md).
 Runtime compatibility revisions trigger a one-time rebuild when recompiler fixes require
 it, even if the official executable is unchanged. UI-only updates still reuse that build.
 Gameforge mode uses the latest official patch manifest and reuses matching files from

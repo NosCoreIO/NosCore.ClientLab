@@ -38,7 +38,7 @@ internal static class PacketCaptureChecks
         var ambiguous = new ExecutableImage(Convert.FromHexString("53568BF28BD8EB049053568BF28BD8EB04"));
         if (PacketHooks.Find(ambiguous).Count != 0) throw new Exception("An ambiguous packet hook was accepted.");
         var function = new FunctionDefinition(0x1001, "send", [new AddressRange(0x1001, 0x1009)]);
-        if (!new CEmitter(image, function).Generate().Contains("port_capture_packet(c->edx, 0);")) throw new Exception("The recompiler did not emit the packet hook.");
+        if (!new CEmitter(image, function).Generate().Contains("port_capture_world_packet(c, 0, 0x00001001u);")) throw new Exception("The recompiler did not emit the packet hook.");
         if (Environment.GetEnvironmentVariable("CLIENTLAB_TEST_EXE") is { Length: > 0 } executable)
         {
             var live = new ExecutableImage(executable);

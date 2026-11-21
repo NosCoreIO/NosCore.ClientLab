@@ -32,6 +32,8 @@ public sealed class GameHost : IAsyncDisposable
     private readonly Action<string>? log;
     private readonly GameSettingsStore? gameSettings;
     private readonly PacketCapture? packets;
+    private readonly GameBridge? bridge;
+    private readonly PacketPluginHost? plugin;
     private readonly string settingsImportDirectory;
     private CancellationTokenSource? loop;
 
@@ -65,6 +67,13 @@ public sealed class GameHost : IAsyncDisposable
         {
             packets = new PacketCapture(Path.GetDirectoryName(Path.GetDirectoryName(gameSettings.FilePath))!);
             log?.Invoke("Packet logger attached. Log: " + packets.FilePath);
+            if (settings["packet_plugin"]?.GetValue<string>() is { Length: > 0 } pluginPath)
+            {
+                bridge = new GameBridge(clientExe, packets.FilePath, log);
+                try { plugin = PacketPluginHost.Load(pluginPath, bridge, log); }
+                catch { packets.Dispose(); throw; }
+                log?.Invoke($"Packet plugin {plugin.Name} loaded from {Path.GetFullPath(pluginPath)}.");
+            }
         }
     }
 
@@ -146,7 +155,26 @@ public sealed class GameHost : IAsyncDisposable
                 await context.Request.InputStream.CopyToAsync(buffer);
                 if (buffer.Length > 524288) { Reply(context, 413); return; }
                 var packet = JsonNode.Parse(buffer.ToArray())!;
-                packets.Add(packet["kind"]!.GetValue<int>(), packet["raw"]!.GetValue<string>(), packet["timestamp"]!.GetValue<DateTimeOffset>());
+                var entry = packets.Add(packet["kind"]!.GetValue<int>(), packet["raw"]!.GetValue<string>(), packet["timestamp"]!.GetValue<DateTimeOffset>());
+                if (entry is not null) plugin?.Enqueue(entry);
+                Reply(context, 204); return;
+            }
+            if (path == "/plugin/next" && context.Request.HttpMethod == "GET")
+            {
+                if (bridge is null) { Reply(context, 404); return; }
+                var request = await bridge.NextAsync(TimeSpan.FromSeconds(20), loop?.Token ?? default);
+                if (request is null) Reply(context, 204);
+                else ReplyJson(context, 200, request);
+                return;
+            }
+            if (path == "/plugin/answer" && context.Request.HttpMethod == "POST")
+            {
+                if (bridge is null) { Reply(context, 404); return; }
+                if (context.Request.ContentLength64 is < 0 or > 4 << 20) { Reply(context, 400); return; }
+                using var buffer = new MemoryStream();
+                await context.Request.InputStream.CopyToAsync(buffer);
+                if (buffer.Length > 4 << 20) { Reply(context, 413); return; }
+                bridge.Answer(JsonNode.Parse(buffer.ToArray())!.AsObject());
                 Reply(context, 204); return;
             }
             if (path.StartsWith("/game-settings/", StringComparison.Ordinal))
@@ -431,6 +459,7 @@ public sealed class GameHost : IAsyncDisposable
         listener.Close();
         await relay.DisposeAsync();
         auth?.Dispose();
+        if (plugin is not null) await plugin.DisposeAsync();
         packets?.Dispose();
         loop?.Dispose();
     }

@@ -141,7 +141,7 @@ public partial class MainWindow : Window
                 }, coordinator?.LastGameResolution(), (width, height) => coordinator?.RememberGameResolution(width, height)) {
                     Icon = Icon, WindowState = options.FullScreen ? WindowState.FullScreen : WindowState.Normal };
                 gameWindow.Show();
-              if (model.PacketLogger)
+              if (model.PacketLogger && string.IsNullOrWhiteSpace(model.PacketPlugin))
               {
                   packetWindow?.Close();
                   var packetBrowser = new AvaloniaCefBrowser { Address = new Uri(new Uri(url), "/packet-log").AbsoluteUri };
@@ -170,4 +170,16 @@ public partial class MainWindow : Window
         });
         if (result.Count > 0) model.IdentityFile = result[0].TryGetLocalPath() ?? "";
     }
+
+    private async void BrowsePacketPlugin(object? sender, RoutedEventArgs e)
+    {
+        var result = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Choose a packet logger plugin", AllowMultiple = false,
+            FileTypeFilter = [new FilePickerFileType("Packet logger plugin") { Patterns = ["*.dll"] }]
+        });
+        if (result.Count > 0) model.PacketPlugin = result[0].TryGetLocalPath() ?? "";
+    }
+
+    private void ClearPacketPlugin(object? sender, RoutedEventArgs e) => model.PacketPlugin = "";
 }

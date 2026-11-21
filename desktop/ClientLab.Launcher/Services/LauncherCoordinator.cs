@@ -42,6 +42,7 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         settings["private_server_host"] ??= "";
         settings["private_port_remap"] ??= "";
         settings["packet_logger"] ??= "false";
+        settings["packet_plugin"] ??= "";
         if (Setting("import_dir").Length == 0 && DetectInstall() is { Length: > 0 } detected) settings["import_dir"] = detected;
         state = new JsonObject { ["busy"] = false, ["stage"] = "idle", ["progress"] = 0d,
             ["message"] = "Make yourself at home.", ["logs"] = new JsonArray(), ["running"] = false,
@@ -503,6 +504,7 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         }
         else GameUrl = game.Url + (Setting("provider") == "gameforge" ? "?login=gameforge" : "");
         if (Setting("packet_logger") == "true") GameUrl += (GameUrl.Contains('?') ? "&" : "?") + "PORT_PACKET_LOG=1";
+        if (Setting("packet_logger") == "true" && Setting("packet_plugin").Length > 0) GameUrl += "&PORT_PLUGIN=1";
         lock (gate) state["running"] = true;
         return GameUrl;
     }

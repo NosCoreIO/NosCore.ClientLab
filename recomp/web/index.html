@@ -185,6 +185,41 @@
     } else if (f.shown) f.repeated++;
     requestAnimationFrame(showFrame);
   }
+  // Packet logger plugin (PORT_PLUGIN=1): fetch the launcher's requests for the game thread (worker.js, hle_plugin.c)
+  // and post the answers back, one at a time.
+  // <plugin-relay>
+  async function pluginRelay(buffer) {
+    const head = new Int32Array(buffer, 0, 4), body = new Uint8Array(buffer, 16);
+    const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const answered = () => { const seen = Atomics.load(head, 1); return Atomics.waitAsync ? Atomics.waitAsync(head, 1, seen, 1000).value : pause(5); };
+    for (;;) {
+      let request;
+      try {
+        const response = await fetch('/plugin/next');
+        if (response.status === 204) continue;
+        if (!response.ok) { await pause(1000); continue; }
+        request = await response.json();
+      } catch { await pause(1000); continue; }
+      let answer;
+      try {
+        const bytes = new TextEncoder().encode(JSON.stringify(request));
+        if (bytes.length > body.length) throw new Error('request too large');
+        // A request the game thread did not answer in time still owns the buffer.
+        while (Atomics.load(head, 1) !== Atomics.load(head, 0)) await answered();
+        body.set(bytes);
+        head[2] = bytes.length;
+        const seq = (Atomics.load(head, 0) + 1) | 0;
+        Atomics.store(head, 0, seq);
+        for (const started = performance.now(); Atomics.load(head, 1) !== seq;) {
+          if (performance.now() - started > 25000) throw new Error('the game thread did not answer');
+          await answered();
+        }
+        answer = JSON.parse(new TextDecoder().decode(body.slice(0, head[3])));
+      } catch (e) { answer = { error: String(e?.message || e) }; }
+      await fetch('/plugin/answer', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id: request.id, ...answer })}).catch(() => { });
+    }
+  }
+  // </plugin-relay>
   function handleWorkerMessage(e) {
     const m = e.data;
     if (m.type === 'frame') {
@@ -217,6 +252,7 @@
       pasteBuf = m.paste;
       shownCount = m.vsync;
       requestAnimationFrame(showFrame);
+      if (m.plugin) pluginRelay(m.plugin);
     } else if (m.type === 'cursor') {
       if (!m.visible) canvas.style.cursor = 'none';
       else if (!m.rgba) canvas.style.cursor = 'default';

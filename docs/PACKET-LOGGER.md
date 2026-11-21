@@ -44,7 +44,51 @@ Signature matches must be unique, and the login tokenizer must immediately follo
 the documented null check. If a patch changes these, the launcher reports the
 unsupported hooks instead of attaching to arbitrary code.
 
-Checks: `dotnet run --project desktop/ClientLab.Checks -- --packet-logger` and
+## Plugins
+
+A packet logger plugin replaces the built-in window. In **Settings → Developer tools**,
+keep **Open packet logger when the game starts** enabled, choose the plugin's `.dll`
+under **Packet logger plugin**, and save. Use **Use built-in** (desktop) or clear the
+field (browser mode) to return to the built-in window. Packets are still written to the
+JSONL log.
+
+A plugin is a .NET 10 class library that references `NosCore.ClientLab.Plugins.dll`
+(shipped next to `ClientLab.exe`; reference it with `<Private>false</Private>`) and has
+one public class implementing `IPacketPlugin` with a parameterless constructor.
+ClientLab loads it into the launcher process, in its own load context, with dependencies
+resolved from the plugin's folder. Nothing is injected into the game. The plugin runs
+with your permissions, so only choose plugins you trust.
+
+```csharp
+public sealed class MyLogger : IPacketPlugin
+{
+    private IGameSession? game;
+    public Task StartAsync(IGameSession game, CancellationToken token) { this.game = game; return Task.CompletedTask; }
+    public void OnPacket(Packet packet) => Console.WriteLine($"{packet.Connection} {packet.Direction} {packet.Raw}");
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+```
+
+`OnPacket` receives every captured packet in order on one background thread. `IGameSession`
+also lets a plugin:
+
+- find a unique byte pattern in the client executable's code (`FindCode`, `??` for any byte);
+- read and write guest memory at the client's own addresses (up to 1 MB per request);
+- call a client function with Delphi's register convention (`CallAsync`: EAX, EDX, ECX
+  and up to three stack arguments);
+- hand a world packet to the client's own send function or receive handler
+  (`SendPacketAsync`, `ReceivePacketAsync`). These need the client to have sent or received a
+  world packet first, because the function's object is taken from that call. Login packets
+  cannot be sent this way.
+
+Memory, call and packet requests travel from the launcher through the game page to the game
+thread. They run between window messages, the same place the client's own input handlers run,
+and time out after 30 seconds. The client's code was compiled ahead of time, so writing over
+code bytes does not change what runs. Patch data instead, or call functions.
+`StartAsync` runs before the game page exists: do not wait for game requests there.
+
+Checks: `dotnet run --project desktop/ClientLab.Checks -- --packet-logger` (including
+plugin loading and the request relay), `node desktop/ClientLab.Checks/plugin-runtime.mjs` and
 `node desktop/ClientLab.Checks/game-options-ui.mjs`. Set `CLIENTLAB_TEST_EXE` to
 a local client executable to verify all three signatures for that exact build.
 `node desktop/ClientLab.Checks/packet-runtime.mjs` checks the actual embedded

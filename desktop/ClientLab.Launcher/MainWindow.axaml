@@ -175,6 +175,9 @@
               <TextBlock Text="Developer tools" FontSize="15" FontWeight="SemiBold" />
               <CheckBox Content="Open packet logger when the game starts" IsChecked="{Binding PacketLogger}" />
               <TextBlock Text="Cleartext packets are saved to a timestamped JSONL file in the data folder's packet-logs directory. Logs can include account and chat data. Choose Save settings to apply." Classes="muted" TextWrapping="Wrap" FontSize="12" />
+              <TextBlock Text="Packet logger plugin (optional)" Classes="muted" />
+              <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="10"><TextBox Text="{Binding PacketPlugin}" Watermark="Built-in packet window" /><Button Grid.Column="1" Content="Browse…" Click="BrowsePacketPlugin" /><Button Grid.Column="2" Content="Use built-in" Click="ClearPacketPlugin" /></Grid>
+              <TextBlock Text="A plugin is a .NET assembly implementing NosCore.ClientLab.Plugins.IPacketPlugin. It replaces the built-in window, receives every captured packet and can read game memory, call client functions and send packets. It runs inside ClientLab with your permissions: only choose plugins you trust." Classes="muted" TextWrapping="Wrap" FontSize="12" />
             </StackPanel></Border>
             <Button Classes="primary" Content="Save settings" Command="{Binding SaveSettingsCommand}" IsEnabled="{Binding CanSaveSettings}" HorizontalAlignment="Left" />
           </StackPanel>

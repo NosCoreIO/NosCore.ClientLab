@@ -24,16 +24,17 @@ public sealed class PacketCapture : IDisposable
         writer.WriteLine(JsonSerializer.Serialize(new { type = "session", started, format = "ClientLab cleartext packets", hookSource = "NosCore.DeveloperTools" }));
     }
 
-    public void Add(int kind, string raw, DateTimeOffset timestamp)
+    public Entry? Add(int kind, string raw, DateTimeOffset timestamp)
     {
         if (kind is < 0 or > 2 || raw.Length > 65536) throw new InvalidDataException("Invalid packet capture event.");
         lock (gate)
         {
-            if (disposed) return;
+            if (disposed) return null;
             var entry = new Entry(++sequence, timestamp, kind == 2 ? "Login" : "World", kind == 0 ? "Send" : "Receive", raw);
             writer.WriteLine(JsonSerializer.Serialize(entry));
             entries.Enqueue(entry);
             while (entries.Count > 10000) entries.Dequeue();
+            return entry;
         }
     }
 

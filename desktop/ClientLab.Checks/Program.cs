@@ -23,6 +23,7 @@ if (args is ["--packet-logger"])
 {
     PacketCaptureChecks.Run();
     await PacketCaptureChecks.HostAsync();
+    await PacketPluginChecks.RunAsync();
     return;
 }
 
