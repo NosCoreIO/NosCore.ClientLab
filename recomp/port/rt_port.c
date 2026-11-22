@@ -22,12 +22,16 @@ void port_set_api_timing(int on) { api_timing = on; }
 void port_capture_packet(uint32_t packet, int kind) {
 #ifdef __EMSCRIPTEN__
     EM_ASM({
-        if (ENV.PORT_PACKET_LOG !== '1') return;
         const ptr = $0 >>> 0;
         if (ptr < 4 || ptr >= HEAPU8.length) return;
         const length = HEAPU32[(ptr - 4) >>> 2] >>> 0;
         if (!length || length > 65536 || ptr + length > HEAPU8.length) return;
-        postMessage({type:'packet', kind:$1, raw:new TextDecoder().decode(HEAPU8.subarray(ptr,ptr+length)), timestamp:new Date().toISOString()});
+        const raw = new TextDecoder().decode(HEAPU8.subarray(ptr, ptr + length));
+        /* The client quits without a message on some login refusals (a banned account): the page says why. */
+        const refused = /^failc ([0-9]+)/.exec(raw);
+        if (refused) postMessage({type:'login-refused', code:+refused[1]});
+        if (ENV.PORT_PACKET_LOG !== '1') return;
+        postMessage({type:'packet', kind:$1, raw:raw, timestamp:new Date().toISOString()});
     }, packet, kind);
 #else
     (void)packet; (void)kind;
