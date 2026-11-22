@@ -99,14 +99,22 @@ internal static class BrowserIdentityChecks
             Console.WriteLine("PASS: official device identifiers survive changing loopback ports, updated script state is retained, and unrelated browser storage is excluded.");
 
             // A saved state file bound to a collector-minted id must yield to the official client's registered id;
-            // when the ids already match, the saved file's live vector rotation is kept.
-            JsonObject Official() => new() { ["x-game"] = "existing-device", ["x-vec"] = "registered-vector 999" };
-            using (var healed = new GameforgeBrowserIdentity(installation, root, imported, Official))
-            using (var healPage = new HttpClient())
+            // when the ids already match, whichever vector was rotated last wins.
+            JsonObject OlderOfficial() => new() { ["x-game"] = "existing-device", ["x-vec"] = "older-official-vector 100" };
+            using (var kept = new GameforgeBrowserIdentity(installation, root, imported, OlderOfficial))
+            using (var keptPage = new HttpClient())
             {
-                var html = await healPage.GetStringAsync(healed.Url);
-                if (!html.Contains("updated-vector 456")) throw new Exception("A saved id matching the official client should keep the saved vector rotation.");
+                var html = await keptPage.GetStringAsync(kept.Url);
+                if (!html.Contains("updated-vector 456")) throw new Exception("A saved vector rotated after the official client's should be kept.");
             }
+            JsonObject NewerOfficial() => new() { ["x-game"] = "existing-device", ["x-vec"] = "newer-official-vector 999999" };
+            using (var refreshed = new GameforgeBrowserIdentity(installation, root, imported, NewerOfficial))
+            using (var refreshedPage = new HttpClient())
+            {
+                var html = await refreshedPage.GetStringAsync(refreshed.Url);
+                if (!html.Contains("newer-official-vector 999999")) throw new Exception("A newer official vector rotation should replace an older saved one.");
+            }
+            JsonObject Official() => new() { ["x-game"] = "existing-device", ["x-vec"] = "registered-vector 999" };
             File.WriteAllText(Path.Combine(root, "gameforge-browser-state-" + installation + ".json"),
                 new JsonObject { ["x-game"] = "minted-stale-id", ["x-vec"] = "minted-vector 111" }.ToJsonString());
             using (var healed = new GameforgeBrowserIdentity(installation, root, imported, Official))

@@ -219,11 +219,13 @@ public sealed class GameforgeBrowserIdentity : IGameforgeIdentity, IGameforgeVer
         var official = officialClientIdentity() is { } raw && FilterStorage(raw) is { Count: 2 } valid ? valid : null;
         // The official Gameforge client's device id is the one registered with the server. A saved state file
         // bound to a different id was minted by this collector and will be refused at code creation (HTTP 403),
-        // so the registered id wins; when they already agree, keep the saved file's live vector rotation.
+        // so the registered id wins; when they agree, use whichever vector was rotated last, so a launch from
+        // the official client is picked up instead of being shadowed by an older saved rotation.
         if (stored is not null)
         {
-            if (official is not null && stored["x-game"]?.GetValue<string>() != official["x-game"]?.GetValue<string>()) return official;
-            return stored;
+            if (official is null) return stored;
+            if (stored["x-game"]?.GetValue<string>() != official["x-game"]?.GetValue<string>()) return official;
+            return VectorStamp(official) > VectorStamp(stored) ? official : stored;
         }
         if (!string.IsNullOrEmpty(importedIdentity))
         {
@@ -236,6 +238,10 @@ public sealed class GameforgeBrowserIdentity : IGameforgeIdentity, IGameforgeVer
         if (official is not null) return official;
         return new JsonObject();
     }
+
+    // x-vec ends in " <unix-ms>" of its last rotation.
+    private static long VectorStamp(JsonObject storage) =>
+        storage["x-vec"]?.GetValue<string>() is { } vector && vector.LastIndexOf(' ') is var space and >= 0 && long.TryParse(vector[(space + 1)..], out var stamp) ? stamp : -1;
 
     public void Dispose()
     {
