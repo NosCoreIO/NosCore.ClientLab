@@ -33,9 +33,13 @@ public sealed class GameforgeAuthentication : IDisposable
         else if (identityFile.Length > 0) installation = new GameforgeIdentity(identityFile, installation).InstallationId;
         if (installation.Length == 0 && OperatingSystem.IsWindows())
         {
+            // The 32-bit official client runs unelevated, so its writes to the machine key are virtualized
+            // into the user's VirtualStore and its reads prefer that copy; a 64-bit process sees neither
+            // redirect, so read the virtualized value first to send the id Gameforge registered.
+            using var virtualized = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Classes\VirtualStore\MACHINE\SOFTWARE\WOW6432Node\Gameforge4d\GameforgeClient\MainApp");
             using var machine = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Gameforge4d\GameforgeClient\MainApp");
             using var user = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Gameforge4d\GameforgeClient\MainApp");
-            installation = machine?.GetValue("InstallationId") as string ?? user?.GetValue("InstallationId") as string ?? "";
+            installation = virtualized?.GetValue("InstallationId") as string ?? machine?.GetValue("InstallationId") as string ?? user?.GetValue("InstallationId") as string ?? "";
         }
         if (!Guid.TryParse(installation, out _)) throw new InvalidOperationException("Import a Gameforge identity in Settings, or provide a registered installation ID.");
     }
