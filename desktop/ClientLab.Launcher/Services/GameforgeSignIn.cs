@@ -73,7 +73,12 @@ public sealed class GameforgeSignIn : IDisposable
             };
             // Gameforge's response body is the only clue to why a request was refused; keep it visible.
             var detail = error.Body?.ToJsonString() is { Length: > 2 } body ? " " + body[..Math.Min(400, body.Length)] : "";
-            throw new InvalidOperationException($"{message} (HTTP {error.Status}).{detail}", error);
+            var request = error.RequestId is { Length: > 0 } id ? $" Request {id}." : "";
+            // Gameforge refuses launch codes to an account that has never been started from its own client.
+            var hint = ((error.Body as JsonObject)?["error"] as JsonObject)?["message"]?.ToString() == "Not allowed to create code"
+                ? " Launch NosTale once from the official Gameforge Client with this account, then try again."
+                : "";
+            throw new InvalidOperationException($"{message} (HTTP {error.Status}).{detail}{request}{hint}", error);
         }
     }
 
