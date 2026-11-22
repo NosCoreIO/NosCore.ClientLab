@@ -64,6 +64,101 @@ internal static class BrowserIdentityChecks
         if (GameforgeOfficialClientIdentity.Parse(Array.Empty<byte[]>()) is not null)
             throw new Exception("Empty storage must not yield an identity.");
         Console.WriteLine("PASS: official Gameforge client device identity is recovered from Local Storage bytes, the latest vector rotation wins, and incomplete storage yields nothing.");
+        CheckOfficialClientDatabase();
+    }
+
+    // Builds a Local Storage LevelDB the way Chromium leaves it after compaction: an old device id in the
+    // write-ahead log, the current one inside a Snappy-compressed table whose key text is split by back-references.
+    private static void CheckOfficialClientDatabase()
+    {
+        const string origin = "_https://client-frontend.gameforge.com\0\u0001";
+        static byte[] L(string text) => System.Text.Encoding.Latin1.GetBytes(text);
+        var log = Log(10, (origin + "x-game", "\u0001olddeviceidentifier00000"), (origin + "x-vec", "\u0001old-vector 100"));
+        var table = Table(new[] { (origin + "x-game", 50UL, "\u0001currentdeviceidentifier00"), (origin + "x-vec", 51UL, "\u0001current-vector 200") });
+        if (System.Text.Encoding.Latin1.GetString(table).Contains("x-game")) throw new Exception("The table fixture must hide its keys behind Snappy back-references.");
+
+        var parsed = GameforgeOfficialClientIdentity.ParseDatabase(new[] { ("000013.log", log), ("000011.ldb", table) })
+            ?? throw new Exception("The device identity inside a compressed table was not read.");
+        if (parsed["x-game"]!.GetValue<string>() != "currentdeviceidentifier00" || parsed["x-vec"]!.GetValue<string>() != "current-vector 200")
+            throw new Exception("An older log record won over a newer compacted table record.");
+
+        var newerLog = Log(90, (origin + "x-vec", "\u0001logged-vector 300"));
+        parsed = GameforgeOfficialClientIdentity.ParseDatabase(new[] { ("000013.log", newerLog), ("000011.ldb", table) })!;
+        if (parsed["x-game"]!.GetValue<string>() != "currentdeviceidentifier00" || parsed["x-vec"]!.GetValue<string>() != "logged-vector 300")
+            throw new Exception("A newer write-ahead log record did not win over the table.");
+        Console.WriteLine("PASS: official device identity is read as LevelDB records, through Snappy-compressed tables, with the highest sequence winning.");
+
+        static byte[] Log(ulong sequence, params (string Key, string Value)[] puts)
+        {
+            var batch = new List<byte>();
+            batch.AddRange(BitConverter.GetBytes(sequence)); batch.AddRange(BitConverter.GetBytes((uint)puts.Length));
+            foreach (var (key, value) in puts) { batch.Add(1); Slice(batch, L(key)); Slice(batch, L(value)); }
+            var record = new List<byte>(); record.AddRange(new byte[4]); record.AddRange(BitConverter.GetBytes((ushort)batch.Count)); record.Add(1); record.AddRange(batch);
+            return record.ToArray();
+        }
+
+        static byte[] Table((string Key, ulong Sequence, string Value)[] entries)
+        {
+            var file = new List<byte>();
+            var data = Block(entries.Select(entry => (L(entry.Key).Concat(BitConverter.GetBytes(entry.Sequence << 8 | 1)).ToArray(), L(entry.Value))));
+            var dataHandle = AppendBlock(file, SnappyCompress(data), compressed: true);
+            var index = Block(new[] { (L(origin + "x-vecÿ"), dataHandle) });
+            var indexHandle = AppendBlock(file, index, compressed: false);
+            var metaHandle = AppendBlock(file, Block(Array.Empty<(byte[], byte[])>()), compressed: false);
+            var footer = new List<byte>(); footer.AddRange(metaHandle); footer.AddRange(indexHandle);
+            footer.AddRange(new byte[40 - footer.Count]); footer.AddRange(BitConverter.GetBytes(0xdb4775248b80fb57UL));
+            file.AddRange(footer);
+            return file.ToArray();
+        }
+
+        static byte[] AppendBlock(List<byte> file, byte[] contents, bool compressed)
+        {
+            var handle = new List<byte>(); Varint(handle, (ulong)file.Count); Varint(handle, (ulong)contents.Length);
+            file.AddRange(contents); file.Add(compressed ? (byte)1 : (byte)0); file.AddRange(new byte[4]);
+            return handle.ToArray();
+        }
+
+        static byte[] Block(IEnumerable<(byte[] Key, byte[] Value)> entries)
+        {
+            var block = new List<byte>();
+            foreach (var (key, value) in entries) { Varint(block, 0); Varint(block, (ulong)key.Length); Varint(block, (ulong)value.Length); block.AddRange(key); block.AddRange(value); }
+            block.AddRange(BitConverter.GetBytes(0u)); block.AddRange(BitConverter.GetBytes(1u));
+            return block.ToArray();
+        }
+
+        // Greedy Snappy encoder: 2-byte-offset copies for repeats of 4+ bytes, literals otherwise.
+        static byte[] SnappyCompress(byte[] input)
+        {
+            var output = new List<byte>(); Varint(output, (ulong)input.Length);
+            var literalStart = 0; var position = 0;
+            void Flush(int end)
+            {
+                for (var start = literalStart; start < end; start += 60)
+                {
+                    var count = Math.Min(60, end - start);
+                    output.Add((byte)((count - 1) << 2)); output.AddRange(input.AsSpan(start, count).ToArray());
+                }
+            }
+            while (position < input.Length)
+            {
+                int bestLength = 0, bestOffset = 0;
+                for (var candidate = Math.Max(0, position - 65535); candidate < position; candidate++)
+                {
+                    var length = 0;
+                    while (length < 64 && position + length < input.Length && input[candidate + length] == input[position + length]) length++;
+                    if (length > bestLength) { bestLength = length; bestOffset = position - candidate; }
+                }
+                if (bestLength < 4) { position++; continue; }
+                Flush(position);
+                output.Add((byte)(((bestLength - 1) << 2) | 2)); output.AddRange(BitConverter.GetBytes((ushort)bestOffset));
+                position += bestLength; literalStart = position;
+            }
+            Flush(input.Length);
+            return output.ToArray();
+        }
+
+        static void Slice(List<byte> target, byte[] value) { Varint(target, (ulong)value.Length); target.AddRange(value); }
+        static void Varint(List<byte> target, ulong value) { while (value >= 0x80) { target.Add((byte)(value | 0x80)); value >>= 7; } target.Add((byte)value); }
     }
 
     private static async Task CheckPersistenceAsync()

@@ -10,11 +10,10 @@ namespace NosCore.ClientLab.Launcher.Services;
 /// Gameforge has never seen. An unregistered device identifier passes sign-in and iovation but makes
 /// <c>auth/thin/codes</c> fail with HTTP 403 "Not allowed to create code".
 ///
-/// The values live in the official client's Chromium Local Storage (a LevelDB directory). There is no
-/// public API for them, so this performs a tolerant byte scan of the LevelDB <c>.log</c>/<c>.ldb</c>
-/// files rather than a full LevelDB parse: the two keys are short ASCII strings, and <c>x-vec</c> ends
-/// in the Unix-millisecond timestamp it was last rotated at, which orders candidates by recency.
-/// Any failure returns null and the caller falls back to an imported identity file or the browser collector.
+/// The values live in the official client's Chromium Local Storage (a LevelDB directory). The records are
+/// read with <see cref="LevelDbReader"/> so the newest value wins even inside Snappy-compressed tables (a raw
+/// byte scan misses those and returns an older, no longer registered device id); a tolerant byte scan remains
+/// as a fallback. Any failure returns null and the caller falls back to an imported identity file or the browser collector.
 /// </summary>
 public static class GameforgeOfficialClientIdentity
 {
@@ -35,15 +34,40 @@ public static class GameforgeOfficialClientIdentity
         if (!Directory.Exists(clientRoot)) return null;
 
         // Each Chromium cache (webcache, webcache-c<version>, …) has its own Local Storage; the client
-        // rewrites the one for the version it is running, so prefer the most recently modified file.
-        var files = Directory.EnumerateDirectories(clientRoot, "leveldb", SearchOption.AllDirectories)
+        // rewrites the one for the version it is running, so prefer the most recently modified database.
+        var databases = Directory.EnumerateDirectories(clientRoot, "leveldb", SearchOption.AllDirectories)
             .Where(directory => directory.Replace('/', '\\').Contains(@"\Local Storage\", StringComparison.OrdinalIgnoreCase))
-            .SelectMany(directory => Directory.EnumerateFiles(directory).Where(file => file.EndsWith(".log", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".ldb", StringComparison.OrdinalIgnoreCase)))
-            .Select(file => new FileInfo(file))
-            .OrderByDescending(file => file.LastWriteTimeUtc)
-            .Select(file => ReadShared(file.FullName))
+            .Select(directory => Directory.EnumerateFiles(directory)
+                .Where(file => file.EndsWith(".log", StringComparison.OrdinalIgnoreCase) || file.EndsWith(".ldb", StringComparison.OrdinalIgnoreCase))
+                .Select(file => new FileInfo(file)).OrderByDescending(file => file.LastWriteTimeUtc).ToArray())
+            .Where(files => files.Length > 0)
+            .OrderByDescending(files => files[0].LastWriteTimeUtc)
             .ToArray();
-        return Parse(files);
+        foreach (var files in databases)
+            if (ParseDatabase(files.Select(file => (file.Name, ReadShared(file.FullName)))) is { } identity) return identity;
+        // Fallback for storage the record reader cannot walk: a tolerant scan of the raw bytes.
+        return Parse(databases.SelectMany(files => files).OrderByDescending(file => file.LastWriteTimeUtc).Select(file => ReadShared(file.FullName)).ToArray());
+    }
+
+    /// <summary>
+    /// Reads <c>x-game</c>/<c>x-vec</c> from one Local Storage LevelDB database as records, so the newest value
+    /// wins by sequence number even when a compacted, Snappy-compressed table holds it. Returns null when either key is absent.
+    /// </summary>
+    public static JsonObject? ParseDatabase(IEnumerable<(string Name, byte[] Data)> files)
+    {
+        string? game = null, vector = null;
+        foreach (var (key, value) in LevelDbReader.ReadLatest(files))
+        {
+            // Chromium keys are "_<origin>\0<encoding byte><script key>"; values are "<encoding byte><text>".
+            if (!key.StartsWith("_https://", StringComparison.Ordinal) || !key.Contains("gameforge.com\0", StringComparison.Ordinal)) continue;
+            var name = key[(key.IndexOf('\0') + 1)..];
+            if (name.Length > 0 && name[0] is '\u0001' or '\u0000') name = name[1..];
+            if (name is not ("x-game" or "x-vec") || value.Length == 0) continue;
+            var text = value[0] == 0 ? Encoding.Unicode.GetString(value, 1, value.Length - 1) : Latin1.GetString(value, 1, value.Length - 1);
+            if (name == "x-game") game = text; else vector = text;
+        }
+        if (game is not { Length: > 0 and <= 4096 } || vector is not { Length: > 0 and <= 4096 }) return null;
+        return new JsonObject { ["x-game"] = game, ["x-vec"] = vector };
     }
 
     /// <summary>
