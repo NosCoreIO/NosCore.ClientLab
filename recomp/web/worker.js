@@ -36,6 +36,18 @@ if (params.get('PORT_PLUGIN') === '1') {
         for (let i = 0; i < req.length; i++) out[i] = HEX[HEAPU8[req.address + i]];
         return { hex: out.join('') };
       }
+      case 'readmany': {
+        const ranges = Array.isArray(req.ranges) ? req.ranges : [];
+        if (ranges.length > 256) throw new Error('at most 256 ranges');
+        let total = 0;
+        for (const [address, length] of ranges) { range(address, length); total += length; }
+        if (total > 1 << 20) throw new Error('address out of range');
+        return { hexes: ranges.map(([address, length]) => {
+          const out = new Array(length);
+          for (let i = 0; i < length; i++) out[i] = HEX[HEAPU8[address + i]];
+          return out.join('');
+        }) };
+      }
       case 'write': {
         const hex = String(req.hex);
         if (hex.length % 2 || /[^0-9a-f]/i.test(hex)) throw new Error('write data is not hex');

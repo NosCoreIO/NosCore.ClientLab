@@ -80,6 +80,20 @@ public sealed class GameBridge : IGameSession
         return Convert.FromHexString(result?["hex"]?.GetValue<string>() ?? throw new InvalidDataException("The game did not return memory."));
     }
 
+    public async Task<IReadOnlyList<byte[]>> ReadManyAsync(IReadOnlyList<(uint Address, int Length)> ranges, CancellationToken cancellationToken = default)
+    {
+        if (ranges.Count > 256) throw new ArgumentOutOfRangeException(nameof(ranges), "Read at most 256 ranges at a time.");
+        if (ranges.Any(range => range.Length < 0) || ranges.Sum(range => (long)range.Length) > 1 << 20)
+            throw new ArgumentOutOfRangeException(nameof(ranges), "Read at most 1 MB at a time.");
+        if (ranges.Count == 0) return [];
+        var list = new JsonArray();
+        foreach (var (address, length) in ranges) list.Add(new JsonArray(address, length));
+        var result = await RequestAsync(new JsonObject { ["op"] = "readmany", ["ranges"] = list }, cancellationToken);
+        var hexes = result?["hexes"]?.AsArray() ?? throw new InvalidDataException("The game did not return memory.");
+        if (hexes.Count != ranges.Count) throw new InvalidDataException("The game returned a different number of ranges.");
+        return [.. hexes.Select(hex => Convert.FromHexString(hex!.GetValue<string>()))];
+    }
+
     public async Task WriteAsync(uint address, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
         if (data.Length > 1 << 20) throw new ArgumentOutOfRangeException(nameof(data), "Write at most 1 MB at a time.");
@@ -99,6 +113,23 @@ public sealed class GameBridge : IGameSession
 
     public Task<bool> SendPacketAsync(string packet, CancellationToken cancellationToken = default) => PacketAsync(0, packet, cancellationToken);
     public Task<bool> ReceivePacketAsync(string packet, CancellationToken cancellationToken = default) => PacketAsync(1, packet, cancellationToken);
+
+    public async Task PostInputAsync(InputKind kind, int value = 0, int x = 0, int y = 0, CancellationToken cancellationToken = default)
+    {
+        var name = kind switch
+        {
+            InputKind.MouseMove => "move", InputKind.MouseDown => "down", InputKind.MouseUp => "up", InputKind.Wheel => "wheel",
+            InputKind.KeyDown => "keydown", InputKind.KeyUp => "keyup", InputKind.Char => "char",
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+        await RequestAsync(new JsonObject { ["op"] = "input", ["kind"] = name, ["value"] = value, ["x"] = x, ["y"] = y }, cancellationToken);
+    }
+
+    public async Task<(int Width, int Height)> GetScreenSizeAsync(CancellationToken cancellationToken = default)
+    {
+        var result = await RequestAsync(new JsonObject { ["op"] = "screen" }, cancellationToken);
+        return (result?["width"]?.GetValue<int>() ?? 0, result?["height"]?.GetValue<int>() ?? 0);
+    }
 
     private async Task<bool> PacketAsync(int kind, string packet, CancellationToken cancellationToken)
     {

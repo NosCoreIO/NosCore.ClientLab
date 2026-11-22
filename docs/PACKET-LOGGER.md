@@ -74,18 +74,23 @@ public sealed class MyLogger : IPacketPlugin
 also lets a plugin:
 
 - find a unique byte pattern in the client executable's code (`FindCode`, `??` for any byte);
-- read and write guest memory at the client's own addresses (up to 1 MB per request);
+- read and write guest memory at the client's own addresses (up to 1 MB per request), and
+  read up to 256 ranges in one request (`ReadManyAsync`);
 - call a client function with Delphi's register convention (`CallAsync`: EAX, EDX, ECX
   and up to three stack arguments);
 - hand a world packet to the client's own send function or receive handler
   (`SendPacketAsync`, `ReceivePacketAsync`). These need the client to have sent or received a
   world packet first, because the function's object is taken from that call. Login packets
   cannot be sent this way. The text is encoded as Windows-1252, like the client's own packets;
-  characters it lacks become `?`.
+  characters it lacks become `?`;
+- queue mouse and keyboard input as the player's own (`PostInputAsync`), at positions in the
+  game's pixels (`GetScreenSizeAsync`).
 
 Memory, call and packet requests travel from the launcher through the game page to the game
 thread. They run between window messages, the same place the client's own input handlers run,
-and time out after 30 seconds. The client's code was compiled ahead of time, so writing over
+and time out after 30 seconds. The game thread answers about once per frame, so a plugin that
+polls several values should read them together. Input and screen-size requests are answered by
+the page and do not wait for the game thread. The client's code was compiled ahead of time, so writing over
 code bytes does not change what runs. Patch data instead, or call functions.
 `StartAsync` runs before the game page exists: do not wait for game requests there.
 

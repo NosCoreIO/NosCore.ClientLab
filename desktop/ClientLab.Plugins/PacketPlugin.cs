@@ -66,6 +66,13 @@ public interface IGameSession
     /// <summary>Reads guest memory.</summary>
     Task<byte[]> ReadAsync(uint address, int length, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Reads several ranges of guest memory in one request, at one moment of the game (at most 256 ranges and
+    /// 1 MiB in total). Each request costs a trip to the game thread, so a plugin that polls several values per
+    /// tick should read them together.
+    /// </summary>
+    Task<IReadOnlyList<byte[]>> ReadManyAsync(IReadOnlyList<(uint Address, int Length)> ranges, CancellationToken cancellationToken = default);
+
     /// <summary>Writes guest memory.</summary>
     Task WriteAsync(uint address, ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
 
@@ -87,4 +94,35 @@ public interface IGameSession
     /// until the client has received a world packet.
     /// </summary>
     Task<bool> ReceivePacketAsync(string packet, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Queues a mouse or keyboard event for the game, as the game page does for the player's own input. Positions
+    /// are in the game's pixels (its render resolution, the client area a Windows client would see). The value is
+    /// the mouse button (0 left, 1 middle, 2 right), the wheel step (120 or -120), the virtual-key code, or the
+    /// character code, depending on the kind. Completes once the event is queued; the game handles it on its
+    /// next message pump.
+    /// </summary>
+    Task PostInputAsync(InputKind kind, int value = 0, int x = 0, int y = 0, CancellationToken cancellationToken = default);
+
+    /// <summary>The game's size in pixels (its render resolution): the space <see cref="PostInputAsync"/> positions are in.</summary>
+    Task<(int Width, int Height)> GetScreenSizeAsync(CancellationToken cancellationToken = default);
+}
+
+/// <summary>The kinds of input <see cref="IGameSession.PostInputAsync"/> can queue.</summary>
+public enum InputKind
+{
+    /// <summary>The mouse moved to (x, y).</summary>
+    MouseMove,
+    /// <summary>A mouse button went down at (x, y).</summary>
+    MouseDown,
+    /// <summary>A mouse button went up at (x, y).</summary>
+    MouseUp,
+    /// <summary>The wheel turned by the value (120 per notch away from the player) at (x, y).</summary>
+    Wheel,
+    /// <summary>A key went down (virtual-key code).</summary>
+    KeyDown,
+    /// <summary>A key went up (virtual-key code).</summary>
+    KeyUp,
+    /// <summary>A typed character (as TranslateMessage would post it).</summary>
+    Char,
 }

@@ -40,7 +40,14 @@ const requests = [
   {id: 7, op: 'write', address: 0x10000, hex: 'zz'},
   {id: 8, op: 'call', address: 1, stack: [1, 2, 3, 4]},
   {id: 9, op: 'nope'},
+  {id: 10, op: 'input', kind: 'down', value: 0, x: 640, y: 360},
+  {id: 11, op: 'input', kind: 'paste', value: 0, x: 0, y: 0},
+  {id: 12, op: 'input', kind: 'keydown', value: 1.5, x: 0, y: 0},
+  {id: 13, op: 'screen'},
+  {id: 14, op: 'readmany', ranges: [[0x10000, 2], [0x10002, 2], [0x10000, 0]]},
+  {id: 15, op: 'readmany', ranges: [[0x10000, 2], [0x2fffe, 4]]},
 ];
+const inputs = [];
 const answers = [];
 let finished;
 const done = new Promise((resolve) => { finished = resolve; });
@@ -58,7 +65,7 @@ const relay = vm.createContext({fetch, Atomics, Int32Array, Uint8Array, TextEnco
 vm.runInContext(page, relay);
 // The game thread polls between window messages.
 const poll = setInterval(() => game.self.pluginPoll(), 1);
-relay.pluginRelay(game.self.pluginBuf);
+relay.pluginRelay(game.self.pluginBuf, {input: (...event) => inputs.push(event), screen: () => ({width: 1920, height: 1080})});
 await Promise.race([done, new Promise((_, reject) => setTimeout(() => reject(new Error('the relay stalled')), 10000))]);
 clearInterval(poll);
 
@@ -77,5 +84,13 @@ assert.match(byId[7].error, /not hex/);
 assert.match(byId[8].error, /three stack arguments/);
 assert.match(byId[9].error, /unknown plugin request/);
 assert.equal(calls.length, 1);
-console.log('PASS: actual plugin runtime reads and writes bounded guest memory, calls client functions, hands packets over and relays answers and errors.');
+// Input goes to the page's own input sender, never through the game thread's request buffer.
+assert.deepEqual(inputs, [['down', 0, 640, 360]]);
+assert.deepEqual(byId[10], {id: 10, result: {}});
+assert.match(byId[11].error, /bad input/);
+assert.match(byId[12].error, /bad input/);
+assert.deepEqual(byId[13], {id: 13, result: {width: 1920, height: 1080}});
+assert.deepEqual(byId[14].result.hexes, ['0102', 'abff', '']);
+assert.match(byId[15].error, /out of range/);
+console.log('PASS: actual plugin runtime reads and writes bounded guest memory, calls client functions, hands packets over, queues input on the page and relays answers and errors.');
 process.exit(0);

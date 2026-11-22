@@ -26,7 +26,10 @@ public sealed class CheckPacketPlugin : IPacketPlugin
                 var bytes = await game.ReadAsync(0x20000000, 4);
                 await game.WriteAsync(0x20000000, new byte[] { 9, 8 });
                 var eax = await game.CallAsync(0x401000, 1, 2, 3, [4, 5]);
-                game.Log($"done {packet.Raw} sent={sent} read={Convert.ToHexString(bytes)} eax={eax:x}");
+                await game.PostInputAsync(InputKind.KeyDown, 0x20);
+                var many = await game.ReadManyAsync([(0x20000000, 1), (0x20000010, 2)]);
+                var screen = await game.GetScreenSizeAsync();
+                game.Log($"done {packet.Raw} sent={sent} read={Convert.ToHexString(bytes)} eax={eax:x} many={string.Join(",", many.Select(Convert.ToHexString))} screen={screen.Width}x{screen.Height}");
             }
             catch (Exception error) { game!.Log("failed " + error.Message); }
         });
@@ -87,10 +90,21 @@ internal static class PacketPluginChecks
                 call["stack"]!.AsArray().Count != 2)
                 throw new Exception("The plugin's call request was not relayed: " + call.ToJsonString());
             await AnswerAsync(http, call, new JsonObject { ["eax"] = 0xbeefu });
+            var input = await NextAsync(http);
+            if (input["op"]!.GetValue<string>() != "input" || input["kind"]!.GetValue<string>() != "keydown" || input["value"]!.GetValue<int>() != 0x20)
+                throw new Exception("The plugin's input request was not relayed: " + input.ToJsonString());
+            await AnswerAsync(http, input, new JsonObject());
+            var many = await NextAsync(http);
+            if (many["op"]!.GetValue<string>() != "readmany" || many["ranges"]!.ToJsonString() != "[[536870912,1],[536870928,2]]")
+                throw new Exception("The plugin's multi-range read was not relayed: " + many.ToJsonString());
+            await AnswerAsync(http, many, new JsonObject { ["hexes"] = new JsonArray("AA", "BBCC") });
+            var screen = await NextAsync(http);
+            if (screen["op"]!.GetValue<string>() != "screen") throw new Exception("The plugin's screen request was not relayed: " + screen.ToJsonString());
+            await AnswerAsync(http, screen, new JsonObject { ["width"] = 1920, ["height"] = 1080 });
 
             for (var wait = 0; wait < 100 && !logs.Any(line => line.Contains("done ") || line.Contains("failed ")); wait++) await Task.Delay(50);
             var result = logs.FirstOrDefault(line => line.Contains("done ") || line.Contains("failed "));
-            if (result is null || !result.Contains("done walk 10 20 sent=True read=01020304 eax=beef"))
+            if (result is null || !result.Contains("done walk 10 20 sent=True read=01020304 eax=beef many=AA,BBCC screen=1920x1080"))
                 throw new Exception("The plugin did not get the game's answers: " + (result ?? string.Join(" | ", logs)));
 
             http.DefaultRequestHeaders.Remove("Sec-Fetch-Site");

@@ -188,8 +188,11 @@
   // Packet logger plugin (PORT_PLUGIN=1): fetch the launcher's requests for the game thread (worker.js, hle_plugin.c)
   // and post the answers back, one at a time.
   // <plugin-relay>
-  async function pluginRelay(buffer) {
+  // Input and screen requests are answered here: input goes through the page's own input sender, so the input
+  // ring keeps a single writer, and the page knows the game's size.
+  async function pluginRelay(buffer, page) {
     const head = new Int32Array(buffer, 0, 4), body = new Uint8Array(buffer, 16);
+    const INPUT_KINDS = ['move', 'down', 'up', 'wheel', 'keydown', 'keyup', 'char'];
     const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const answered = () => { const seen = Atomics.load(head, 1); return Atomics.waitAsync ? Atomics.waitAsync(head, 1, seen, 1000).value : pause(5); };
     for (;;) {
@@ -201,6 +204,14 @@
         request = await response.json();
       } catch { await pause(1000); continue; }
       let answer;
+      if (request.op === 'input' || request.op === 'screen') {
+        // Answered like the game thread answers: { result } or { error }.
+        if (request.op === 'screen') answer = { result: page.screen() };
+        else answer = INPUT_KINDS.includes(request.kind) && [request.value, request.x, request.y].every(Number.isSafeInteger)
+          ? (page.input(request.kind, request.value, request.x, request.y), { result: {} }) : { error: 'bad input request' };
+        await fetch('/plugin/answer', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id: request.id, ...answer })}).catch(() => { });
+        continue;
+      }
       try {
         const bytes = new TextEncoder().encode(JSON.stringify(request));
         if (bytes.length > body.length) throw new Error('request too large');
@@ -252,7 +263,7 @@
       pasteBuf = m.paste;
       shownCount = m.vsync;
       requestAnimationFrame(showFrame);
-      if (m.plugin) pluginRelay(m.plugin);
+      if (m.plugin) pluginRelay(m.plugin, { input: (kind, value, x, y) => send(IN[kind], value, x, y), screen: () => ({ width: canvas.width, height: canvas.height }) });
     } else if (m.type === 'cursor') {
       if (!m.visible) canvas.style.cursor = 'none';
       else if (!m.rgba) canvas.style.cursor = 'default';
