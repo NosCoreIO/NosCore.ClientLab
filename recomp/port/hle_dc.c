@@ -171,10 +171,11 @@ static int brush_info(uint32_t h, int* style, uint32_t* color, uint32_t* hatch, 
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
-/* Text arrives as guest bytes (Windows-1252 for the A calls, UTF-16 for the W calls). */
+/* Text arrives as guest bytes (Windows-1252 for the A calls, UTF-16 for the W calls). Decoding 1252 rather than
+   Latin-1 keeps 0x80-0x9F (euro sign, curly quotes) from drawing as boxes; it is one character per byte either way. */
 EM_JS(void, js_text_measure, (const char* css, const void* text, int n, int wide, int* out), {
     const s = wide ? String.fromCharCode.apply(null, HEAPU16.subarray(text >> 1, (text >> 1) + n))
-                   : String.fromCharCode.apply(null, HEAPU8.subarray(text, text + n));
+                   : (self.__ansi || (self.__ansi = new TextDecoder('windows-1252'))).decode(HEAPU8.slice(text, text + n));
     const font = UTF8ToString(css);
     if (typeof OffscreenCanvas === 'undefined') {
         HEAP32[out >> 2] = 7 * n; HEAP32[(out >> 2) + 1] = 13; HEAP32[(out >> 2) + 2] = 3;
@@ -206,7 +207,7 @@ EM_JS(void, js_text_measure, (const char* css, const void* text, int n, int wide
 });
 EM_JS(void, js_text_prefixes, (const char* css, const void* text, int n, int wide, int* out), {
     const s = wide ? String.fromCharCode.apply(null, HEAPU16.subarray(text >> 1, (text >> 1) + n))
-                   : String.fromCharCode.apply(null, HEAPU8.subarray(text, text + n));
+                   : (self.__ansi || (self.__ansi = new TextDecoder('windows-1252'))).decode(HEAPU8.slice(text, text + n));
     if (typeof OffscreenCanvas === 'undefined') {
         for (let i = 0; i < n; i++) HEAP32[(out >> 2) + i] = 7 * (i + 1);
         return;
@@ -220,7 +221,7 @@ EM_JS(void, js_text_prefixes, (const char* css, const void* text, int n, int wid
 EM_JS(int, js_text_render, (const char* css, const void* text, int n, int wide, int w, int h, int asc, uint8_t* out), {
     if (typeof OffscreenCanvas === 'undefined' || w <= 0 || h <= 0) return 0;
     const s = wide ? String.fromCharCode.apply(null, HEAPU16.subarray(text >> 1, (text >> 1) + n))
-                   : String.fromCharCode.apply(null, HEAPU8.subarray(text, text + n));
+                   : (self.__ansi || (self.__ansi = new TextDecoder('windows-1252'))).decode(HEAPU8.slice(text, text + n));
     let cv = self.__textCanvas;
     if (!cv || cv.width < w || cv.height < h) {
         cv = self.__textCanvas = new OffscreenCanvas(Math.max(w, cv ? cv.width : 0), Math.max(h, cv ? cv.height : 0));

@@ -67,7 +67,7 @@ public partial class MainWindow : Window
         try
         {
             IdentityBrowserHost.IsVisible = true;
-            identityBrowser = new AvaloniaCefBrowser { Address = collector.Url };
+            identityBrowser = new AvaloniaCefBrowser { Address = collector.Url }.OpeningPopupsExternally();
             IdentityBrowserHost.Child = identityBrowser;
             await collector.WaitUntilReadyAsync();
             identityCollector = collector;
@@ -144,7 +144,7 @@ public partial class MainWindow : Window
               if (model.PacketLogger && string.IsNullOrWhiteSpace(model.PacketPlugin))
               {
                   packetWindow?.Close();
-                  var packetBrowser = new AvaloniaCefBrowser { Address = new Uri(new Uri(url), "/packet-log").AbsoluteUri };
+                  var packetBrowser = new AvaloniaCefBrowser { Address = new Uri(new Uri(url), "/packet-log").AbsoluteUri }.OpeningPopupsExternally();
                   packetWindow = new Window { Title = "ClientLab · Packet logger", Width = 1000, Height = 650, Icon = Icon, Content = packetBrowser };
                   packetWindow.Closed += (_, _) => packetBrowser.Dispose();
                   packetWindow.Show();

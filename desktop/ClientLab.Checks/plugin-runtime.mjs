@@ -34,7 +34,7 @@ const requests = [
   {id: 1, op: 'read', address: 0x10000, length: 4},
   {id: 2, op: 'write', address: 0x10002, hex: 'aBff'},
   {id: 3, op: 'call', address: 0x401000, eax: 1, edx: 2, ecx: 3, stack: [4, 5]},
-  {id: 4, op: 'packet', kind: 0, raw: 'say é'},
+  {id: 4, op: 'packet', kind: 0, raw: 'say 0Lucif€r0 é日'},
   {id: 5, op: 'packet', kind: 1, raw: 'in 1 2'},
   {id: 6, op: 'read', address: 0x2fffe, length: 4},
   {id: 7, op: 'write', address: 0x10000, hex: 'zz'},
@@ -68,7 +68,8 @@ assert.deepEqual(Array.from(HEAPU8.subarray(0x10002, 0x10004)), [0xab, 0xff]);
 assert.deepEqual(calls[0], [0x401000, 1, 2, 3, 2, 4, 5, 0]);
 assert.equal(byId[3].result.eax, 0xfeedbeef);
 assert.equal(byId[4].result.ok, true);
-assert.equal(new TextDecoder().decode(HEAPU8.subarray(0x20000, 0x20000 + 6)), 'say é');
+// Windows-1252 like the client's own packets: € is 0x80, é 0xe9, and what 1252 lacks becomes '?'.
+assert.deepEqual(Array.from(HEAPU8.subarray(0x20000, 0x20000 + 16)), [...Buffer.from('say 0Lucif'), 0x80, ...Buffer.from('r0 '), 0xe9, 0x3f]);
 assert.equal(byId[5].result.ok, false);
 assert.deepEqual(packets, [{kind: 0, text: 0x20000}, {kind: 1, text: 0x20100}]);
 assert.match(byId[6].error, /out of range/);

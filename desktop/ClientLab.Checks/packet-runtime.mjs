@@ -5,9 +5,10 @@ import assert from 'node:assert/strict';
 const source = readFileSync(new URL('../../recomp/port/rt_port.c',import.meta.url),'utf8');
 const capture = source.slice(source.indexOf('    EM_ASM({') + '    EM_ASM({'.length, source.indexOf('    }, packet, kind);'));
 const memory = new ArrayBuffer(1024), bytes = new Uint8Array(memory), words = new Uint32Array(memory);
-const events = [], raw = 'say hello';
-bytes.set(new TextEncoder().encode(raw),64); words[15]=raw.length;
-const context = vm.createContext({ENV:{PORT_PACKET_LOG:'1'}, HEAPU8:bytes, HEAPU32:words, TextDecoder, Date, postMessage:event=>events.push(event)});
+// Client packets are Windows-1252: 0x80 is the euro sign players use for 'e' in names.
+const events = [], raw = 'say 0Lucif€r0';
+bytes.set([...new TextEncoder().encode('say 0Lucif'), 0x80, ...new TextEncoder().encode('r0')],64); words[15]=raw.length;
+const context = vm.createContext({ENV:{PORT_PACKET_LOG:'1'}, self:{}, HEAPU8:bytes, HEAPU32:words, TextDecoder, Date, postMessage:event=>events.push(event)});
 vm.runInContext('function capture($0,$1){'+capture+'}',context);
 context.capture(64,0);
 assert.equal(events[0].raw,raw); assert.equal(events[0].kind,0);

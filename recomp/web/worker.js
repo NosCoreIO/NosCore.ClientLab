@@ -20,6 +20,10 @@ if (params.get('PORT_PLUGIN') === '1') {
   const buffer = new SharedArrayBuffer(16 + (5 << 20)), head = new Int32Array(buffer, 0, 4), body = new Uint8Array(buffer, 16);
   const encoder = new TextEncoder(), decoder = new TextDecoder();
   const HEX = Array.from({ length: 256 }, (_, b) => b.toString(16).padStart(2, '0'));
+  // Packets are Windows-1252 text, as the client's own packets are: one byte per character, '?' for the rest.
+  const cp1252 = new Map([...new TextDecoder('windows-1252').decode(Uint8Array.from({ length: 256 }, (_, b) => b))]
+    .map((ch, b) => [ch, b]));
+  const ansi = (text) => Uint8Array.from(text, (ch) => cp1252.get(ch) ?? 0x3f);
   const range = (address, length) => {
     if (!Number.isSafeInteger(address) || !Number.isSafeInteger(length) || length < 0 || length > 1 << 20 ||
         address < 0x10000 || address + length > HEAPU8.length) throw new Error('address out of range');
@@ -46,7 +50,7 @@ if (params.get('PORT_PLUGIN') === '1') {
           stack[0] >>> 0, stack[1] >>> 0, stack[2] >>> 0) >>> 0 };
       }
       case 'packet': {
-        const bytes = encoder.encode(String(req.raw));
+        const bytes = ansi(String(req.raw));
         const text = Module._plugin_string(bytes.length) >>> 0;
         if (!text) throw new Error('packet too long');
         HEAPU8.set(bytes, text);

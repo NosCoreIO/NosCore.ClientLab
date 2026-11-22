@@ -56,9 +56,15 @@ internal static class PacketPluginChecks
             catch (FileNotFoundException) { }
 
             var logs = new ConcurrentQueue<string>();
-            var settings = new JsonObject { ["provider"] = "noscore", ["packet_logger"] = "true", ["packet_plugin"] = typeof(CheckPacketPlugin).Assembly.Location };
+            // A copy, so the only thing that could lock it is the plugin host.
+            var pluginFile = Path.Combine(root, "plugin", Path.GetFileName(typeof(CheckPacketPlugin).Assembly.Location));
+            Directory.CreateDirectory(Path.GetDirectoryName(pluginFile)!);
+            File.Copy(typeof(CheckPacketPlugin).Assembly.Location, pluginFile);
+            var settings = new JsonObject { ["provider"] = "noscore", ["packet_logger"] = "true", ["packet_plugin"] = pluginFile };
             await using var host = await GameHost.StartAsync(root, active, settings, logs.Enqueue, new GameSettingsStore(root));
             if (!logs.Any(line => line.Contains(nameof(CheckPacketPlugin)))) throw new Exception("The plugin was not loaded: " + string.Join(" | ", logs));
+            try { using var _ = new FileStream(pluginFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException error) { throw new Exception("The loaded plugin's file is locked, so it cannot be rebuilt: " + error.Message); }
             using var http = new HttpClient { BaseAddress = new Uri(host.Url), Timeout = TimeSpan.FromSeconds(30) };
             http.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin");
             (await http.PostAsync("packets", Json(new { kind = 0, raw = "walk 10 20", timestamp = DateTimeOffset.UtcNow }))).EnsureSuccessStatusCode();

@@ -19,6 +19,12 @@ try{
   function measure(font,text){self.currentFont=font;for(let i=0;i<text.length;i++)HEAPU16[256+i]=text.charCodeAt(i);measureGuest(0,512,text.length,1,0);return Array.from(HEAP32.subarray(0,3));}
   function same(font,text){const a=measure(font,text);original.font=font;const m=original.measureText(text),b=[Math.round(m.width),Math.ceil(m.fontBoundingBoxAscent??m.actualBoundingBoxAscent??10),Math.ceil(m.fontBoundingBoxDescent??m.actualBoundingBoxDescent??3)];if(a.some((v,i)=>v!==b[i]))throw Error('Changed guest text metrics');}
   for(const font of ['12px Arial','bold 16px Arial','italic 22px serif','invalid font'])for(const text of ['NosVille','Player 123','café','你好','مرحبا','A\u0301','😀','']){same(font,text);same(font,text);}
+  // The A calls carry Windows-1252: 0x80 is the euro sign players use for 'e' in names, not an invisible C1 control.
+  function measureAnsi(font,bytes){self.currentFont=font;HEAPU8.set(bytes,1024);measureGuest(0,1024,bytes.length,0,0);return Array.from(HEAP32.subarray(0,3));}
+  const euro=[0x30,0x4c,0x75,0x63,0x69,0x66,0x80,0x72,0x30];
+  for(const font of ['16px Arial','bold 12px Arial']){const a=measureAnsi(font,euro),b=measure(font,'0Lucif€r0');if(a.join()!==b.join())throw Error('ANSI 0x80 is not measured as the euro sign: '+a+' vs '+b);}
+  self.currentFont='16px Arial';HEAPU8.set(euro,1024);prefixesGuest(0,1024,euro.length,0,64);original.font=self.currentFont;
+  if(HEAP32[16+6]!==Math.round(original.measureText('0Lucif€').width))throw Error('ANSI prefixes do not decode Windows-1252');
   self.currentFont='36px serif';prefixesGuest(0,512,1,1,64);original.font=self.currentFont;same('invalid font','NosVille');
   // Count native crossings, preserving the real Canvas font setter/getter.
   const g=self.__textCtx,descriptor=Object.getOwnPropertyDescriptor(OffscreenCanvasRenderingContext2D.prototype,'font');let writes=0,reads=0;

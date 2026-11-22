@@ -158,12 +158,14 @@ public sealed class PacketPluginHost : IAsyncDisposable
     private readonly IPacketPlugin plugin;
     private readonly Action<string>? log;
     private readonly Task worker;
+    private readonly AssemblyLoadContext context;
 
     public string Name { get; }
 
-    private PacketPluginHost(IPacketPlugin plugin, string name, IGameSession game, Action<string>? log)
+    private PacketPluginHost(IPacketPlugin plugin, string name, AssemblyLoadContext context, IGameSession game, Action<string>? log)
     {
         this.plugin = plugin;
+        this.context = context;
         this.log = log;
         Name = name;
         // Started in the background: the game page that answers game requests opens only after the host is up.
@@ -174,18 +176,23 @@ public sealed class PacketPluginHost : IAsyncDisposable
     {
         path = Path.GetFullPath(path);
         if (!File.Exists(path)) throw new FileNotFoundException("The packet logger plugin was not found: " + path, path);
+        var context = new PluginLoadContext(path);
         Assembly assembly;
-        try { assembly = new PluginLoadContext(path).LoadFromAssemblyPath(path); }
-        catch (BadImageFormatException) { throw new InvalidOperationException("The packet logger plugin is not a .NET assembly: " + path); }
+        try { assembly = context.LoadUnlocked(path); }
+        catch (BadImageFormatException) { context.Unload(); throw new InvalidOperationException("The packet logger plugin is not a .NET assembly: " + path); }
         Type[] types;
         try { types = assembly.GetExportedTypes(); }
         catch (ReflectionTypeLoadException error) { types = error.Types.OfType<Type>().Where(type => type.IsPublic).ToArray(); }
         var type = types.FirstOrDefault(type => type is { IsClass: true, IsAbstract: false } && typeof(IPacketPlugin).IsAssignableFrom(type) &&
-            type.GetConstructor(Type.EmptyTypes) is not null)
-            ?? throw new InvalidOperationException($"{Path.GetFileName(path)} has no public {nameof(IPacketPlugin)} class with a parameterless constructor. " +
+            type.GetConstructor(Type.EmptyTypes) is not null);
+        if (type is null)
+        {
+            context.Unload();
+            throw new InvalidOperationException($"{Path.GetFileName(path)} has no public {nameof(IPacketPlugin)} class with a parameterless constructor. " +
                 $"Build it against {typeof(IPacketPlugin).Assembly.GetName().Name} {typeof(IPacketPlugin).Assembly.GetName().Version}.");
+        }
         var plugin = (IPacketPlugin)Activator.CreateInstance(type)!;
-        return new PacketPluginHost(plugin, type.FullName ?? type.Name, game, log);
+        return new PacketPluginHost(plugin, type.FullName ?? type.Name, context, game, log);
     }
 
     public void Enqueue(PacketCapture.Entry entry) => queue.Writer.TryWrite(new Packet(entry.Id, entry.Timestamp,
@@ -222,13 +229,15 @@ public sealed class PacketPluginHost : IAsyncDisposable
         try { await plugin.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)); }
         catch (Exception error) { log?.Invoke($"Packet plugin {Name} failed to stop: {error.Message}"); }
         stop.Dispose();
+        // The plugin's files were never locked; unloading lets a rebuilt plugin load fresh on the next game.
+        context.Unload();
     }
 
     /// <summary>
     /// The plugin's own dependencies come from its folder; the contract assembly is always the launcher's, so the
     /// plugin's IPacketPlugin is the type the launcher looks for.
     /// </summary>
-    private sealed class PluginLoadContext(string path) : AssemblyLoadContext("ClientLab plugin " + Path.GetFileName(path))
+    private sealed class PluginLoadContext(string path) : AssemblyLoadContext("ClientLab plugin " + Path.GetFileName(path), isCollectible: true)
     {
         private static readonly string Contract = typeof(IPacketPlugin).Assembly.GetName().Name!;
         private readonly AssemblyDependencyResolver resolver = new(path);
@@ -236,7 +245,17 @@ public sealed class PacketPluginHost : IAsyncDisposable
         protected override Assembly? Load(AssemblyName name)
         {
             if (name.Name == Contract) return null;
-            return resolver.ResolveAssemblyToPath(name) is { } file ? LoadFromAssemblyPath(file) : null;
+            return resolver.ResolveAssemblyToPath(name) is { } file ? LoadUnlocked(file) : null;
+        }
+
+        /// <summary>Loads from a copy in memory, with symbols when present, so the plugin can be rebuilt while the launcher runs.</summary>
+        public Assembly LoadUnlocked(string file)
+        {
+            using var image = new MemoryStream(File.ReadAllBytes(file));
+            var symbols = Path.ChangeExtension(file, ".pdb");
+            if (!File.Exists(symbols)) return LoadFromStream(image);
+            using var debug = new MemoryStream(File.ReadAllBytes(symbols));
+            return LoadFromStream(image, debug);
         }
 
         protected override IntPtr LoadUnmanagedDll(string name) =>

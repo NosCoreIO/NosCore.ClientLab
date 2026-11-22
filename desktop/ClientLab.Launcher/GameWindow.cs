@@ -32,7 +32,7 @@ public sealed class GameWindow : Window
         var size = Fit(width, height, Screens.Primary, DefaultChrome);
         Width = size.Width; Height = size.Height;
         applied = resolution ?? default;
-        browser = new AvaloniaCefBrowser { Address = url + (url.Contains('?') ? "&" : "?") + "desktop=1" };
+        browser = new AvaloniaCefBrowser { Address = url + (url.Contains('?') ? "&" : "?") + "desktop=1" }.OpeningPopupsExternally();
         Content = browser;
         statsTimer.Tick += async (_, _) => await PollStatsAsync();
         Opened += (_, _) => statsTimer.Start();

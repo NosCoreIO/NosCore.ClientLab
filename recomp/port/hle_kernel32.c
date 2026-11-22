@@ -139,12 +139,27 @@ static void k_lstrcatA(CPU* c) { strcat(GSTR(ARG(0)), GSTR(ARG(1))); RET(ARG(0))
 static void k_lstrcmpA(CPU* c) { RET((uint32_t)strcmp(GSTR(ARG(0)), GSTR(ARG(1)))); }
 static void k_lstrcmpiA(CPU* c) { RET((uint32_t)strcasecmp(GSTR(ARG(0)), GSTR(ARG(1)))); }
 
+/* The client's ANSI code page is 1252 (GetACP): Latin-1 except 0x80-0x9F, where it has the euro sign, curly quotes
+   and the like (players write "€" for "e" in names). The five unassigned bytes map to the same C1 code points
+   Windows uses. */
+static const uint16_t cp1252_high[32] = {
+    0x20ac, 0x0081, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008d, 0x017d, 0x008f,
+    0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178};
+
+static uint16_t ansi_to_wide(uint8_t b) { return b >= 0x80 && b < 0xa0 ? cp1252_high[b - 0x80] : b; }
+
+static uint8_t wide_to_ansi(uint16_t w) {
+    if (w < 0x80 || (w >= 0xa0 && w < 0x100)) return (uint8_t)w;
+    for (int k = 0; k < 32; k++) if (cp1252_high[k] == w) return (uint8_t)(0x80 + k);
+    return '?';
+}
+
 static void k_MultiByteToWideChar(CPU* c) {
     uint32_t src = ARG(2), srclen = ARG(3), dst = ARG(4), dstlen = ARG(5), n, k;
     n = (int32_t)srclen < 0 ? (uint32_t)strlen(GSTR(src)) + 1 : srclen;
     if (!dstlen) { RET(n); return; }
     if (n > dstlen) n = dstlen;
-    for (k = 0; k < n; k++) M16(dst + 2 * k) = M8(src + k);
+    for (k = 0; k < n; k++) M16(dst + 2 * k) = ansi_to_wide(M8(src + k));
     RET(n);
 }
 
@@ -154,7 +169,7 @@ static void k_WideCharToMultiByte(CPU* c) {
     else n = srclen;
     if (!dstlen) { RET(n); return; }
     if (n > dstlen) n = dstlen;
-    for (k = 0; k < n; k++) { uint16_t w = M16(src + 2 * k); M8(dst + k) = (uint8_t)(w < 256 ? w : '?'); }
+    for (k = 0; k < n; k++) M8(dst + k) = wide_to_ansi(M16(src + 2 * k));
     RET(n);
 }
 

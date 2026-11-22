@@ -21,7 +21,8 @@ Logging is off by default. Each enabled game session creates a UTF-8 JSONL file
 under `<ClientLab data directory>/packet-logs`, named
 `packets-<UTC start timestamp>-<unique id>.jsonl`. The first line records the
 session start; each packet has an ID, UTC timestamp, direction, connection and
-raw plaintext. Every line is flushed immediately. Logs can contain account data
+raw plaintext, decoded from the client's Windows-1252 bytes (so a `€` in a name stays
+`€`). Every line is flushed immediately. Logs can contain account data
 and private chat; keep them on your own device. The viewer retains 10,000 entries
 in memory; the file retains the full session.
 
@@ -79,7 +80,8 @@ also lets a plugin:
 - hand a world packet to the client's own send function or receive handler
   (`SendPacketAsync`, `ReceivePacketAsync`). These need the client to have sent or received a
   world packet first, because the function's object is taken from that call. Login packets
-  cannot be sent this way.
+  cannot be sent this way. The text is encoded as Windows-1252, like the client's own packets;
+  characters it lacks become `?`.
 
 Memory, call and packet requests travel from the launcher through the game page to the game
 thread. They run between window messages, the same place the client's own input handlers run,

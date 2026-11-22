@@ -228,8 +228,7 @@ public partial class MainViewModel : ObservableObject
     private void OpenNews(string? url)
     {
         if (url is null || !OfficialNews.IsOfficialLink(url)) return;
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception) { Notice = "Your browser could not open the news page."; }
+        if (!ExternalLinks.Open(url)) Notice = "Your browser could not open the news page.";
     }
 
     public Task RefreshAsync()

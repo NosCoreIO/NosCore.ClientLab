@@ -27,7 +27,7 @@ void port_capture_packet(uint32_t packet, int kind) {
         if (ptr < 4 || ptr >= HEAPU8.length) return;
         const length = HEAPU32[(ptr - 4) >>> 2] >>> 0;
         if (!length || length > 65536 || ptr + length > HEAPU8.length) return;
-        postMessage({type:'packet', kind:$1, raw:new TextDecoder().decode(HEAPU8.subarray(ptr,ptr+length)), timestamp:new Date().toISOString()});
+        postMessage({type:'packet', kind:$1, raw:(self.__ansi || (self.__ansi = new TextDecoder('windows-1252'))).decode(HEAPU8.slice(ptr,ptr+length)), timestamp:new Date().toISOString()});
     }, packet, kind);
 #else
     (void)packet; (void)kind;
