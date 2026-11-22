@@ -39,6 +39,11 @@ internal static class AuthFlowChecks
             try { await persistent.ChooseAccountAsync(Server.Account); throw new Exception("An expired Gameforge token launched."); }
             catch (GameforgeAuthentication.SessionExpiredException) { }
         Check(persistentServer.Codes == 2, "A code was requested with an expired Gameforge token.");
+        var refusingIdentity = new Identity(); var refusing = new Server(refusingIdentity) { RefuseCode = true };
+        using var refused = new GameforgeSignIn(new JsonObject(), refusingIdentity, refusing);
+        await refused.SignInAsync("test@example.invalid", "mock-only");
+        try { await refused.ChooseAccountAsync(Server.Account); throw new Exception("A refused launch code launched."); }
+        catch (InvalidOperationException error) when (error.Message.Contains("Not allowed to create code") && error.Message.Contains("Request mock-request.") && error.Message.Contains("official Gameforge Client")) { }
         Console.WriteLine("PASS: official identity provider is shared through sign-in and account-bound launch, failed verification stops code creation, and consumed sessions cannot be reused.");
         Console.WriteLine("PASS: trusted launcher sign-in survives issuing a code and performs fresh verification for each subsequent launch; a rejected token reports an expired sign-in.");
     }
@@ -59,7 +64,7 @@ internal static class AuthFlowChecks
     {
         public const string Account = "25222222-3333-4444-5555-666666666666";
         public int Codes;
-        public bool RejectIdentity, TokenExpired;
+        public bool RejectIdentity, TokenExpired, RefuseCode;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             JsonNode? body = request.Content is null ? null : JsonNode.Parse(await request.Content.ReadAsStringAsync(cancellationToken));
@@ -81,6 +86,12 @@ internal static class AuthFlowChecks
             }
             if (path.EndsWith("/thin/codes"))
             {
+                if (RefuseCode)
+                {
+                    var refusal = Json(403, "{\"error\":{\"message\":\"Not allowed to create code\"}}");
+                    refusal.Headers.Add("X-Request-ID", "mock-request");
+                    return refusal;
+                }
                 Codes++;
                 var gsid = body!["gsid"]!.ToString();
                 Check(body["platformGameAccountId"]?.ToString() == Account && identity.Request?["installation"]?.ToString() == identity.InstallationId && identity.Request?["session"]?.ToString() == gsid[..gsid.LastIndexOf('-')], "Launch code identity was not bound to the selected account/session.");

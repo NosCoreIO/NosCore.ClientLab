@@ -46,8 +46,11 @@ public sealed class GameforgeAuthentication : IDisposable
 
     public sealed class SessionExpiredException() : InvalidOperationException("Your Gameforge sign-in expired. Please sign in again.");
 
-    public sealed class GameforgeException(int status, JsonNode? body, string? challengeId = null, string operation = "sign-in") : Exception($"Gameforge {operation} returned HTTP {status}.")
-    { public int Status { get; } = status; public JsonNode? Body { get; } = body; public string? ChallengeId { get; } = challengeId; public string Operation { get; } = operation; }
+    public sealed class GameforgeException(int status, JsonNode? body, string? challengeId = null, string operation = "sign-in", string? requestId = null) : Exception($"Gameforge {operation} returned HTTP {status}.")
+    { public int Status { get; } = status; public JsonNode? Body { get; } = body; public string? ChallengeId { get; } = challengeId; public string Operation { get; } = operation; public string? RequestId { get; } = requestId; }
+
+    private static string? RequestIdOf(HttpResponseMessage response) =>
+        response.Headers.TryGetValues("X-Request-ID", out var values) ? values.FirstOrDefault() : null;
 
     private async Task<JsonNode> RequestAsync(string path, string userAgent, HttpMethod? method = null, JsonNode? body = null, string? token = null)
     {
@@ -69,7 +72,7 @@ public sealed class GameforgeAuthentication : IDisposable
         JsonNode? value;
         try { value = JsonNode.Parse(text.TrimStart('\uFEFF')); } catch { value = new JsonObject { ["message"] = text[..Math.Min(1200, text.Length)] }; }
         if (!response.IsSuccessStatusCode)
-            throw new GameforgeException((int)response.StatusCode, value, response.Headers.TryGetValues("gf-challenge-id", out var ids) ? ids.First().Split(';')[0].Trim() : null, path.StartsWith("v2/") ? "sign-in" : path);
+            throw new GameforgeException((int)response.StatusCode, value, response.Headers.TryGetValues("gf-challenge-id", out var ids) ? ids.First().Split(';')[0].Trim() : null, path.StartsWith("v2/") ? "sign-in" : path, RequestIdOf(response));
         return value ?? new JsonObject();
     }
 
@@ -184,8 +187,9 @@ public sealed class GameforgeAuthentication : IDisposable
             JsonNode? detail;
             try { detail = JsonNode.Parse(text); } catch { detail = null; }
             var status = (int)response.StatusCode;
+            var requestId = RequestIdOf(response);
             response.Dispose();
-            throw new GameforgeException(status, detail, operation: operation);
+            throw new GameforgeException(status, detail, operation: operation, requestId: requestId);
         }
         return response;
     }
