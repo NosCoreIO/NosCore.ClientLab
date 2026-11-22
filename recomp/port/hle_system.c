@@ -375,6 +375,22 @@ static void js_open_url(const char* url) { port_log("open url %s", url); }
 #endif
 
 static void st_OpenOverlayToWebPage(CPU* c) { if (ARG(0)) js_open_url(GSTR(ARG(0))); RET(0); }
+
+/* The in-game web page window's shown handler (WebPageHooks.cs). With the Gameforge launcher the client shows the page
+   (NosMall and the like) through an embedded Chromium the recompiled client cannot load. Hand the window's address
+   (url_offset holds a Delphi string) to the page, which shows it over the window's browser area (the TCEFWindowParent
+   reported by the window manager), and let the handler carry on: the window itself opens as in the official client. */
+#ifdef __EMSCRIPTEN__
+EM_JS(void, js_web_page, (const char* url), {
+    if (typeof postMessage === 'function') postMessage({ type: 'web-page', url: UTF8ToString(url) });
+});
+#else
+static void js_web_page(const char* url) { port_log("web page %s", url); }
+#endif
+void port_open_web_page(CPU* c, uint32_t url_offset) {
+    uint32_t self = c->eax, url = self ? M32(self + url_offset) : 0;
+    if (url && M8(url)) js_web_page(GSTR(url));
+}
 /* Tickets are the auth code handed over at login; there is nothing to revoke. */
 static void st_CancelAuthSessionTicket(CPU* c) { RET(0); }
 /* Steam would dispatch its callbacks here; none are ever registered in the browser. */

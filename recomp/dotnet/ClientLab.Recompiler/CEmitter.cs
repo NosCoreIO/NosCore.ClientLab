@@ -182,6 +182,8 @@ public sealed partial class CEmitter
         var structured = Labels.Count >= StructuredDispatchThreshold;
         if (instructions.Any(instruction => image.PacketCaptureSites.ContainsKey(instruction.Address)))
             output.AppendLine("void port_capture_world_packet(CPU* c, int kind, uint32_t fn);\nvoid port_capture_login_packet(CPU* c);");
+        if (instructions.Any(instruction => image.WebPageSites.ContainsKey(instruction.Address)))
+            output.AppendLine("void port_open_web_page(CPU* c, uint32_t url_offset);");
         output.AppendLine($"/* {function.Name.Replace("*/", "")} */");
         output.AppendLine($"{(IsSmallLeaf ? "RT_LEAF " : "")}void {Name}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{");
         E((structured ? "volatile uint32_t tgt = entry; uint32_t t, a, b, r;" : "uint32_t tgt = entry, t, a, b, r;") + " uint64_t q; int ind = 0; (void)t; (void)a; (void)b; (void)r; (void)q;");
@@ -221,6 +223,9 @@ public sealed partial class CEmitter
             if (Labels.Contains(instructions[index].Address)) output.AppendLine($"L_{instructions[index].Address:x8}:");
             if (image.PacketCaptureSites.TryGetValue(instructions[index].Address, out var packetKind))
                 E(packetKind == 2 ? "port_capture_login_packet(c);" : $"port_capture_world_packet(c, {packetKind}, 0x{instructions[index].Address:x8}u);");
+            // Hands the window's web address to the page, which draws the page in the window's browser area.
+            if (image.WebPageSites.TryGetValue(instructions[index].Address, out var urlOffset))
+                E($"port_open_web_page(c, 0x{urlOffset:x}u);");
             output.Append(lifted[index]);
         }
         output.AppendLine("#undef EXIT"); output.AppendLine("}");

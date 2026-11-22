@@ -15,6 +15,9 @@ public sealed class ExecutableImage
     public byte[] Code { get; }
     private IReadOnlyDictionary<uint, int>? packetHooks;
     public IReadOnlyDictionary<uint, int> PacketCaptureSites => packetHooks ??= PacketHooks.Find(this);
+    private IReadOnlyDictionary<uint, uint>? webPageHooks;
+    /// <summary>The in-game web page window's shown handler, with the offset of its address field (see <see cref="WebPageHooks"/>).</summary>
+    public IReadOnlyDictionary<uint, uint> WebPageSites => webPageHooks ??= WebPageHooks.Find(this);
     public Dictionary<uint, uint> RelocationSlots { get; } = [];
     public HashSet<uint> RelocationTargets { get; } = [];
     private readonly Dictionary<uint, X86Instruction?> decoded = [];

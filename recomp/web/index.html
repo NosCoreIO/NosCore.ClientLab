@@ -185,6 +185,33 @@
     } else if (f.shown) f.repeated++;
     requestAnimationFrame(showFrame);
   }
+  // In-game web pages (NosMall and the like): the client's window keeps its own frame and buttons, and the page draws
+  // the web page where the client's embedded Chromium would (the area the runtime reports, in game pixels).
+  const webFrame = { url: '', hwnd: 0, visible: false, x: 0, y: 0, w: 0, h: 0 };
+  let webIframe = null;
+  function placeWebFrame() {
+    if (!webFrame.url || !webFrame.visible || webFrame.w <= 0 || webFrame.h <= 0) {
+      if (webIframe) { webIframe.remove(); webIframe = null; canvas.focus(); }
+      return;
+    }
+    if (!webIframe) {
+      webIframe = document.createElement('iframe');
+      webIframe.id = 'web-page';
+      // This page is cross-origin isolated (SharedArrayBuffer), which blocks frames from sites that do not opt in;
+      // a credentialless frame may still load them, with its own short-lived cookies, as the client's Chromium had.
+      webIframe.credentialless = true;
+      webIframe.style.cssText = 'position:fixed;border:0;margin:0;padding:0;background:#fff;z-index:5;transform-origin:0 0';
+      webIframe.allow = 'clipboard-write';
+      document.body.appendChild(webIframe);
+    }
+    if (webIframe.dataset.url !== webFrame.url) { webIframe.dataset.url = webFrame.url; webIframe.src = webFrame.url; }
+    // Laid out at the game's own pixels and scaled with the canvas, so the page looks as it does in the client.
+    const r = canvas.getBoundingClientRect(), sx = r.width / canvas.width, sy = r.height / canvas.height;
+    Object.assign(webIframe.style, { left: `${r.left + webFrame.x * sx}px`, top: `${r.top + webFrame.y * sy}px`,
+      width: `${webFrame.w}px`, height: `${webFrame.h}px`, transform: `scale(${sx}, ${sy})` });
+  }
+  addEventListener('resize', placeWebFrame);
+  new ResizeObserver(placeWebFrame).observe(canvas);
   // Packet logger plugin (PORT_PLUGIN=1): fetch the launcher's requests for the game thread (worker.js, hle_plugin.c)
   // and post the answers back, one at a time.
   // <plugin-relay>
@@ -284,6 +311,12 @@
       navigator.clipboard?.writeText(m.text).catch(() => { });
     } else if (m.type === 'open-url') {
       window.open(m.url, '_blank', 'noopener');
+    } else if (m.type === 'web-page') {
+      webFrame.url = m.url;
+      placeWebFrame();
+    } else if (m.type === 'web-frame') {
+      Object.assign(webFrame, { hwnd: m.hwnd, visible: m.visible, x: m.x, y: m.y, w: m.w, h: m.h });
+      placeWebFrame();
     } else if (m.type === 'packet') {
       packetSends = packetSends.then(() => fetch('/packets', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(m)})).then(response=>{if(!response.ok)throw Error('Packet log write failed: '+response.status);}).catch(error=>console.error(error.message));
     } else if (m.type === 'sound') {

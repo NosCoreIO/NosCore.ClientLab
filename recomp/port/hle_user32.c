@@ -175,6 +175,7 @@ typedef struct {
     int need_size;                  /* WM_SIZE and WM_MOVE are reported again on the first show */
     int il, it, ir, ib;             /* bounding box of the update region, client coordinates */
     Scroll sb[3];
+    int web;                        /* the client's embedded-browser host (TCEFWindowParent): the page draws it */
 } Win;
 
 #define MAX_WIN 1024
@@ -705,6 +706,33 @@ static void consider_display(Win* w) {
 
 /* SetWindowPos as Windows does it: WM_WINDOWPOSCHANGING may rewrite the request, then the client area is recomputed
    and WM_WINDOWPOSCHANGED reports the result (the default procedure turns it into WM_MOVE and WM_SIZE). */
+/* The client hosts its embedded browser (NosMall and other web pages) in a TCEFWindowParent child window, which only
+   Chromium would draw into. The page shows the web page itself over that window's client area: report where it is (in
+   the display's client pixels, the page's game pixels) and whether it can be seen. */
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+EM_JS(void, js_web_frame, (uint32_t hwnd, int visible, int x, int y, int w, int h), {
+    if (typeof postMessage === 'function') postMessage({ type: 'web-frame', hwnd: hwnd >>> 0, visible: visible !== 0, x, y, w, h });
+});
+#else
+static void js_web_frame(uint32_t hwnd, int visible, int x, int y, int w, int h) { (void)hwnd; (void)visible; (void)x; (void)y; (void)w; (void)h; }
+#endif
+void hle_screen_to_page(int* x, int* y);
+static void web_frame_report(Win* w, int gone) {
+    static uint32_t last_hwnd;
+    static int last[5] = {-1, -1, -1, -1, -1};
+    int x, y, cw = w->cr - w->cl, ch = w->cb - w->ct, visible = !gone && visible_chain(w) && cw > 0 && ch > 0;
+    client_origin(w, &x, &y);
+    hle_screen_to_page(&x, &y);
+    uint32_t hwnd = win_handle(w);
+    int now[5] = {visible, x, y, cw, ch};
+    if (hwnd == last_hwnd && !memcmp(now, last, sizeof now)) return;
+    last_hwnd = hwnd;
+    memcpy(last, now, sizeof now);
+    port_log("web frame %08x %s %dx%d at %d,%d", hwnd, visible ? "shown" : "hidden", cw, ch, x, y);
+    js_web_frame(hwnd, visible, x, y, cw, ch);
+}
+
 static int set_window_pos(CPU* c, uint32_t hwnd, uint32_t after, int x, int y, int cx, int cy, uint32_t f) {
     Win* w = win_get(hwnd);
     if (!w) { set_last_error(1400); return 0; }
@@ -754,6 +782,7 @@ static int set_window_pos(CPU* c, uint32_t hwnd, uint32_t after, int x, int y, i
     guest_free(wp);
     w = win_get(hwnd);
     if (!w) return 1;
+    if (w->web) web_frame_report(w, 0);
     if (f & SWP_SHOWWINDOW) consider_display(w);
     if (f & SWP_HIDEWINDOW) {
         if (is_descendant(hwnd, focus_hwnd) || focus_hwnd == hwnd) set_focus(c, is_child(w) ? w->parent : 0);
@@ -899,6 +928,7 @@ static uint32_t create_window(CPU* c, uint32_t exstyle, uint32_t cls_name, uint3
     memset(w, 0, sizeof *w);
     w->used = 1;
     w->cls = k;
+    w->web = cls_name >= 0x10000 && !strcmp(GSTR(cls_name), "TCEFWindowParent");
     w->wndproc = k->wndproc;
     w->hinst = hinst;
     if (style & WS_CHILD) { w->parent = parent; w->id = menu; }
@@ -1024,6 +1054,7 @@ static int destroy_window(CPU* c, uint32_t hwnd) {
     Win* w = win_get(hwnd);
     if (!w) { set_last_error(1400); return 0; }
     if (cbt(c, 4, hwnd, 0)) return 0;
+    if (w->web) web_frame_report(w, 1);
     for (int k = 0; k < MAX_WIN; k++)
         if (wins[k].used && !is_child(&wins[k]) && wins[k].owner == hwnd) destroy_window(c, win_handle(&wins[k]));
     w = win_get(hwnd);
