@@ -606,7 +606,7 @@
     const r = canvas.getBoundingClientRect();
     return [Math.round((e.clientX - r.left) * canvas.width / r.width), Math.round((e.clientY - r.top) * canvas.height / r.height)];
   }
-  canvas.addEventListener('mousemove', (e) => send(IN.move, 0, ...pos(e), e.timeStamp));
+  canvas.addEventListener('mousemove', (e) => { syncButtons(e); send(IN.move, 0, ...pos(e), e.timeStamp); });
   // Keys and buttons the game has seen go down and not yet up. Their release can go elsewhere: the page loses focus
   // (Cmd+Tab, a click outside the window), macOS takes it for a shortcut (Cmd+Shift+4 keeps Cmd and Shift for its
   // screenshot tool), and while Cmd is down macOS sends no key-up for the other keys. The game is told they went up.
@@ -628,6 +628,16 @@
     if (!e.altKey) releaseKey(18);
     if (!e.metaKey) { releaseKey(91); releaseKey(92); releaseKey(93); }
   }
+  // A move says which buttons are really down. One the game still holds was released where the page could not see it
+  // (outside the game, or a drag whose release never reached the page), so it is let go before the move.
+  const BUTTON_BITS = [1, 4, 2];
+  function syncButtons(e) {
+    for (const button of heldButtons)
+      if (!(e.buttons & BUTTON_BITS[button])) { heldButtons.delete(button); send(IN.up, button, ...pos(e)); }
+  }
+  addEventListener('mouseup', (e) => {
+    if (e.target !== canvas && heldButtons.delete(e.button)) send(IN.up, e.button, ...lastPos);
+  });
   addEventListener('blur', releaseHeld);
   canvas.addEventListener('blur', releaseHeld);
   document.addEventListener('visibilitychange', () => { if (document.hidden) releaseHeld(); });
