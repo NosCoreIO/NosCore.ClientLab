@@ -297,7 +297,7 @@ static void ws_inet_addr(CPU* c) {
     RET(a | b << 8 | d << 16 | e << 24);
 }
 static void ws_htons(CPU* c) { RET(((ARG(0) & 0xff) << 8) | ((ARG(0) >> 8) & 0xff)); }
-/* In the browser, sockets are relayed by the dev server (recomp/web/serve.py, the /net endpoints) through synchronous XHR: the
+/* In the browser, sockets are relayed by the game host (GameHost.cs, the /net endpoints) through synchronous XHR: the
    worker never yields, so it cannot use a WebSocket. Under Node there is no network and connections are refused. */
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>

@@ -1,6 +1,7 @@
 """Seed loop for the browser build: run drive.mjs, seed the first function nobody discovered, re-lift, rebuild, repeat.
 
-The browser counterpart of iterate.ps1, for machines without the native MSVC build. serve.py must be running.
+The browser counterpart of iterate.ps1, for machines without the native MSVC build. The game server must be running:
+`ClientLab --serve --game <nostale dir> --user <account> --password <password>` (see docs/BROWSER-AUTOMATION.md).
 
 usage: iterate.py [--rounds 25] [--url http://127.0.0.1:8077/] [--before "<command>"] [-- extra drive.mjs arguments]
 
