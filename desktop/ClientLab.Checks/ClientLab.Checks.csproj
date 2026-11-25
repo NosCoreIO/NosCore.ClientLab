@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../ClientLab.Launcher/ClientLab.Launcher.csproj" />
+    <!-- The checks never start Chromium: building the launcher without CEF's native files keeps them from depending
+         on how each OS's CEF package lays those files out (it broke the macOS check build). -->
+    <ProjectReference Include="../ClientLab.Launcher/ClientLab.Launcher.csproj" AdditionalProperties="CefGlueTargetPlatform=none" />
   </ItemGroup>
 </Project>
