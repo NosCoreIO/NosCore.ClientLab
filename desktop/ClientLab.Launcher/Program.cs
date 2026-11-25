@@ -27,8 +27,7 @@ internal static class Program
         if (args.Contains("--serve"))
         {
             AttachParentConsole();
-            Environment.Exit(Services.ServeCommand.RunAsync(args, DataDirectory).GetAwaiter().GetResult());
-            return;
+            return Services.ServeCommand.RunAsync(args, DataDirectory).GetAwaiter().GetResult();
         }
         if (args.Contains("--browser"))
         {
