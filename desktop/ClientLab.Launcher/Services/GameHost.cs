@@ -11,7 +11,14 @@ namespace NosCore.ClientLab.Launcher.Services;
 /// Loopback server for the embedded browser build: the page, the WebAssembly runtime, the user's own
 /// game folder (lazily, with HTTP Range support), the Gameforge sign-in endpoints, and a TCP relay the
 /// sandboxed worker drives over HTTP because it cannot open sockets itself. Nothing of the client is copied.
+/// The desktop window, the browser-mode launcher and the headless <c>--serve</c> mode (Playwright) all use it.
 /// </summary>
+/// <param name="Port">Loopback port to bind; 0 picks a free one.</param>
+/// <param name="AuthCode">Answers the worker's <c>/auth-code</c> request when the page URL carries no <c>auth</c>
+/// parameter (a fixed code, or one minted per page load from a NosCore WebApi). Without it the request is a 404.</param>
+/// <param name="UserAgent">User-Agent for the Gameforge sign-in requests.</param>
+public sealed record GameHostOptions(int Port = 0, Func<CancellationToken, Task<string>>? AuthCode = null, string? UserAgent = null);
+
 public sealed class GameHost : IAsyncDisposable
 {
     private const string DefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 " +
@@ -35,14 +42,18 @@ public sealed class GameHost : IAsyncDisposable
     private readonly GameBridge? bridge;
     private readonly PacketPluginHost? plugin;
     private readonly string settingsImportDirectory;
+    private readonly Func<CancellationToken, Task<string>>? authCode;
+    private readonly string userAgent;
     private CancellationTokenSource? loop;
 
     public string Url { get; }
 
-    private GameHost(string root, JsonObject active, JsonObject settings, Action<string>? log, GameSettingsStore? gameSettings)
+    private GameHost(string root, JsonObject active, JsonObject settings, Action<string>? log, GameSettingsStore? gameSettings, GameHostOptions options)
     {
         this.log = log;
         this.gameSettings = gameSettings;
+        authCode = options.AuthCode;
+        userAgent = options.UserAgent is { Length: > 0 } agent ? agent : DefaultUserAgent;
         settingsImportDirectory = settings["import_dir"]?.GetValue<string>() ?? "";
         webDir = Path.Combine(root, "recomp", "web");
         buildDir = Path.GetFullPath(active["runtime"]!.GetValue<string>());
@@ -58,7 +69,8 @@ public sealed class GameHost : IAsyncDisposable
             privatePortRemap[from] = to;
         }
         if (provider == "gameforge") auth = new GameforgeAuthentication(settings);
-        var port = FreeLoopbackPort();
+        if (options.Port is < 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(options), "Choose a port between 1 and 65535, or 0 for an available port.");
+        var port = options.Port == 0 ? FreeLoopbackPort() : options.Port;
         Url = $"http://127.0.0.1:{port}/";
         authority = $"127.0.0.1:{port}";
         originUrl = $"http://127.0.0.1:{port}";
@@ -77,9 +89,9 @@ public sealed class GameHost : IAsyncDisposable
         }
     }
 
-    public static async Task<GameHost> StartAsync(string root, JsonObject active, JsonObject settings, Action<string>? log = null, GameSettingsStore? gameSettings = null)
+    public static async Task<GameHost> StartAsync(string root, JsonObject active, JsonObject settings, Action<string>? log = null, GameSettingsStore? gameSettings = null, GameHostOptions? options = null)
     {
-        var host = new GameHost(root, active, settings, log, gameSettings);
+        var host = new GameHost(root, active, settings, log, gameSettings, options ?? new GameHostOptions());
         try
         {
             host.listener.Start();
@@ -226,7 +238,15 @@ public sealed class GameHost : IAsyncDisposable
             }
             if (path is "/auth/login" or "/auth/challenge" or "/auth/launch" or "/auth/launch-code")
             { await AuthAsync(context, path); return; }
-            if (path == "/auth-code") { Reply(context, 404); return; }
+            if (path == "/auth-code")
+            {
+                // The worker asks synchronously at startup when the page URL has no auth parameter.
+                if (authCode is null) { Reply(context, 404); return; }
+                try { Reply(context, 200, Encoding.UTF8.GetBytes(await authCode(loop?.Token ?? default)), "text/plain"); }
+                catch (Exception error) when (error is not OperationCanceledException)
+                { Reply(context, 502, Encoding.UTF8.GetBytes(error.Message), "text/plain"); }
+                return;
+            }
             if (path == "/game-index.json") { GameIndex(context); return; }
             await StaticAsync(context, path);
         }
@@ -275,10 +295,10 @@ public sealed class GameHost : IAsyncDisposable
         {
             var result = path switch
             {
-                "/auth/login" => await auth.LoginAsync(payload, DefaultUserAgent),
+                "/auth/login" => await auth.LoginAsync(payload, userAgent),
                 "/auth/challenge" => await auth.ChallengeAsync(payload),
-                "/auth/launch" => await auth.LaunchAsync(payload, DefaultUserAgent),
-                _ => await auth.LaunchAsync(payload, DefaultUserAgent, codeOnly: true),
+                "/auth/launch" => await auth.LaunchAsync(payload, userAgent),
+                _ => await auth.LaunchAsync(payload, userAgent, codeOnly: true),
             };
             if (result["code"] is { } code) result["code"] = GameforgeAuthentication.ClientTicket(code.GetValue<string>());
             ReplyJson(context, 200, result);

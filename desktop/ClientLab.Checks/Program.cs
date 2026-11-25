@@ -88,6 +88,7 @@ await BrowserIdentityChecks.RunAsync();
 await BuildWorkspaceChecks.RunAsync();
 await GameSettingsChecks.RunAsync();
 await RelayChecks.RunAsync();
+await ServeChecks.RunAsync();
 DiscoveryChecks.Run();
 await StartupChecks.RunAsync();
 await AnalysisChecks.RunAsync();
