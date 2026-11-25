@@ -6,7 +6,10 @@ param(
     [string]$Version = '0.1.0',
     [ValidatePattern('^[a-zA-Z0-9._-]+$')]
     [string]$ExecutableName,
-    [switch]$SkipChecksum
+    [switch]$SkipChecksum,
+    # macOS only: the codesign identity for ClientLab.app. "-" is an ad-hoc signature (unsigned distribution);
+    # a "Developer ID Application: ..." identity from the keychain signs it for notarization.
+    [string]$MacSigningIdentity = '-'
 )
 $ErrorActionPreference = 'Stop'
 if (!$Runtime) { throw 'Specify -Runtime win-x64, linux-x64, osx-x64 or osx-arm64.' }
@@ -71,3 +74,59 @@ if (!$SkipChecksum) {
     "$hash  $([IO.Path]::GetFileName($artifact))" | Set-Content "$artifact.sha256" -Encoding ascii
 }
 Write-Output "Release executable: $artifact"
+
+# macOS players get ClientLab.app in a disk image. The bare executable above stays a release asset: the launcher's
+# self-updater downloads it and replaces Contents/MacOS/ClientLab inside the installed app.
+if ($IsMacOS) {
+    $appName = 'ClientLab.app'
+    $staging = Join-Path $work 'dmg'
+    $app = Join-Path $staging $appName
+    $contents = Join-Path $app 'Contents'
+    New-Item -ItemType Directory -Path (Join-Path $contents 'MacOS'), (Join-Path $contents 'Resources') -Force | Out-Null
+    Copy-Item $artifact (Join-Path $contents 'MacOS/ClientLab')
+    & chmod 755 (Join-Path $contents 'MacOS/ClientLab')
+    $iconEntry = ''
+    $png = Join-Path $PSScriptRoot 'ClientLab.Launcher/Assets/noscore.png'
+    $iconset = Join-Path $work 'ClientLab.iconset'
+    try {
+        New-Item -ItemType Directory -Path $iconset -Force | Out-Null
+        foreach ($size in 16, 32, 128, 256, 512) {
+            & sips -z $size $size $png --out (Join-Path $iconset "icon_${size}x${size}.png") | Out-Null
+            & sips -z ($size * 2) ($size * 2) $png --out (Join-Path $iconset "icon_${size}x${size}@2x.png") | Out-Null
+        }
+        & iconutil -c icns $iconset -o (Join-Path $contents 'Resources/ClientLab.icns')
+        if (!$LASTEXITCODE) { $iconEntry = "  <key>CFBundleIconFile</key><string>ClientLab</string>`n" }
+    } catch { Write-Warning "No app icon: $_" }
+    $shortVersion = ($Version -split '[-+]')[0]
+    @"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>io.noscore.clientlab</string>
+  <key>CFBundleName</key><string>ClientLab</string>
+  <key>CFBundleDisplayName</key><string>ClientLab</string>
+  <key>CFBundleExecutable</key><string>ClientLab</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$shortVersion</string>
+  <key>CFBundleVersion</key><string>$Version</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+$iconEntry</dict>
+</plist>
+"@ | Set-Content (Join-Path $contents 'Info.plist') -Encoding utf8
+    $signArguments = @('--force', '--deep', '-s', $MacSigningIdentity)
+    if ($MacSigningIdentity -ne '-') { $signArguments += @('--options', 'runtime', '--timestamp') }
+    & codesign @signArguments $app
+    if ($LASTEXITCODE) { throw 'Signing ClientLab.app failed.' }
+    & ln -s /Applications (Join-Path $staging 'Applications')
+    $dmg = Join-Path $destination "ClientLab-$Version-$Runtime.dmg"
+    if (Test-Path $dmg) { Remove-Item $dmg -Force }
+    & hdiutil create -volname ClientLab -srcfolder $staging -ov -format UDZO $dmg
+    if ($LASTEXITCODE) { throw 'Creating the disk image failed.' }
+    if (!$SkipChecksum) {
+        $hash = (Get-FileHash $dmg -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash  $([IO.Path]::GetFileName($dmg))" | Set-Content "$dmg.sha256" -Encoding ascii
+    }
+    Write-Output "Disk image: $dmg"
+}
