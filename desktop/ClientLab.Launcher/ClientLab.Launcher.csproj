@@ -36,5 +36,7 @@
     <EmbeddedResource Include="../../recomp/runtime/*.c;../../recomp/runtime/*.h" LogicalName="Source/recomp/runtime/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../recomp/web/index.html;../../recomp/web/worker.js;../../recomp/web/gl.js" LogicalName="Source/recomp/web/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../symbols/**/*.txt" LogicalName="Source/symbols/%(RecursiveDir)%(Filename)%(Extension)" />
+    <!-- The runtime module prebuilt by the release workflow (the build-host command); absent in local builds, which compile it. -->
+    <EmbeddedResource Include="Prebuilt/host/*" LogicalName="Prebuilt/host/%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>

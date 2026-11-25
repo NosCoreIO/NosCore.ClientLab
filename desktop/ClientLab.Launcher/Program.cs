@@ -29,6 +29,11 @@ internal static class Program
             AttachParentConsole();
             return Services.CompileCommand.RunAsync(args, DataDirectory).GetAwaiter().GetResult();
         }
+        if (args.FirstOrDefault() == "--build-host")
+        {
+            AttachParentConsole();
+            return Services.CompileCommand.RunHostAsync(args, DataDirectory).GetAwaiter().GetResult();
+        }
         if (args.Contains("--serve"))
         {
             AttachParentConsole();

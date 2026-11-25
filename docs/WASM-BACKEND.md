@@ -38,7 +38,17 @@ Today the launcher compiles all three with Emscripten on each device. Only the s
 
   No measurable cost from position-independent code here. The busy in-world scenes of `docs/PERFORMANCE.md` still need
   the same comparison before Stage 2 relies on it.
-- **Next:** CI prebuilds the host module per release and ships it, so devices only build the game module.
+- **The host module ships prebuilt** (`ClientLab --build-host`). The release workflow builds it once on Linux with the
+  launcher's pinned Emscripten and embeds it in every platform's launcher, with a `host.json` stamp:
+  - a fingerprint of the runtime and port sources (line endings normalised), the flags and the Emscripten version;
+  - a SHA-256 for each file.
+
+  A launcher uses it only when its own sources, flags and `emcc --version` match, so a developer build with changed
+  runtime code or another Emscripten still builds its own. Players compile and link only the game module.
+  - Verified on Windows: a Linux-style stamp matches a Windows (CRLF) checkout. The game module linked against the
+    embedded host boots like the local build: it renders at 51 fps, connects through the relay and exits the same way
+    on a dummy sign-in.
+- **Next:** Stage 2 compiles the game module without emsdk.
 
 ## Stage 2: replace the native toolchain (recommended path)
 
