@@ -13,6 +13,9 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <DebugType>none</DebugType>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Shared/LauncherUpdate.cs" Link="Shared/LauncherUpdate.cs" />
+  </ItemGroup>
   <ItemGroup Condition="'$(LauncherPayload)' != ''">
     <EmbeddedResource Include="$(LauncherPayload)" LogicalName="LauncherPayload.zip" />
   </ItemGroup>

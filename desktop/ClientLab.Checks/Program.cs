@@ -96,6 +96,7 @@ await CompilationCacheChecks.RunAsync();
 await StructuredDispatchChecks.RunAsync();
 VerifiedClientChecks.Run();
 await GameFilesChecks.RunAsync();
+await LauncherUpdateChecks.RunAsync();
 
 if (OperatingSystem.IsWindows())
 {

@@ -34,6 +34,7 @@ public partial class MainWindow : Window
         CaptchaDropTarget.AddHandler(DragDrop.DropEvent, CaptchaDrop);
         model.GameRequested += ShowGame;
         model.IdentityRequested = CreateIdentityAsync;
+        model.RestartRequested += Close;
         timer.Tick += async (_, _) => await model.RefreshAsync();
         Opened += async (_, _) => { await model.InitializeAsync(); timer.Start(); };
         Closing += async (_, e) =>
@@ -46,6 +47,7 @@ public partial class MainWindow : Window
                 if (gameWindow is not null) await gameWindow.CloseGameAsync();
                   packetWindow?.Close();
                 identityBrowser?.Dispose(); identityCollector?.Dispose();
+                model.DisposeLauncherUpdates();
                 if (model.Coordinator is not null) await model.Coordinator.DisposeAsync();
             }
             finally { closing = true; Close(); }

@@ -126,7 +126,10 @@
               </StackPanel>
             <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,24,0,8">
               <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center"><Ellipse Width="5" Height="5" Fill="#B9E8CC" VerticalAlignment="Center" /><TextBlock Text="{Binding StatusLabel}" Classes="muted" FontSize="10" /></StackPanel>
-              <Button Grid.Column="1" Classes="subtle" Content="Check for updates" Command="{Binding CheckUpdatesCommand}" IsEnabled="{Binding CanCheck}" FontSize="10" />
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                <Button Classes="subtle" IsVisible="{Binding LauncherUpdateReady}" Content="{Binding LauncherUpdateLabel, StringFormat='{}{0} · Restart'}" Command="{Binding RestartToUpdateCommand}" FontSize="10" ToolTip.Tip="Restarts ClientLab on the new version. Otherwise it is used the next time ClientLab starts." />
+                <Button Classes="subtle" Content="Check for updates" Command="{Binding CheckUpdatesCommand}" IsEnabled="{Binding CanCheck}" FontSize="10" />
+              </StackPanel>
             </Grid>
           </Grid>
           </Border>

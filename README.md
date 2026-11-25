@@ -144,9 +144,22 @@ The executable bundles the launcher, .NET and Chromium, and extracts them into t
 user's local application-data directory on first use. It imports or downloads game
 files locally; releases contain no game executable, assets, generated client C/WASM,
 credentials or device identities. `--verify-payload` checks extraction without opening
-the UI. The desktop release workflow builds each target on its own OS and creates a
-draft GitHub release for `launcher-v*` tags. No release is published automatically.
-Linux/macOS game execution and unsigned macOS distribution still need platform testing.
+the UI. On macOS the script also wraps the executable in `ClientLab.app` (ad-hoc signed) and a `.dmg`.
+
+#### Releases and updates
+
+- **Every merge to `main`** that touches `desktop/`, `recomp/` or `global.json` builds Windows, Linux and both macOS
+  targets, runs the launcher checks on each, and publishes a release `v0.2.<run>` marked latest. `launcher-v*` tags
+  still create a draft release; a manual run only builds the binaries.
+- **The launcher updates itself.** A released launcher downloads the latest release's executable in the background
+  (checked against `release-manifest.json`'s SHA-256), and the bootstrap swaps it in on the next start or when
+  the player clicks *Restart* next to *Check for updates*. `dotnet run` and other development builds never update.
+- **Game patches need no launcher release.** The launcher follows Gameforge's patch manifest and fetches the
+  analysis that the *Client analysis* workflow commits under `symbols/` for each new client build.
+- Releases are unsigned: Windows SmartScreen and macOS Gatekeeper ask once (*More info → Run anyway*,
+  *System Settings → Privacy & Security → Open Anyway*). The workflow signs Windows executables and signs and
+  notarizes the macOS app once the `WINDOWS_CERT_*` / `APPLE_*` secrets exist. Linux and macOS game execution
+  still need platform testing.
 Image-drop CAPTCHA verification supports dragging one of the four supplied icons onto
 the target, or clicking its numbered button. Rejected answers refresh the complete image
 set; old drags cannot submit against a refreshed challenge. Other challenge types are
