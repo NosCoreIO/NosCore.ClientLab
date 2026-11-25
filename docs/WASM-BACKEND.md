@@ -42,8 +42,20 @@ Only `WasmCompiler.cs` changes: it invokes the WASM clang (one instance per work
 - **Cons:** clang running in WASM is roughly 2–3x slower than native, and phones have fewer cores and
   less RAM. Expect a one-time compile of tens of minutes on a phone for each client executable patch.
   Asset-only patches never recompile.
-- **To verify first:** peak memory of the largest generated file at `-O2` (phones), and whether
-  the side module needs any Binaryen post-processing that `emcc` used to do.
+- **Measured** (2026-11-26, Node 20 on a 16-thread Windows desktop, real generated code of the current client,
+  `--target=wasm32-unknown-emscripten -O2 -c` against Emscripten 4.0.19's sysroot headers):
+
+  | File | Native clang (emsdk) | clang as WASM | Object size (native / WASM) |
+  |---|---|---|---|
+  | `fn_004d0000.c` (1.2 MB, median) | 3.2 s | 10.1 s | 321,091 / 321,054 B |
+  | `fn_00528000.c` (1.9 MB, largest) | 4.4 s | 16.5 s | 522,172 / 522,174 B |
+
+  About 3.5x slower, with essentially identical code, and about 400 MB resident per compiler instance. The whole
+  client (149 MB of C in 114 files) is roughly 20 CPU-minutes, so about 3 minutes with 8 workers on a desktop.
+  On a phone, with 3–4 workers sized to its RAM, expect 20–40 minutes, once per client executable patch.
+- The toolchain is `@yowasp/clang` (a 104 MB download) plus the Emscripten sysroot `include/` (22 MB) we ship.
+- **Still to verify:** whether `wasm-ld --shared` output loads as an Emscripten side module without the
+  Binaryen post-processing that `emcc` does.
 
 ## Stage 3: direct WASM emitter (`WasmEmitter` next to `CEmitter`)
 
