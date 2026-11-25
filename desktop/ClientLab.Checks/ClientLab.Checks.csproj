@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- CefGlue's targets reach this project transitively; it needs none of their native files either. -->
+    <CefGlueTargetPlatform>none</CefGlueTargetPlatform>
   </PropertyGroup>
   <ItemGroup>
     <!-- The checks never start Chromium: building the launcher without CEF's native files keeps them from depending
