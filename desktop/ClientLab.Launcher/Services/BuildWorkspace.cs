@@ -17,10 +17,12 @@ public static class BuildWorkspace
         {
             token.ThrowIfCancellationRequested();
             try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
-            // Held by another launcher: Windows sharing/lock violation (32, 33), Linux EWOULDBLOCK (11),
-            // macOS/BSD EWOULDBLOCK (35).
-            catch (IOException error) when ((error.HResult & 0xFFFF) is 32 or 33 or 11 or 35)
+            catch (IOException error) when (IsHeldByAnotherProcess(error))
             { await Task.Delay(250, token); }
         }
     }
+
+    /// <summary>An exclusive open refused because another process holds the file: Windows sharing/lock violation
+    /// (32, 33), Linux EWOULDBLOCK (11), macOS/BSD EWOULDBLOCK (35).</summary>
+    public static bool IsHeldByAnotherProcess(IOException error) => (error.HResult & 0xFFFF) is 32 or 33 or 11 or 35;
 }
