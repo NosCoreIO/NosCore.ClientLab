@@ -27,6 +27,24 @@ public static class VerifiedClientFiles
         { return false; }
     }
 
+    /// <summary>The files of a verified folder whose size and timestamp still match the verification: name, path, SHA-1.</summary>
+    public static IEnumerable<(string Name, string Path, string Sha1)> Intact(string client)
+    {
+        JsonObject? files;
+        try { files = JsonNode.Parse(File.ReadAllText(IndexPath(client)))?["files"] as JsonObject; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidOperationException)
+        { yield break; }
+        if (files is null) yield break;
+        foreach (var (name, stamp) in files)
+        {
+            if (stamp is not JsonObject value || value["sha1"]?.GetValue<string>() is not { } sha1) continue;
+            var path = Path.Combine(client, name);
+            var file = new FileInfo(path);
+            if (file.Exists && file.Length == value["size"]?.GetValue<long>() && file.LastWriteTimeUtc.Ticks == value["modified"]?.GetValue<long>())
+                yield return (name, path, sha1);
+        }
+    }
+
     // Commit only after the caller has verified/copied every file against the publisher's checksum.
     public static void MarkVerified(string client, string manifestId, JsonArray entries)
     {

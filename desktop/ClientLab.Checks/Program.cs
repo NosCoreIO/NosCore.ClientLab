@@ -95,6 +95,7 @@ NewsChecks.Run();
 await CompilationCacheChecks.RunAsync();
 await StructuredDispatchChecks.RunAsync();
 VerifiedClientChecks.Run();
+await GameFilesChecks.RunAsync();
 
 if (OperatingSystem.IsWindows())
 {
