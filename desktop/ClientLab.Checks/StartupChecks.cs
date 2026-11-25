@@ -87,14 +87,14 @@ internal static class StartupChecks
             byte[] assetContents = AssetChanged ? [3, 4] : [1, 2];
             if (request.RequestUri!.Host == "spark.gameforge.com")
             {
-                Manifests++;
+                Interlocked.Increment(ref Manifests);
                 var exe = new JsonObject { ["file"] = "NostaleClientX.exe", ["sha1"] = Convert.ToHexStringLower(SHA1.HashData(contents)), ["path"] = DifferentCdn ? "/new-cdn/executable" : "/fixture/executable", ["size"] = contents.Length, ["folder"] = false };
                 var asset = new JsonObject { ["file"] = "data.txt", ["sha1"] = Convert.ToHexStringLower(SHA1.HashData(assetContents)), ["path"] = "/fixture/asset", ["size"] = 2, ["folder"] = false };
                 var json = new JsonObject { ["build"] = "fixture", ["entries"] = ReverseOrder ? new JsonArray(asset, exe) : new JsonArray(exe, asset) };
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json.ToJsonString(), Encoding.UTF8, "application/json") });
             }
             if (request.RequestUri.Host != "patches.gameforge.com") throw new Exception("Unexpected startup request.");
-            Downloads++;
+            Interlocked.Increment(ref Downloads);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(request.RequestUri.AbsolutePath.EndsWith("/asset") ? assetContents : contents) });
         }
     }
