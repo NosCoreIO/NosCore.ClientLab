@@ -54,8 +54,12 @@ Only `WasmCompiler.cs` changes: it invokes the WASM clang (one instance per work
   client (149 MB of C in 114 files) is roughly 20 CPU-minutes, so about 3 minutes with 8 workers on a desktop.
   On a phone, with 3–4 workers sized to its RAM, expect 20–40 minutes, once per client executable patch.
 - The toolchain is `@yowasp/clang` (a 104 MB download) plus the Emscripten sysroot `include/` (22 MB) we ship.
-- **Still to verify:** whether `wasm-ld --shared` output loads as an Emscripten side module without the
-  Binaryen post-processing that `emcc` does.
+- **Verified:** a side module compiled (`-fPIC`) and linked by the WASM toolchain loads, with no Binaryen pass,
+  into an `emcc -sMAIN_MODULE=2` host through `dlopen`. It reads and writes a host global, calls a host function,
+  and makes an indirect call through the shared table. The link line is emcc's own side-module line:
+  `wasm-ld --whole-archive <objs> --no-whole-archive --import-memory --strip-debug --export-dynamic
+  --export=__wasm_call_ctors --experimental-pic --unresolved-symbols=import-dynamic -shared`
+  (plus emcc's `-mllvm` flags).
 
 ## Stage 3: direct WASM emitter (`WasmEmitter` next to `CEmitter`)
 
