@@ -12,6 +12,9 @@
     <Version>0.1.0</Version>
     <PublishTrimmed>false</PublishTrimmed>
     <CefArchitecture Condition="'$(CefArchitecture)' == ''">x64</CefArchitecture>
+    <!-- Without a runtime identifier CefGlue falls back to osx-arm64 on every Mac, whose files the x64 package does
+         not contain, so building (for example the checks) fails. Follow the package that is actually referenced. -->
+    <CefGlueTargetPlatform Condition="'$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('OSX'))">osx-$(CefArchitecture)</CefGlueTargetPlatform>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />

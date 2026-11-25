@@ -27,7 +27,8 @@ internal static class StructuredDispatchChecks
             File.WriteAllText(Path.Combine(root, "rt.h"), """
                 #include <stdint.h>
                 typedef struct CPU {
-                  union { struct { uint32_t eax,ecx,edx,ebx,esp,ebp,esi,edi; }; uint32_t regs[8]; };
+                  union { struct { uint32_t eax,ecx,edx,ebx,esp,ebp,esi,edi; }; uint32_t regs[8];
+                          union { uint32_t d; uint16_t w; struct { uint8_t l,h; } b; } r[8]; };
                   uint32_t cf,zf,sf,of,pf,pend,pend_target;
                   double st[8]; uint16_t fsw;
                 } CPU;
@@ -36,9 +37,11 @@ internal static class StructuredDispatchChecks
                 #define RT_LEAF
                 #define RT_TRACE(c,e,r) ((void)0)
                 #define R32(i) c->regs[i]
-                #define R16(i) (*(uint16_t*)&c->regs[i])
-                #define R8L(i) (*(uint8_t*)&c->regs[i])
-                #define R8H(i) (((uint8_t*)&c->regs[i])[1])
+                // Partial registers through a union, as runtime/rt.h does: pointer casts break under GCC's
+                // strict aliasing at -O2 (fnstsw ax then read as eax).
+                #define R16(i) (c->r[i].w)
+                #define R8L(i) (c->r[i].b.l)
+                #define R8H(i) (c->r[i].b.h)
                 #define ST(i) c->st[i]
                 static void rt_fcom(CPU* c,double a,double b) { c->fsw=a<b?0x100:a==b?0x4000:0; }
                 static uint16_t rt_fsw(CPU* c) { return c->fsw; }
@@ -100,15 +103,23 @@ internal static class StructuredDispatchChecks
             }
             else
             {
-                var compiler = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
-                    .Select(path => Path.Combine(path, OperatingSystem.IsWindows() ? "clang.exe" : "cc")).FirstOrDefault(File.Exists);
+                // CLIENTLAB_CC picks a compiler explicitly; otherwise the first C compiler on PATH.
+                var compiler = Environment.GetEnvironmentVariable("CLIENTLAB_CC") is { Length: > 0 } chosen ? chosen :
+                    (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
+                    .SelectMany(path => (OperatingSystem.IsWindows() ? new[] { "clang.exe" } : ["cc", "clang"]).Select(name => Path.Combine(path, name)))
+                    .FirstOrDefault(File.Exists);
                 if (compiler is null) { Console.WriteLine("SKIP: full-function native dispatch check requires a C compiler."); return; }
                 await RunAsync(compiler, ["-O2", Path.Combine(root, "test.c"), "-o", exe], root);
             }
             await RunAsync(exe, [], root);
             Console.WriteLine("PASS: structured dispatch matches the original generated C for 500 branch/loop/mid-entry/return cases; x87 compares distinct stack registers correctly; dropping dead flags leaves registers and flags identical over 500 runs.");
         }
-        finally { Directory.Delete(root, recursive: true); }
+        finally
+        {
+            // CLIENTLAB_KEEP_DISPATCH_CHECK=<new folder> keeps the generated harness for debugging.
+            if (Environment.GetEnvironmentVariable("CLIENTLAB_KEEP_DISPATCH_CHECK") is { Length: > 0 } keep) Directory.Move(root, keep);
+            else Directory.Delete(root, recursive: true);
+        }
     }
 
     private static async Task RunAsync(string executable, string[] arguments, string directory)
@@ -118,6 +129,6 @@ internal static class StructuredDispatchChecks
         using var child = Process.Start(info)!;
         var output = child.StandardOutput.ReadToEndAsync(); var error = child.StandardError.ReadToEndAsync();
         await child.WaitForExitAsync();
-        if (child.ExitCode != 0) throw new Exception("Native dispatch check failed: " + await output + await error);
+        if (child.ExitCode != 0) throw new Exception($"Native dispatch check failed ({Path.GetFileName(executable)} exited with {child.ExitCode}): " + await output + await error);
     }
 }
