@@ -48,7 +48,7 @@ Today the launcher compiles all three with Emscripten on each device. Only the s
   - Verified on Windows: a Linux-style stamp matches a Windows (CRLF) checkout. The game module linked against the
     embedded host boots like the local build: it renders at 51 fps, connects through the relay and exits the same way
     on a dummy sign-in.
-- **Next:** Stage 2 compiles the game module without emsdk.
+- **Next:** Stage 2 compiles the game module without emsdk (done for desktop, below).
 
 ## Stage 2: replace the native toolchain (recommended path)
 
@@ -84,6 +84,49 @@ Only `WasmCompiler.cs` changes: it invokes the WASM clang (one instance per work
   `wasm-ld --whole-archive <objs> --no-whole-archive --import-memory --strip-debug --export-dynamic
   --export=__wasm_call_ctors --experimental-pic --unresolved-symbols=import-dynamic -shared`
   (plus emcc's `-mllvm` flags).
+
+### Stage 2 on desktop: implemented (`WasiToolchain`, `"compiler": "wasm"`)
+
+- **How it runs.** `gen/llvm.core.wasm` in the package is a plain WASI preview 1 command (`_start`, 29
+  `wasi_snapshot_preview1` imports) that picks `clang` or `wasm-ld` from `argv[0]`. The launcher runs it in-process
+  with Wasmtime (`Wasmtime` NuGet, native libraries for all four desktop targets):
+  - Converting the 74 MB module to native code takes 27 s once; it is cached, and later loads take 0.2 s.
+  - Each tool run gets its own store and sees only the directories it needs: clang's headers at `/usr`, the sysroot,
+    the runtime/port headers, the source and object folders.
+  - Cancellation uses epoch interruption.
+- **What it downloads.** The npm tarball of `@yowasp/clang` 22.0.0-git20695-13, checked against npm's SHA-512. The
+  Emscripten sysroot headers come with the release's prebuilt runtime module (3.3 MB zipped, checked against
+  `host.json`), so the game module is compiled against exactly the headers the runtime module was built with.
+- **Flags.** clang gets what `emcc --cflags` adds (target, `-fignore-exceptions`, the two `-mllvm` flags, the sysroot
+  include dirs). The side module uses emcc's wasm-ld line. emcc's extra `wasm-opt -O2` pass is skipped: Binaryen
+  has no WebAssembly build in this toolchain.
+- **Measured** (same Windows desktop, but heavily loaded by other work during these runs, current client):
+
+  | | Native clang (emcc) | clang as WASM, Wasmtime | clang as WASM, Node 20 |
+  |---|---|---|---|
+  | `fn_004d0000.c`, same moment | 6.8 s | 21.7 s | 42.9 s |
+  | Whole client, through the launcher | 291 s cold (earlier, unloaded, 8 workers) | 40 min (3 workers, memory-limited, loaded) | |
+  | Game module link | ~25 s with `wasm-opt` | 1.4–2.4 s, 47.5 MB (emcc: 45.4 MB) | |
+
+  Wasmtime is about 3.2x native and twice as fast as Node. Expect roughly 15 minutes for a cold client on an idle
+  8-worker desktop, against about 5 with Emscripten.
+- **Verified.** A game module compiled and linked this way, with the prebuilt runtime module, boots headless like
+  the Emscripten build: same log, relay connection, 52 fps. Game work per frame:
+
+  | Build | Boot | Idle |
+  |---|---|---|
+  | Emscripten | 9–21 ms | 0.9–1.2 ms |
+  | WASM toolchain | 6.8 ms (up to 121 ms on its first run in a fresh Chrome profile) | 0.8–1.1 ms |
+
+  So skipping `wasm-opt` shows no measurable cost on the boot scenes. Busy in-world scenes still need the comparison.
+- **Default.** Emscripten stays the default on desktop because it compiles about 3x faster. The WebAssembly
+  toolchain is used automatically when Emscripten cannot be set up, or always with `"compiler": "wasm"`.
+
+### Android, next
+
+Wasmtime's NuGet package has no Android build. On Android, run the same `llvm.core.wasm` in the WebView, as a
+worker with a small WASI shim over an in-memory or OPFS file system. Alternatively, ship Wasmtime's C API built for
+`aarch64-linux-android` (Wasmtime supports the target) behind the same `WasiToolchain` interface.
 
 ## Stage 3: direct WASM emitter (`WasmEmitter` next to `CEmitter`)
 
