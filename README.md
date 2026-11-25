@@ -71,6 +71,11 @@ The native Avalonia launcher embeds the game in Chromium. Installation, patch do
 compilation orchestration and the game host are written in C#; Emscripten still uses a private Python runtime
 internally. Requires .NET 10 for development.
 
+The game module is compiled by Emscripten by default. A released launcher can instead compile it with clang and
+wasm-ld built as WebAssembly, run in-process by Wasmtime (no emsdk, no Python; about 3x slower to compile). It does
+that automatically when Emscripten cannot be set up, or always with `"compiler": "wasm"` in `settings.json`
+(`--compiler wasm` for `ClientLab --compile`). See [docs/WASM-BACKEND.md](docs/WASM-BACKEND.md).
+
 ```powershell
 dotnet run --project desktop/ClientLab.Launcher -- --data-dir C:/dev/ClientLab-data
 ```

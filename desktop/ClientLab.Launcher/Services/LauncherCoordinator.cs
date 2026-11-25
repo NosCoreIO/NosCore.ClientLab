@@ -461,7 +461,6 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             return;
         }
         var ghidraFunctions = Path.Combine(symbolsDirectory, "ghidra-functions.txt");
-        await EnsureToolsAsync(token);
         if (Directory.Exists(symbolsDirectory))
         {
             foreach (var file in Directory.EnumerateFiles(symbolsDirectory, "*.txt"))
@@ -492,7 +491,8 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         if (unsupported > 0) Log($"Compatibility notice: {unsupported} unimplemented instruction sites; this build is experimental.");
         Status("compiling", "Compiling the game runtime…");
         var build = Path.Combine(version, "wasm/web");
-        await WasmCompiler.BuildAsync(root, generated, build, Setting("emcc"), this, token);
+        await WasmCompiler.BuildAsync(root, generated, build, CompilerSetting(Setting("compiler")),
+            async ct => { await EnsureToolsAsync(ct); return Setting("emcc"); }, this, token);
         var record = new JsonObject { ["id"] = buildVersionId, ["build"] = buildLabel,
             ["executable_sha256"] = digest, ["client"] = client, ["executable"] = pinned, ["runtime"] = build,
             ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["unsupported_sites"] = unsupported,
@@ -502,6 +502,14 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         Prune(buildVersionId);
         Status("ready", "Your build is ready to launch.", 1);
     }
+
+    /// <summary>The <c>compiler</c> setting: <c>wasm</c> for the WebAssembly toolchain, <c>emcc</c> for Emscripten, anything else automatic.</summary>
+    public static CompilerChoice CompilerSetting(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "wasm" or "webassembly" => CompilerChoice.WebAssembly,
+        "emcc" or "emscripten" => CompilerChoice.Emscripten,
+        _ => CompilerChoice.Auto,
+    };
 
     private async Task EnsureToolsAsync(CancellationToken token)
     {
