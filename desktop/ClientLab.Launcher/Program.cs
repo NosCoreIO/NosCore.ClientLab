@@ -24,6 +24,11 @@ internal static class Program
         DataDirectory = Option("--data-dir") ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NosCore.ClientLab");
         Directory.CreateDirectory(DataDirectory);
+        if (args.FirstOrDefault() == "--compile")
+        {
+            AttachParentConsole();
+            return Services.CompileCommand.RunAsync(args, DataDirectory).GetAwaiter().GetResult();
+        }
         if (args.Contains("--serve"))
         {
             AttachParentConsole();
