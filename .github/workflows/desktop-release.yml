@@ -1,14 +1,21 @@
 name: Desktop launcher releases
 # Every merge to main that changes the launcher publishes a rolling release (v0.2.<run>), which running launchers pick
 # up through release-manifest.json and install themselves. `launcher-v*` tags still produce a draft release for a
-# hand-written milestone; workflow_dispatch builds the binaries without releasing them.
+# hand-written milestone; workflow_dispatch builds the binaries without releasing them. Pull requests build and check
+# every platform without releasing, so a merge is never the first time a platform job runs.
 # Game client patches never need a launcher release: the launcher reads Gameforge's patch manifest and fetches the
 # per-build analysis from symbols/ at runtime, which is why symbols/** is not a trigger here.
-# Android: not built here yet; it will come from the recompiler's direct WebAssembly backend.
+# Android: not built here yet; it needs builds prepared without Emscripten on the device (docs/WASM-BACKEND.md).
 on:
   push:
     branches: [main]
     tags: ['launcher-v*']
+    paths:
+      - 'desktop/**'
+      - 'recomp/**'
+      - 'global.json'
+      - '.github/workflows/desktop-release.yml'
+  pull_request:
     paths:
       - 'desktop/**'
       - 'recomp/**'
@@ -25,7 +32,7 @@ permissions:
 concurrency:
   # Two quick merges: only the newest main build needs to finish. Tags never cancel each other.
   group: desktop-release-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
 jobs:
   version:
     runs-on: ubuntu-latest
