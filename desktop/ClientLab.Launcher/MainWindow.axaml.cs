@@ -36,7 +36,12 @@ public partial class MainWindow : Window
         model.IdentityRequested = CreateIdentityAsync;
         model.RestartRequested += Close;
         timer.Tick += async (_, _) => await model.RefreshAsync();
-        Opened += async (_, _) => { await model.InitializeAsync(); timer.Start(); };
+        Opened += async (_, _) =>
+        {
+            // Chromium downloads in the background on first start, usually before the player needs it.
+            _ = BrowserRuntime.EnsureAsync(Program.DataDirectory).ContinueWith(_ => { }, TaskScheduler.Default);
+            await model.InitializeAsync(); timer.Start();
+        };
         Closing += async (_, e) =>
         {
             if (closing) return;
@@ -54,10 +59,35 @@ public partial class MainWindow : Window
         };
     }
 
+    /// <summary>Waits for Chromium (downloaded once, BrowserRuntime) and starts it, showing the download meanwhile.</summary>
+    private async Task EnsureBrowserAsync()
+    {
+        if (browserInitialized) return;
+        if (!BrowserRuntime.IsReady(AppContext.BaseDirectory))
+        {
+            const string downloading = "Downloading the game browser (first start only)…";
+            model.Notice = downloading;
+            var shown = -1;
+            try
+            {
+                await BrowserRuntime.EnsureAsync(Program.DataDirectory, value =>
+                {
+                    var percent = (int)(value * 100);
+                    if (percent == Interlocked.Exchange(ref shown, percent)) return;
+                    Dispatcher.UIThread.Post(() => { if (model.Notice.StartsWith(downloading[..^1])) model.Notice = $"{downloading} {percent}%"; });
+                });
+            }
+            catch (Exception error) { throw new InvalidOperationException("The game browser could not be downloaded: " + error.Message, error); }
+            if (model.Notice.StartsWith(downloading[..^1])) model.Notice = "";
+        }
+        Program.InitializeBrowser();
+        browserInitialized = true;
+    }
+
     private async Task<IGameforgeIdentity> CreateIdentityAsync()
     {
         if (identityCollector is not null) return identityCollector;
-        if (!browserInitialized) { Program.InitializeBrowser(); browserInitialized = true; }
+        await EnsureBrowserAsync();
         var collector = model.Coordinator!.CreateBrowserIdentity();
         collector.PrepareCollection = async () =>
         {
@@ -130,7 +160,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (!browserInitialized) { Program.InitializeBrowser(); browserInitialized = true; }
+            await EnsureBrowserAsync();
             if (gameWindow is null)
             {
                 var coordinator = model.Coordinator;

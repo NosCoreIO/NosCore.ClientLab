@@ -105,10 +105,10 @@ public static class LauncherUpdate
         if (!string.Equals(Path.GetFullPath(downloaded), Path.GetFullPath(target), StringComparison.Ordinal)) File.Move(downloaded, target, overwrite: true);
         var staged = new StagedUpdate(manifest.Version, runtime, asset.Name, asset.Sha256);
         var record = Path.Combine(updates, StagedRecord);
-        File.WriteAllText(record + ".tmp", JsonSerializer.Serialize(new JsonObject
+        File.WriteAllText(record + ".tmp", new JsonObject
         {
             ["version"] = staged.Version, ["runtime"] = staged.Runtime, ["file"] = staged.File, ["sha256"] = staged.Sha256
-        }));
+        }.ToJsonString());
         File.Move(record + ".tmp", record, overwrite: true);
         return staged;
     }

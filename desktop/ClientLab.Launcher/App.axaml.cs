@@ -14,6 +14,7 @@ public partial class App : Application
             // Diagnostics: --game-url opens only the game window on a local game server, as Play would.
             if (Program.Option("--game-url") is { } url && Uri.TryCreate(url, UriKind.Absolute, out var game) && game.Host == "127.0.0.1")
             {
+                Services.BrowserRuntime.EnsureAsync(Program.DataDirectory).GetAwaiter().GetResult();
                 Program.InitializeBrowser();
                 desktop.MainWindow = new GameWindow(url, () => Task.CompletedTask);
             }

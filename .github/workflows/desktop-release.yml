@@ -162,7 +162,10 @@ jobs:
         shell: pwsh
         run: |
           $identity = if ($IsMacOS -and $env:APPLE_CERT_P12_BASE64) { $env:APPLE_SIGNING_IDENTITY } else { '-' }
-          ./desktop/publish.ps1 -Runtime '${{ matrix.runtime }}' -Version $env:VERSION -MacSigningIdentity $identity
+          # Chromium is a separate asset of the same release; the launcher downloads it from there on first start.
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "v$env:VERSION" }
+          ./desktop/publish.ps1 -Runtime '${{ matrix.runtime }}' -Version $env:VERSION -MacSigningIdentity $identity `
+            -BrowserBaseUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/"
       - name: Sign the Windows executable
         if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX_BASE64 != ''
         shell: pwsh
@@ -190,11 +193,12 @@ jobs:
       - name: Verify bundled payload
         shell: pwsh
         run: |
-          $binaries = @(Get-ChildItem ./dist -File | Where-Object { $_.Name -notlike '*.sha256' -and $_.Name -notlike '*.dmg' })
+          $binaries = @(Get-ChildItem ./dist -File | Where-Object { $_.Name -notlike '*.sha256' -and $_.Name -notlike '*.dmg' -and $_.Name -notlike '*.zip' })
           if ($binaries.Count -ne 1) { throw 'Expected one release executable.' }
           & $binaries[0].FullName --verify-payload
           if ($LASTEXITCODE) { throw 'Payload extraction failed.' }
           if ($IsMacOS -and !(Get-ChildItem ./dist -Filter *.dmg)) { throw 'The macOS disk image is missing.' }
+          if (!(Get-ChildItem ./dist -Filter 'ClientLab-browser-*.zip')) { throw 'The Chromium archive is missing.' }
       - uses: actions/upload-artifact@v4
         with:
           name: ClientLab-${{ matrix.runtime }}

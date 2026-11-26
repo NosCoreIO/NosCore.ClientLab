@@ -12,12 +12,15 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <DebugType>none</DebugType>
+    <!-- The bootstrap only unpacks and starts the launcher: a trimmed runtime keeps the download small. -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../Shared/LauncherUpdate.cs" Link="Shared/LauncherUpdate.cs" />
   </ItemGroup>
   <ItemGroup Condition="'$(LauncherPayload)' != ''">
-    <EmbeddedResource Include="$(LauncherPayload)" LogicalName="LauncherPayload.zip" />
+    <EmbeddedResource Include="$(LauncherPayload)" LogicalName="LauncherPayload.tar.br" />
   </ItemGroup>
   <Target Name="RequirePayload" BeforeTargets="PrepareForPublish" Condition="'$(LauncherPayload)' == ''">
     <Error Text="Use desktop/publish.ps1 to provide the launcher payload." />
