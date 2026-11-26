@@ -74,9 +74,94 @@ internal static class HostBundleChecks
                 throw new Exception("A prebuilt runtime module that fails its checksum was installed.");
             }
             catch (InvalidDataException) { }
+            await SysrootAndChoiceChecksAsync(root, sources, app);
             Console.WriteLine("Prebuilt runtime module checks passed.");
         }
         finally { try { Directory.Delete(root, recursive: true); } catch (IOException) { } }
+    }
+
+    /// <summary>The Emscripten headers that let the WebAssembly toolchain build without Emscripten, and how the compiler is chosen.</summary>
+    private static async Task SysrootAndChoiceChecksAsync(string root, string sources, LauncherCoordinator app)
+    {
+        var bundle = Path.Combine(root, "sysroot-bundle");
+        Directory.CreateDirectory(bundle);
+        var headers = Path.Combine(root, "headers");
+        Directory.CreateDirectory(Path.Combine(headers, "compat"));
+        await File.WriteAllTextAsync(Path.Combine(headers, "compat", "stdio.h"), "/* sysroot header */");
+        System.IO.Compression.ZipFile.CreateFromDirectory(headers, Path.Combine(bundle, HostBundle.SysrootFile));
+        var stamp = new JsonObject
+        {
+            ["fingerprint"] = WasmCompiler.HostFingerprint(sources, "4.0.19"), ["emscripten"] = "4.0.19",
+            [HostBundle.SysrootFile] = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(bundle, HostBundle.SysrootFile)))),
+        };
+        await File.WriteAllTextAsync(Path.Combine(bundle, HostBundle.StampFile), stamp.ToJsonString());
+        var host = HostBundle.FromDirectory(bundle);
+        var read = await host.ReadStampAsync(default) ?? throw new Exception("A valid runtime module stamp was not read.");
+        Check(read.HasSysroot, "The stamp's Emscripten headers were not recognised.");
+        var tools = Path.Combine(root, "tools");
+        var sysroot = await host.ExtractSysrootAsync(read, tools, default);
+        Check(await File.ReadAllTextAsync(Path.Combine(sysroot, "include", "compat", "stdio.h")) == "/* sysroot header */", "The Emscripten headers were not unpacked under include/.");
+        File.Delete(Path.Combine(sysroot, "include", "compat", "stdio.h"));
+        Check(await host.ExtractSysrootAsync(read, tools, default) == sysroot && !File.Exists(Path.Combine(sysroot, "include", "compat", "stdio.h")),
+            "Unpacked Emscripten headers were unpacked again instead of reused.");
+        await File.WriteAllTextAsync(Path.Combine(bundle, HostBundle.SysrootFile), "tampered");
+        try
+        {
+            await host.ExtractSysrootAsync(read, Path.Combine(root, "tools-2"), default);
+            throw new Exception("Emscripten headers that fail their checksum were unpacked.");
+        }
+        catch (InvalidDataException) { }
+        Check(!Directory.EnumerateDirectories(Path.Combine(root, "tools-2")).Any(), "A rejected header archive left a partial sysroot.");
+
+        // Choosing the compiler.
+        Check(LauncherCoordinator.CompilerSetting("wasm") == CompilerChoice.WebAssembly && LauncherCoordinator.CompilerSetting(" EMCC ") == CompilerChoice.Emscripten &&
+              LauncherCoordinator.CompilerSetting(null) == CompilerChoice.Auto && LauncherCoordinator.CompilerSetting("other") == CompilerChoice.Auto,
+            "The compiler setting was not understood.");
+        var generated = Path.Combine(root, "generated");
+        Directory.CreateDirectory(generated);
+        await File.WriteAllTextAsync(Path.Combine(generated, "fn_00401000.c"), "int x;");
+        var noBundle = HostBundle.FromDirectory(Path.Combine(root, "no-bundle"));
+        try
+        {
+            await WasmCompiler.BuildAsync(sources, generated, Path.Combine(root, "out-wasm"), CompilerChoice.WebAssembly,
+                _ => throw new Exception("Emscripten was set up although the WebAssembly compiler was chosen."), app, default, noBundle);
+            throw new Exception("The WebAssembly compiler ran without a prebuilt runtime module.");
+        }
+        catch (InvalidOperationException error) when (error.Message.Contains("runtime module of a release build")) { }
+        try
+        {
+            await WasmCompiler.BuildAsync(sources, generated, Path.Combine(root, "out-auto"), CompilerChoice.Auto,
+                _ => throw new HttpRequestException("emsdk download failed"), app, default, noBundle);
+            throw new Exception("A failed Emscripten setup was hidden although nothing could replace it.");
+        }
+        catch (HttpRequestException) { }
+        // An install that already has Emscripten keeps it (the provider is asked first) even with a usable runtime module.
+        await File.WriteAllTextAsync(Path.Combine(bundle, HostBundle.SysrootFile), "restored");
+        stamp[HostBundle.SysrootFile] = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(bundle, HostBundle.SysrootFile))));
+        await File.WriteAllTextAsync(Path.Combine(bundle, HostBundle.StampFile), stamp.ToJsonString());
+        try
+        {
+            await WasmCompiler.BuildAsync(sources, generated, Path.Combine(root, "out-installed"), CompilerChoice.Auto,
+                _ => throw new OperationCanceledException("emscripten asked"), app, default, host, emscriptenInstalled: true);
+            throw new Exception("An installed Emscripten was not used.");
+        }
+        catch (OperationCanceledException error) when (error.Message == "emscripten asked") { }
+
+        // The compiler package's resource archive cannot write outside its folder.
+        using var tar = new MemoryStream();
+        await using (var writer = new System.Formats.Tar.TarWriter(tar, leaveOpen: true))
+        {
+            var entry = new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "../escaped.h") { DataStream = new MemoryStream([1]) };
+            await writer.WriteEntryAsync(entry);
+        }
+        tar.Position = 0;
+        try
+        {
+            await WasiToolchain.ExtractTarAsync(tar, Path.Combine(root, "usr"), default);
+            throw new Exception("A compiler archive entry escaped its folder.");
+        }
+        catch (InvalidDataException) { }
+        Check(!File.Exists(Path.Combine(root, "escaped.h")), "A compiler archive entry was written outside its folder.");
     }
 
     /// <summary>An emcc stand-in that only answers --version, like the real one does.</summary>

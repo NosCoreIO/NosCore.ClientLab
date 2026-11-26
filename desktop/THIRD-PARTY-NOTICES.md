@@ -1,7 +1,8 @@
 ClientLab is licensed under the MIT license; see LICENSE.txt.
 
 The launcher distributes .NET, Avalonia, CefGlue, Chromium Embedded Framework,
-CommunityToolkit.Mvvm, Iced, SkiaSharp, HarfBuzzSharp and their transitive dependencies.
+CommunityToolkit.Mvvm, Iced, SkiaSharp, HarfBuzzSharp, Wasmtime and their transitive dependencies.
+Release builds also carry the Emscripten sysroot headers (Emscripten and musl) used to build the runtime module.
 Their respective licenses apply. Browser resource files and notices supplied by the
 upstream packages are retained in the extracted application directory.
 
@@ -16,6 +17,11 @@ Upstream license and source locations:
 - Iced: https://github.com/icedland/iced/blob/master/LICENSE.txt
 - SkiaSharp: https://github.com/mono/SkiaSharp/blob/main/LICENSE.md
 - HarfBuzz: https://github.com/harfbuzz/harfbuzz/blob/main/COPYING
+- Wasmtime: https://github.com/bytecodealliance/wasmtime-dotnet/blob/main/LICENSE
+- Emscripten: https://github.com/emscripten-core/emscripten/blob/main/LICENSE
+- musl: https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
+- YoWASP clang (downloaded on demand, not distributed): https://github.com/YoWASP/clang and LLVM's
+  https://github.com/llvm/llvm-project/blob/main/LICENSE.TXT
 
 No NosTale executable, game asset, generated client code, account data or captured
 Gameforge identity is distributed. Game and build-tool downloads occur locally when
