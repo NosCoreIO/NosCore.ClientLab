@@ -24,8 +24,14 @@ internal static class Program
         DataDirectory = Option("--data-dir") ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NosCore.ClientLab");
         Directory.CreateDirectory(DataDirectory);
+        if (args.Contains("--serve"))
+        {
+            AttachParentConsole();
+            return Services.ServeCommand.RunAsync(args, DataDirectory).GetAwaiter().GetResult();
+        }
         if (args.Contains("--browser"))
         {
+            AttachParentConsole();
             RunBrowserAsync(args).GetAwaiter().GetResult();
             return 0;
         }
@@ -55,6 +61,22 @@ internal static class Program
         try { await Task.Delay(Timeout.Infinite, stop.Token); } catch (OperationCanceledException) { }
         finally { Console.CancelKeyPress -= handler; }
     }
+
+    // ClientLab.exe is a GUI-subsystem program, so a terminal that starts it shows none of its output. The headless
+    // modes print their URL, so they join the starting terminal's console; redirected output (a script reading the
+    // URL from a pipe) already works and is left alone.
+    private static void AttachParentConsole()
+    {
+        if (!OperatingSystem.IsWindows() || Console.IsOutputRedirected) return;
+        if (AttachConsole(-1))
+        {
+            Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
+            Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool AttachConsole(int processId);
 
     public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
         .UsePlatformDetect()

@@ -19,9 +19,11 @@ server streams your game files to your own browser only.
 
 ## What works
 
-Against a local NosCore stack, in Chromium (Chrome or Edge 137 or later): the browser build needs WebAssembly
-JavaScript Promise Integration (`-sJSPI` in `recomp/wasm/compile_all.py`), which is how the game yields to the browser
-once per frame. Browsers without it, such as Safari 26 and earlier, cannot start it.
+Against a local NosCore stack, in a Chromium-based browser (Chrome, Edge, or the launcher's embedded Chromium). The
+game runs in a Web Worker that blocks on `Atomics.wait` between frames and shares memory with the page, so the page
+must be cross-origin isolated: the game host sends `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: credentialless`. Browsers without `credentialless` cross-origin isolation, such as
+Safari, cannot start it. No WebAssembly JavaScript Promise Integration (JSPI) is needed.
 
 - login, server and channel selection, character selection, entering the world;
 - walking, chat, the game windows (inventory, skills, ...), GM teleports between maps;
@@ -41,7 +43,7 @@ NosCore.exe ──IDR + Ghidra──▶ function list + names (symbols/<md5>/)
             ──recomp/lift.py──▶ one C function per x86 function (registers, flags and x87 in a CPU struct)
                                  + recomp/runtime (shared helpers)
                                  + recomp/port   (Windows re-implemented: kernel32, user32, gdi32, d3d9, Winsock, Miles, ...)
-            ──Emscripten──▶ nostale.wasm, run in a Web Worker; recomp/web serves the page and relays sockets
+            ──Emscripten──▶ nostale.wasm, run in a Web Worker; the C# game host serves the page and relays sockets
 ```
 
 - **Lifter** (`recomp/lift.py`): recursive descent from the Ghidra function list, extended where Ghidra stops early
@@ -54,82 +56,90 @@ NosCore.exe ──IDR + Ghidra──▶ function list + names (symbols/<md5>/)
 - **Portable host** (`recomp/port`): the Windows the client expects, implemented on browser primitives: WebGL2 for
   Direct3D 9, OffscreenCanvas for GDI text, WebAudio for Miles, SharedArrayBuffer rings for input and sockets (the
   game loop yields to the browser only at Present, once per frame, when it draws straight into the page's canvas).
+- **Game host** (`desktop/ClientLab.Launcher/Services/GameHost.cs`): the one loopback server for every way of
+  running the game (desktop window, browser launcher, headless `--serve` for Playwright). It serves the page, the
+  build and your game folder (lazily, with HTTP Range), the Gameforge sign-in endpoints, and a TCP relay for the worker.
 - **Native host** (`recomp/runtime`, MSVC): the same generated C as a Windows executable, useful for debugging.
 
 The full story, every gotcha found so far, and how to continue are in [docs/STATUS.md](docs/STATUS.md).
 
 ## Quick start
 
-### C# desktop launcher (experimental)
+### Desktop launcher (experimental)
 
-The native Avalonia launcher embeds the game in Chromium. Installation, patch downloads,
-the x86-to-C recompiler, compilation orchestration, and the local game host are written
-in C#. Emscripten still uses a private Python runtime internally. The existing browser
-startup below remains available.
+The native Avalonia launcher embeds the game in Chromium. Installation, patch downloads, the x86-to-C recompiler,
+compilation orchestration and the game host are written in C#; Emscripten still uses a private Python runtime
+internally. Requires .NET 10 for development.
 
 ```powershell
 dotnet run --project desktop/ClientLab.Launcher -- --data-dir C:/dev/ClientLab-data
 ```
 
-Requires .NET 10 for development. Opening the launcher checks for game updates. It
-downloads or imports changed files and recompiles only when the executable changes
-or a complete runtime is missing. Missing build tools are set up only when compilation
-is needed. UI releases and asset-only patches reuse the compiled runtime.
-Sign-in remains available while preparation runs; Play launches the prepared runtime.
-Play opens a separate NosTale window with an aspect-correct game surface. Browser login
-controls and debug panes are hidden there; startup errors are forwarded to Activity.
-Game audio/display preferences use the client's original `Config.ini` format and persist
-across desktop/browser launches and client updates. Existing settings are imported from
-the selected installation on first use. Settings includes Music, Sound effects,
-3D sound and Full screen controls; see [Game preferences](docs/GAME-SETTINGS.md).
-Settings also offers an opt-in packet logger window with timestamped, live-readable
-JSONL files, or a packet logger plugin of your choice in its place; see
-[Packet logger](docs/PACKET-LOGGER.md).
-Runtime compatibility revisions trigger a one-time rebuild when recompiler fixes require
-it, even if the official executable is unchanged. UI-only updates still reuse that build.
-Gameforge mode uses the latest official patch manifest and reuses matching files from
-an installation chosen in Settings. NosCore mode keeps the existing local-install flow.
-Verified file sizes and timestamps are recorded against the official manifest, so an
-unchanged patch skips repeated checksums and copies. Only network transfers are labelled downloads.
-Unchanged complete builds are reused; each new build attempt has its own output directory
-so retries never overwrite generated C files that another process has mapped.
-Completed compilation objects are cached by source, headers, flags and compiler identity,
-so cancelled attempts can reuse their finished work. Larger source chunks start first;
-compilation uses up to eight workers according to CPU and memory availability, with
-file counts and elapsed time shown during preparation.
-Very large functions use structured dispatch to keep WebAssembly compilation practical.
-Function discovery combines exact-build Ghidra-generated function ranges with the C#
-recompiler's relocation, call-graph, and Delphi initializer discovery. The maps are
-bundled as metadata; players do not need Ghidra or Java installed. An unknown executable
-requires a compatibility update containing its Ghidra analysis; the launcher preserves
-the previous runtime instead of building from incomplete discovery. Patching and
-recompilation run in C# using the matching metadata. New builds are experimental.
-Desktop Gameforge sign-in runs the official live
-identity script in the embedded browser, sharing one collector through sign-in and
-launch verification. It uses a registered installation ID from Settings, Windows, or
-an existing identity file. Live Windows validation covers proof-of-work, sign-in,
-account lookup, iovation verification, and successful launch-code issuance (HTTP 201).
+**Updates and preparation**
+
+- Opening the launcher checks the latest official patch manifest. Both sign-in modes play the current official
+  client; files an installation chosen in Settings already has are copied rather than downloaded, and only network
+  transfers are labelled downloads.
+- Verified file sizes and timestamps are recorded against the manifest. A patch hard-links every unchanged file
+  from the previous version (no copy, no re-hash, no extra disk) and downloads only changed files, six at a time,
+  checksummed while they stream. Unreferenced versions and abandoned build attempts are removed afterwards.
+- An open launcher checks for client patches every 20 minutes while idle. A new client whose analysis is not
+  published yet keeps the previous build playable and is retried every 5 minutes.
+- The game is recompiled only when the executable changes, a complete runtime is missing, or a runtime compatibility
+  revision requires a one-time rebuild. UI releases and asset-only patches reuse the compiled runtime. Build tools are
+  set up only when compilation is needed.
+- Function discovery combines the exact build's Ghidra function ranges (`symbols/<md5>/`, bundled or fetched from
+  this repository, where a scheduled workflow commits them for each client patch) with the C# recompiler's
+  relocation, call-graph and Delphi initializer discovery. Players need neither Ghidra nor Java. An executable without
+  published analysis keeps the previous runtime instead of building from incomplete discovery.
+- Each build attempt has its own output directory, so retries never overwrite generated C another process has
+  mapped. Compiled objects are cached by source, headers, flags and compiler identity, so cancelled attempts reuse
+  their finished work. Compilation uses up to eight workers depending on CPU and memory, largest files first, with
+  file counts and elapsed time shown. Very large functions use structured dispatch to keep WebAssembly compilation
+  practical.
+
+**Playing**
+
+- Sign-in stays available while preparation runs; Play launches the prepared runtime in a separate NosTale window
+  with an aspect-correct game surface. Browser login controls and debug panes are hidden there, and startup errors
+  are forwarded to Activity.
+- Game audio and display preferences use the client's own `Config.ini` format and persist across desktop and browser
+  launches and client updates; existing settings are imported from the selected installation on first use. Settings
+  has Music, Sound effects, 3D sound and Full screen controls ([Game preferences](docs/GAME-SETTINGS.md)).
+- Settings also offers an opt-in packet logger window with timestamped, live-readable JSONL files, or a packet
+  logger plugin of your choice in its place ([Packet logger](docs/PACKET-LOGGER.md)).
+
+**Gameforge sign-in**
+
+- Sign-in runs Gameforge's official live identity script in the embedded browser, with one collector shared by
+  sign-in and launch verification. Collection uses a properly sized verification view; native feature encoding and
+  fixed-length JSON framing match the official launcher. Live Windows validation covers proof-of-work, sign-in,
+  account lookup, iovation verification and launch-code issuance (HTTP 201).
+- The installation ID comes from Settings, Windows, or an existing identity file. On Windows, when no identity file is
+  configured and no device identifier has been saved yet, the launcher reads the device identity (`x-game`/`x-vec`)
+  the official Gameforge client registered on this machine from its Local Storage. A freshly minted identifier passes
+  sign-in and iovation but is refused at launch-code creation with HTTP 403 "Not allowed to create code", because
+  Gameforge never registered it for the installation. A saved identifier that does not match the registered one is
+  replaced on the next sign-in; one that matches keeps its live vector rotation. The device identifier and vector are
+  preserved across changing loopback ports. Without the official client, configure `--gf-identity-file` (below).
+- Image CAPTCHA and MFA answers are entered in the launcher. An image-drop CAPTCHA is answered by dragging one of the
+  four icons onto the target or clicking its numbered button; a rejected answer refreshes the whole image set, and old
+  drags cannot submit against a refreshed challenge. Other challenge types are identified and reported explicitly.
+  Proof-of-work runs through Gameforge's official hosted widget in the embedded browser, then sign-in resumes with
+  fresh identity data; failed or cancelled work never advances sign-in, and repeated challenges have a bounded retry
+  count.
+- Remember me stores credentials in Windows Credential Manager, the macOS Keychain, or a Linux Secret Service keyring
+  (`secret-tool` from libsecret-tools); signing out or disabling it removes the entry. The Windows vault is tested;
+  macOS and Linux vaults need platform validation.
+
+**Artwork and news**: NosCore branding, NosTale artwork fetched directly from the CDN linked by the official landing
+page, and Gameforge's English product-news API (444×250 card images, official fallback artwork, four cards per page,
+loaded as pages are viewed). Both are cached locally, network failures never block updates or sign-in, and the NosTale
+image is not included in the repository or releases.
+
 Recompiled-game compatibility and macOS/Linux end-to-end execution remain experimental.
-The official script's device identifier and vector are preserved across changing loopback
-ports, with existing identifiers migrated from the configured identity file. On Windows, when
-no identity file is configured and no device identifier has been saved yet, the launcher reads
-the device identity (`x-game`/`x-vec`) that the official Gameforge client already registered on
-this machine from its Local Storage, rather than letting the collector mint a fresh identifier.
-A minted identifier passes sign-in and iovation but is refused at launch-code creation with
-HTTP 403 "Not allowed to create code", because Gameforge never registered it for the
-installation. For the same reason, a previously saved device identifier that does not match the
-official client's registered one is replaced by the registered one on the next sign-in; a saved
-identifier that already matches keeps its live vector rotation. If the official Gameforge client
-is not installed on the machine, configure `--gf-identity-file` (see below) instead. Collection
-uses a properly sized verification view; native feature encoding and fixed-length JSON
-framing match the official launcher. Image CAPTCHA and MFA answers are entered in the
-launcher. Proof-of-work challenges run through Gameforge's official hosted widget in
-the embedded browser, then resume sign-in with fresh identity data. Failed or cancelled
-work never advances sign-in, and repeated challenges have a bounded retry count.
-The sign-in page offers Remember me: credentials use Windows Credential Manager,
-macOS Keychain, or a Linux Secret Service keyring (`secret-tool` from libsecret-tools).
-They are restored on startup; signing out or disabling Remember me removes the saved
-entry. Windows vault operations are tested; macOS/Linux vaults need platform validation.
+
+### Release executable
 
 To create a single executable, run PowerShell 7 **on the target operating system**:
 
@@ -160,20 +170,20 @@ the UI. On macOS the script also wraps the executable in `ClientLab.app` (ad-hoc
   *System Settings → Privacy & Security → Open Anyway*). The workflow signs Windows executables and signs and
   notarizes the macOS app once the `WINDOWS_CERT_*` / `APPLE_*` secrets exist. Linux and macOS game execution
   still need platform testing.
-Image-drop CAPTCHA verification supports dragging one of the four supplied icons onto
-the target, or clicking its numbered button. Rejected answers refresh the complete image
-set; old drags cannot submit against a refreshed challenge. Other challenge types are
-identified before image requests and reported explicitly.
-The launcher uses NosCore branding and fetches NosTale artwork directly from the CDN
-linked by the official landing page. News and event cards use Gameforge's own English
-product-news API, its 444×250 card images and its official fallback artwork. Left/right
-controls slide through the full feed, four cards per page; images load as pages are viewed. Artwork
-and news are cached locally; network failures do not
-block updates or sign-in. The NosTale image is not included in the repository or releases.
 
-### Existing browser workflow
+### Browser and Playwright
 
-Requirements: Windows, Python 3 (`pip install capstone pefile`), [Emscripten](https://emscripten.org) in
+The same executable runs without its window:
+
+- `ClientLab --serve` starts only the game server for Playwright, `drive.mjs` or a normal browser, and prints
+  `CLIENTLAB_URL=<url>`;
+- `ClientLab --browser` serves the whole launcher (preparation, sign-in, Play) as a web page.
+
+Options, the local API and CAPTCHA automation are in [docs/BROWSER-AUTOMATION.md](docs/BROWSER-AUTOMATION.md).
+
+### Development pipeline (Windows)
+
+Requirements: Windows, .NET 10, Python 3 (`pip install capstone pefile`), [Emscripten](https://emscripten.org) in
 `C:\tools\emsdk`, Ghidra 12 with Java 21 (for the first decompilation), a NosCore server, and the NosCore-patched
 client (`NosCore.exe`; symbols here are for MD5 `51bbff3ec09d67c8425f88d74c6d5df5`).
 
@@ -189,23 +199,24 @@ python recomp\lift.py C:\tools\re\work\input\NosCore.exe C:\tools\re\work\functi
 python recomp\wasm\compile_all.py --web
 
 # 4. Serve it with your game folder and a NosCore account, then open http://127.0.0.1:8077/
-python recomp\web\serve.py --game "C:\Program Files (x86)\Nostale" --user <account> --password <password>
+dotnet run --project desktop/ClientLab.Launcher -- --serve --game "C:\Program Files (x86)\Nostale" `
+    --build C:\tools\re\work\wasm\web --user <account> --password <password> --source-root .
 ```
 
-`serve.py` mints the launcher's auth code from the NosCore WebApi for that account, or you can pass one with
-`?auth=<code>`.
+`--serve --user/--password` mints the launcher's auth code from the NosCore WebApi for that account on every page
+load; `--auth-code <code>` or `?auth=<code>` passes one instead.
 
 ### Linux
 
-The same pipeline runs on Linux (Python 3 with `capstone` and `pefile`, Emscripten's `emcc` on `PATH`, Ghidra 12 with
-its JDK, Node with Playwright). Generated code and builds go to `$NOSRECOMP_WORK` (default `~/re/work`).
+The same pipeline runs on Linux (.NET 10, Python 3 with `capstone` and `pefile`, Emscripten's `emcc` on `PATH`,
+Ghidra 12 with its JDK, Node with Playwright). Generated code and builds go to `$NOSRECOMP_WORK` (default `~/re/work`).
 
 ```bash
 GHIDRA_HOME=/opt/ghidra tools/decompile.sh ~/Nostale/NosCore.exe        # Ghidra only: IDR needs Windows
 W=${NOSRECOMP_WORK:-~/re/work}
 python3 recomp/lift.py $W/input/NosCore.exe $W/functions.txt $W/recomp/gen --seeds $W/recomp/seeds.txt
 python3 recomp/wasm/compile_all.py --web
-python3 recomp/web/serve.py --game ~/Nostale --user <account> --password <password>
+dotnet run --project desktop/ClientLab.Launcher -- --serve --game ~/Nostale --user <account> --password <password> --source-root .
 python3 recomp/web/iterate.py      # seeds each function the client stops on, re-lifts and rebuilds
 ```
 
@@ -213,59 +224,50 @@ Without IDR's seeds the function list is shorter; the lifter takes unit initiali
 from the client's init table, and `iterate.py` is the browser counterpart of `iterate.ps1` for whatever is still
 only reached indirectly.
 
-### Gameforge sign-in
+### Gameforge sign-in from the browser
 
-To sign in directly with Gameforge and mint a launch code, use the `gameforge` provider. Open the page to enter your
-email and password. If the login has multiple linked game accounts, the page shows an account selector after sign-in:
+With the `gameforge` provider (the default without `--user`), open the printed URL with `?login=gameforge` and sign in
+with your Gameforge email and password; a login with several linked game accounts shows an account selector:
 
 ```sh
-python3 recomp/web/serve.py --game /path/to/nostale --auth-provider gameforge --build ./work/wasm/web
+dotnet run --project desktop/ClientLab.Launcher -- --serve --game /path/to/nostale --build ./work/wasm/web
 ```
 
-The page collects Gameforge's `game1.js` blackbox and sends it with the credentials to the loopback server, which
-forwards the login to Gameforge over HTTPS and discards the password after the request. The server calls Gameforge's
-session and account-list endpoints, then submits a play-now iovation event and a session-bound encrypted blackbox to
-the thin-code endpoint before passing the returned short-lived code to the worker as `_NC_AUTH_CODE`.
-The browser build does not run the Gameforge Windows launcher's named-pipe IPC: it feeds the Gameforge-issued ticket
-through the client's `noscore_gf.dll` session-ticket API. Although that DLL's exports are named `Steam_*`, this flow
-does not authenticate with Steam. ClientLab also passes the registered Gameforge installation ID into the worker so
-the client's later `NoS0577` login packet uses the same ID as the Gameforge requests.
-`TNT_INSTALLATION_ID` or `--gf-installation-id` sets the registered installation ID;
-`GF_USER_AGENT` or `--gf-user-agent` sets the request User-Agent. Gameforge can require additional verification or
-launcher-specific request headers; those responses appear in the sign-in form for diagnosis. MFA/captcha challenge
-completion stays in the page: enter the authenticator OTP when requested, or solve the displayed image-drop captcha
-and submit its answer number. The challenge and password are held only in server memory while sign-in is pending.
-On Windows, ClientLab prefers the machine-wide Gameforge installation ID, falling back to the per-user registry
-value when the machine-wide value is absent. A stale per-user value can allow sign-in and iovation while code
-retrieval returns HTTP 403. An explicit `TNT_INSTALLATION_ID` or `--gf-installation-id` still overrides detection.
-On Linux, set
-`TNT_INSTALLATION_ID` to the UUID from an existing registered Gameforge installation before starting the server.
-Do not generate a new UUID: Gameforge can accept the credentials session and still reject launch-code creation
-with HTTP 403 when the installation ID is unregistered. Gameforge credentials sign-in without a challenge is
-supported; MFA or captcha is only needed when Gameforge requests it.
-For a code obtained elsewhere, `CLIENTLAB_AUTH_CODE` or `--auth-code` remains available.
-
-If browser-collected identity data is rejected at code retrieval, use `--gf-identity-file /path/to/identity.json`
-(or `GF_IDENTITY_FILE`). This uses an identity collected by your official launcher for the play-now and code
-requests, refreshing the timestamps/vector and binding it to each new launch session. Credentials sign-in and
-MFA/captcha continue through the page. The captured installation ID must match `TNT_INSTALLATION_ID` on Linux/macOS.
-The identity file contains device fingerprint data; keep it local and out of version control.
-
-To import a `tra:` blackbox obtained from your own launcher's iovation request (for example with
-[GflessClient's BlackboxExtractor](https://github.com/hatz2/GflessClient)), save the value to a local text file and run:
+- The page collects Gameforge's `game1.js` blackbox and sends it with the credentials to the loopback game host, which
+  signs in to Gameforge over HTTPS, lists the linked accounts, submits a play-now iovation event and a session-bound
+  encrypted blackbox to the thin-code endpoint, and passes the returned short-lived code to the worker as
+  `_NC_AUTH_CODE`. Credentials and pending challenges are held only in server memory.
+- The browser build does not run the Gameforge Windows launcher's named-pipe IPC: it feeds the Gameforge-issued
+  ticket through the client's `noscore_gf.dll` session-ticket API. Although that DLL's exports are named `Steam_*`,
+  this flow does not authenticate with Steam. The registered Gameforge installation ID is passed to the worker so the
+  client's later `NoS0577` login packet uses the same ID as the Gameforge requests.
+- MFA and image-CAPTCHA challenges are completed in the page when Gameforge asks for them. Gameforge can require other
+  verification or launcher-specific headers; those responses appear in the sign-in form for diagnosis.
+- **Installation ID.** On Windows the host prefers the ID the official client actually uses (its virtualized
+  machine-wide value, then the machine-wide, then the per-user one): a stale per-user value can allow sign-in and
+  iovation while code retrieval returns HTTP 403. Elsewhere set `TNT_INSTALLATION_ID` (or `--gf-installation-id`) to
+  the UUID of an existing registered Gameforge installation. Do not generate a new UUID: Gameforge can accept the
+  credentials and still reject launch-code creation with HTTP 403 when the installation is unregistered.
+  `GF_USER_AGENT` or `--gf-user-agent` overrides the sign-in User-Agent.
+- **Identity file.** If browser-collected identity data is rejected at code retrieval, use `--gf-identity-file
+  /path/to/identity.json` (or `GF_IDENTITY_FILE`): an identity collected by your official launcher, refreshed and
+  bound to each launch session. Its installation ID must match the one above. It contains device fingerprint data;
+  keep it local and out of version control. To build one from a `tra:` blackbox taken from your own launcher's
+  iovation request (for example with [GflessClient's BlackboxExtractor](https://github.com/hatz2/GflessClient)):
 
 ```sh
 python3 recomp/web/gameforge_identity.py --blackbox-file blackbox.txt --installation-id YOUR_INSTALLATION_UUID --output official.gameforge-identity.json
-python3 recomp/web/serve.py --game /path/to/nostale --build /path/to/web --gf-installation-id YOUR_INSTALLATION_UUID --gf-identity-file official.gameforge-identity.json
+dotnet run --project desktop/ClientLab.Launcher -- --serve --game /path/to/nostale --build /path/to/web --gf-installation-id YOUR_INSTALLATION_UUID --gf-identity-file official.gameforge-identity.json
 ```
 
 The output format is ClientLab's version 12 fingerprint array, rather than GflessClient's named-field identity JSON.
 
 ### Scripted runs
 
-`node recomp/web/drive.mjs [--maps 2,20,145] [--trace] [--dump-frame]` (Playwright with the installed Chrome) logs in,
-enters the world, walks, chats, opens the game windows and teleports between maps, then saves screenshots and the
-client log to `C:\tools\re\work\drive\`. It is the starting point for NosCore end-to-end tests.
+With `--serve` running, `node recomp/web/drive.mjs [--maps 2,20,145] [--trace] [--dump-frame]` (Playwright with the
+installed Chrome) logs in, enters the world, walks, chats, opens the game windows and teleports between maps, then
+saves screenshots and the client log to `C:\tools\re\work\drive\`. It is the starting point for NosCore end-to-end
+tests.
 
 ## Layout
 
@@ -274,7 +276,8 @@ client log to `C:\tools\re\work\drive\`. It is the starting point for NosCore en
 | `recomp/lift.py` | x86 → C lifter |
 | `recomp/runtime/` | runtime shared by the native and browser builds |
 | `recomp/port/` | portable Windows host (HLE of the client's DLLs) and the WebGL renderer |
-| `recomp/web/` | page, worker, dev server with socket relay, `drive.mjs` |
+| `recomp/web/` | page, game and render workers, `drive.mjs`, `iterate.py`, Gameforge identity importer |
+| `desktop/` | C# launcher, game host (`--serve`), bootstrapper, checks and plugin API |
 | `recomp/wasm/` | Emscripten build scripts |
 | `recomp/difftest/` | differential testers: lifted instructions against Unicorn, hand-written functions against their lifted bodies |
 | `tools/` | decompilation pipeline (IDR, Ghidra scripts, cross-reference queries) |

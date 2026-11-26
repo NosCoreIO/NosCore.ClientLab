@@ -3,6 +3,8 @@
 //
 // usage: node drive.mjs [--url http://127.0.0.1:8077/] [--trace] [--params PORT_PROFILE_API=1] [--out dir] [--headed]
 //                       [--maps 2,145] [--cpuprofile]
+// Start the game server first, e.g. `dotnet run --project desktop/ClientLab.Launcher -- --serve --game <nostale dir>
+// --user <account> --password <password>`; it listens on http://127.0.0.1:8077/ by default.
 import { createRequire } from 'node:module';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
