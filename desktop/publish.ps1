@@ -26,10 +26,20 @@ $architecture = if ($Runtime.EndsWith('arm64')) { 'arm64' } else { 'x64' }
 New-Item -ItemType Directory -Path $payload -Force | Out-Null
 
 # The publish input is the launcher project only, never the repository, a client install or user data.
-& dotnet publish (Join-Path $PSScriptRoot 'ClientLab.Launcher/ClientLab.Launcher.csproj') `
-    -c Release -r $Runtime --self-contained true -o $payload `
-    "-p:CefArchitecture=$architecture" "-p:Version=$Version" -p:DebugType=None -p:NuGetAudit=false -m:1
-if ($LASTEXITCODE) { throw 'Publishing the desktop launcher failed.' }
+$project = Join-Path $PSScriptRoot 'ClientLab.Launcher/ClientLab.Launcher.csproj'
+$publishArguments = @('-c', 'Release', '-r', $Runtime, '--self-contained', 'true', '-o', $payload,
+    "-p:CefArchitecture=$architecture", "-p:Version=$Version", '-p:DebugType=None', '-p:NuGetAudit=false', '-m:1')
+& dotnet publish $project @publishArguments
+if ($LASTEXITCODE) {
+    # CefGlue's macOS packaging occasionally misses one Chromium library in the build output (a different one each
+    # time, MSB3030). One clean retry; a failure that repeats is real.
+    Write-Warning 'Publishing failed; retrying once from a clean build output.'
+    $output = Join-Path $PSScriptRoot "ClientLab.Launcher/bin/Release/net10.0/$Runtime"
+    if (Test-Path $output) { Remove-Item $output -Recurse -Force }
+    Remove-Item $payload -Recurse -Force; New-Item -ItemType Directory -Path $payload -Force | Out-Null
+    & dotnet publish $project @publishArguments
+    if ($LASTEXITCODE) { throw 'Publishing the desktop launcher failed.' }
+}
 $launcher = if ($IsWindows) { 'ClientLab.exe' } else { 'ClientLab' }
 if (!(Test-Path (Join-Path $payload $launcher))) { throw 'The published launcher is missing.' }
 $helper = if ($IsWindows) { 'Xilium.CefGlue.BrowserProcess.exe' } else { 'Xilium.CefGlue.BrowserProcess' }
