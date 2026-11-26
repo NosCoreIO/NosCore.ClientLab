@@ -6,7 +6,10 @@ param(
     [string]$Version = '0.1.0',
     [ValidatePattern('^[a-zA-Z0-9._-]+$')]
     [string]$ExecutableName,
-    [switch]$SkipChecksum
+    [switch]$SkipChecksum,
+    # macOS only: the codesign identity for ClientLab.app. "-" is an ad-hoc signature (unsigned distribution);
+    # a "Developer ID Application: ..." identity from the keychain signs it for notarization.
+    [string]$MacSigningIdentity = '-'
 )
 $ErrorActionPreference = 'Stop'
 if (!$Runtime) { throw 'Specify -Runtime win-x64, linux-x64, osx-x64 or osx-arm64.' }
@@ -23,10 +26,20 @@ $architecture = if ($Runtime.EndsWith('arm64')) { 'arm64' } else { 'x64' }
 New-Item -ItemType Directory -Path $payload -Force | Out-Null
 
 # The publish input is the launcher project only, never the repository, a client install or user data.
-& dotnet publish (Join-Path $PSScriptRoot 'ClientLab.Launcher/ClientLab.Launcher.csproj') `
-    -c Release -r $Runtime --self-contained true -o $payload `
-    "-p:CefArchitecture=$architecture" "-p:Version=$Version" -p:DebugType=None -p:NuGetAudit=false -m:1
-if ($LASTEXITCODE) { throw 'Publishing the desktop launcher failed.' }
+$project = Join-Path $PSScriptRoot 'ClientLab.Launcher/ClientLab.Launcher.csproj'
+$publishArguments = @('-c', 'Release', '-r', $Runtime, '--self-contained', 'true', '-o', $payload,
+    "-p:CefArchitecture=$architecture", "-p:Version=$Version", '-p:DebugType=None', '-p:NuGetAudit=false', '-m:1')
+& dotnet publish $project @publishArguments
+if ($LASTEXITCODE) {
+    # CefGlue's macOS packaging occasionally misses one Chromium library in the build output (a different one each
+    # time, MSB3030). One clean retry; a failure that repeats is real.
+    Write-Warning 'Publishing failed; retrying once from a clean build output.'
+    $output = Join-Path $PSScriptRoot "ClientLab.Launcher/bin/Release/net10.0/$Runtime"
+    if (Test-Path $output) { Remove-Item $output -Recurse -Force }
+    Remove-Item $payload -Recurse -Force; New-Item -ItemType Directory -Path $payload -Force | Out-Null
+    & dotnet publish $project @publishArguments
+    if ($LASTEXITCODE) { throw 'Publishing the desktop launcher failed.' }
+}
 $launcher = if ($IsWindows) { 'ClientLab.exe' } else { 'ClientLab' }
 if (!(Test-Path (Join-Path $payload $launcher))) { throw 'The published launcher is missing.' }
 $helper = if ($IsWindows) { 'Xilium.CefGlue.BrowserProcess.exe' } else { 'Xilium.CefGlue.BrowserProcess' }
@@ -71,3 +84,65 @@ if (!$SkipChecksum) {
     "$hash  $([IO.Path]::GetFileName($artifact))" | Set-Content "$artifact.sha256" -Encoding ascii
 }
 Write-Output "Release executable: $artifact"
+
+# macOS players get ClientLab.app in a disk image. The bare executable above stays a release asset: the launcher's
+# self-updater downloads it and replaces Contents/MacOS/ClientLab inside the installed app.
+if ($IsMacOS) {
+    $appName = 'ClientLab.app'
+    $staging = Join-Path $work 'dmg'
+    $app = Join-Path $staging $appName
+    $contents = Join-Path $app 'Contents'
+    New-Item -ItemType Directory -Path (Join-Path $contents 'MacOS'), (Join-Path $contents 'Resources') -Force | Out-Null
+    Copy-Item $artifact (Join-Path $contents 'MacOS/ClientLab')
+    & chmod 755 (Join-Path $contents 'MacOS/ClientLab')
+    $iconEntry = ''
+    $png = Join-Path $PSScriptRoot 'ClientLab.Launcher/Assets/noscore.png'
+    $iconset = Join-Path $work 'ClientLab.iconset'
+    try {
+        New-Item -ItemType Directory -Path $iconset -Force | Out-Null
+        foreach ($size in 16, 32, 128, 256, 512) {
+            & sips -z $size $size $png --out (Join-Path $iconset "icon_${size}x${size}.png") | Out-Null
+            & sips -z ($size * 2) ($size * 2) $png --out (Join-Path $iconset "icon_${size}x${size}@2x.png") | Out-Null
+        }
+        & iconutil -c icns $iconset -o (Join-Path $contents 'Resources/ClientLab.icns')
+        if (!$LASTEXITCODE) { $iconEntry = "  <key>CFBundleIconFile</key><string>ClientLab</string>`n" }
+    } catch { Write-Warning "No app icon: $_" }
+    $shortVersion = ($Version -split '[-+]')[0]
+    @"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>io.noscore.clientlab</string>
+  <key>CFBundleName</key><string>ClientLab</string>
+  <key>CFBundleDisplayName</key><string>ClientLab</string>
+  <key>CFBundleExecutable</key><string>ClientLab</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$shortVersion</string>
+  <key>CFBundleVersion</key><string>$Version</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+$iconEntry</dict>
+</plist>
+"@ | Set-Content (Join-Path $contents 'Info.plist') -Encoding utf8
+    $signArguments = @('--force', '--deep', '-s', $MacSigningIdentity)
+    if ($MacSigningIdentity -ne '-') { $signArguments += @('--options', 'runtime', '--timestamp') }
+    & codesign @signArguments $app
+    if ($LASTEXITCODE) { throw 'Signing ClientLab.app failed.' }
+    & ln -s /Applications (Join-Path $staging 'Applications')
+    $dmg = Join-Path $destination "ClientLab-$Version-$Runtime.dmg"
+    if (Test-Path $dmg) { Remove-Item $dmg -Force }
+    # hdiutil intermittently reports "Resource busy" on CI runners (Spotlight or XProtect scanning the new image).
+    for ($attempt = 1; ; $attempt++) {
+        & hdiutil create -volname ClientLab -srcfolder $staging -ov -format UDZO $dmg
+        if (!$LASTEXITCODE) { break }
+        if ($attempt -ge 5) { throw 'Creating the disk image failed.' }
+        Write-Warning "hdiutil failed (attempt $attempt); retrying."
+        Start-Sleep -Seconds (5 * $attempt)
+    }
+    if (!$SkipChecksum) {
+        $hash = (Get-FileHash $dmg -Algorithm SHA256).Hash.ToLowerInvariant()
+        "$hash  $([IO.Path]::GetFileName($dmg))" | Set-Content "$dmg.sha256" -Encoding ascii
+    }
+    Write-Output "Disk image: $dmg"
+}

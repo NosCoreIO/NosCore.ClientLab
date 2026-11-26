@@ -12,6 +12,9 @@
     <Version>0.1.0</Version>
     <PublishTrimmed>false</PublishTrimmed>
     <CefArchitecture Condition="'$(CefArchitecture)' == ''">x64</CefArchitecture>
+    <!-- Without a runtime identifier CefGlue falls back to osx-arm64 on every Mac, whose files the x64 package does
+         not contain, so building (for example the checks) fails. Follow the package that is actually referenced. -->
+    <CefGlueTargetPlatform Condition="'$(RuntimeIdentifier)' == '' and $([MSBuild]::IsOSPlatform('OSX'))">osx-$(CefArchitecture)</CefGlueTargetPlatform>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />
@@ -28,6 +31,7 @@
     <EmbeddedResource Include="Assets/noscore.png" LogicalName="LauncherLogo.png" />
     <ProjectReference Include="../../recomp/dotnet/ClientLab.Recompiler/ClientLab.Recompiler.csproj" />
     <ProjectReference Include="../ClientLab.Plugins/ClientLab.Plugins.csproj" />
+    <Compile Include="../Shared/LauncherUpdate.cs" Link="Shared/LauncherUpdate.cs" />
     <EmbeddedResource Include="../../recomp/port/*.c;../../recomp/port/*.h;../../recomp/port/*.inc" LogicalName="Source/recomp/port/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../recomp/runtime/*.c;../../recomp/runtime/*.h" LogicalName="Source/recomp/runtime/%(Filename)%(Extension)" />
     <EmbeddedResource Include="../../recomp/web/index.html;../../recomp/web/worker.js;../../recomp/web/gl.js" LogicalName="Source/recomp/web/%(Filename)%(Extension)" />

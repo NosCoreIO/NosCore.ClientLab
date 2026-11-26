@@ -184,10 +184,40 @@ public partial class MainViewModel : ObservableObject
             catch (Exception) { Notice = "Your saved account could not be loaded. You can still sign in."; }
             Initialized = true;
             Coordinator.Start("startup");
+            StartLauncherUpdates();
             await RefreshAsync();
         }
         catch (Exception error) { Notice = error.Message; Busy = false; Message = "ClientLab could not start."; }
     }
+
+    private LauncherUpdates? launcherUpdates;
+    public event Action? RestartRequested;
+    [ObservableProperty] private string launcherUpdateVersion = "";
+    public bool LauncherUpdateReady => LauncherUpdateVersion.Length > 0;
+    public string LauncherUpdateLabel => $"ClientLab {LauncherUpdateVersion} is ready";
+    partial void OnLauncherUpdateVersionChanged(string value)
+    {
+        OnPropertyChanged(nameof(LauncherUpdateReady)); OnPropertyChanged(nameof(LauncherUpdateLabel));
+    }
+
+    private void StartLauncherUpdates()
+    {
+        launcherUpdates = new LauncherUpdates(text => Coordinator?.Log(text));
+        launcherUpdates.StagedChanged += update => Dispatcher.UIThread.Post(() => LauncherUpdateVersion = update.Version);
+        launcherUpdates.StartBackground();
+    }
+
+    /// <summary>Closes ClientLab (and the game, with its usual exit prompt) so the bootstrap can swap in the staged
+    /// launcher and start it again. Without a restart the update still applies on the next start.</summary>
+    [RelayCommand]
+    private void RestartToUpdate()
+    {
+        if (!LauncherUpdateReady) return;
+        Program.RestartRequested = true;
+        RestartRequested?.Invoke();
+    }
+
+    public void DisposeLauncherUpdates() => launcherUpdates?.Dispose();
 
     private async Task LoadArtworkAsync()
     {

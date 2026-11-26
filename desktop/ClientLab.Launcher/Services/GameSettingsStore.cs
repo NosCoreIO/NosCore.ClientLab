@@ -77,7 +77,7 @@ public sealed class GameSettingsStore(string dataDirectory)
         while (true)
         {
             try { return new FileStream(Path.Combine(directory, ".write.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
-            catch (IOException error) when ((error.HResult & 0xFFFF) is 32 or 33 or 11 && timeout.Elapsed < TimeSpan.FromSeconds(5))
+            catch (IOException error) when (BuildWorkspace.IsHeldByAnotherProcess(error) && timeout.Elapsed < TimeSpan.FromSeconds(5))
             { await Task.Delay(10); }
         }
     }

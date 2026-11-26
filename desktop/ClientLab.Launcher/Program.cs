@@ -9,14 +9,16 @@ internal static class Program
     public static string[] Arguments { get; private set; } = [];
     public static string DataDirectory { get; private set; } = "";
     private static bool browserInitialized;
+    /// <summary>Set when the player restarts into a staged launcher update; the bootstrap applies it on that exit code.</summary>
+    public static bool RestartRequested { get; set; }
 
     [STAThread]
-    public static void Main(string[] args)
+    public static int Main(string[] args)
     {
         if (args.FirstOrDefault() == "--recompile")
         {
             Environment.Exit(NosCore.ClientLab.Recompiler.Program.Main(args[1..]));
-            return;
+            return 0;
         }
         Arguments = args;
         DataDirectory = Option("--data-dir") ?? Path.Combine(
@@ -25,10 +27,12 @@ internal static class Program
         if (args.Contains("--browser"))
         {
             RunBrowserAsync(args).GetAwaiter().GetResult();
-            return;
+            return 0;
         }
-        try { BuildAvaloniaApp().StartWithClassicDesktopLifetime(args); }
+        int exitCode;
+        try { exitCode = BuildAvaloniaApp().StartWithClassicDesktopLifetime(args); }
         finally { if (browserInitialized) CefRuntime.Shutdown(); }
+        return RestartRequested ? NosCore.ClientLab.Updates.LauncherUpdate.RestartExitCode : exitCode;
     }
 
     public static string? Option(string name)
