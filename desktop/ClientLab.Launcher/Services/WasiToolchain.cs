@@ -55,8 +55,13 @@ public sealed class WasiToolchain : IDisposable
                 module = await Task.Run(() => Module.FromFile(engine, wasm), token);
                 Directory.CreateDirectory(cache);
                 var temporary = compiled + "." + Guid.NewGuid().ToString("N");
-                await File.WriteAllBytesAsync(temporary, module.Serialize(), token);
-                File.Move(temporary, compiled, overwrite: true);
+                try
+                {
+                    await File.WriteAllBytesAsync(temporary, module.Serialize(), token);
+                    File.Move(temporary, compiled, overwrite: true);
+                }
+                catch { module.Dispose(); throw; }
+                finally { File.Delete(temporary); }
             }
             return new WasiToolchain(engine, module, usr);
         }

@@ -59,6 +59,12 @@ internal static class WasiToolchainChecks
                 _ => throw new Exception("Emscripten was set up although the WebAssembly compiler was chosen."), app, default, bundle);
             CheckGameModule(Path.Combine(work, "web-again", "nostale-game.wasm"));
             Console.WriteLine($"Rebuilt from cached objects in {clock.Elapsed.TotalSeconds:0.0} s.");
+
+            // An installed Emscripten that no longer works falls back to the WebAssembly compiler.
+            await WasmCompiler.BuildAsync(sources, generated, Path.Combine(work, "web-fallback"), CompilerChoice.Auto,
+                _ => Task.FromResult(Path.Combine(work, "removed-emsdk", OperatingSystem.IsWindows() ? "emcc.cmd" : "emcc")), app, default, bundle, emscriptenInstalled: true);
+            CheckGameModule(Path.Combine(work, "web-fallback", "nostale-game.wasm"));
+            Console.WriteLine("A broken Emscripten install fell back to the WebAssembly compiler.");
             Console.WriteLine("WebAssembly compiler checks passed.");
         }
         finally { try { Directory.Delete(work, recursive: true); } catch (IOException) { } }

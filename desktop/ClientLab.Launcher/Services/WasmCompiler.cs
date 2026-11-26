@@ -74,14 +74,18 @@ public static class WasmCompiler
                 app.Log($"The WebAssembly compiler failed ({error.Message}); using Emscripten instead.");
             }
         }
-        string compiler;
-        try { compiler = await emscripten(token); }
+        try { await BuildWithEmscriptenAsync(root, gameSources, output, await emscripten(token), bundle, stamp, app, token); }
+        // An installed Emscripten that no longer works (a half-deleted emsdk, a missing Python) falls back too.
         catch (Exception error) when (choice == CompilerChoice.Auto && unusable is null && emscriptenInstalled && error is not OperationCanceledException)
         {
-            app.Log($"Emscripten could not be set up ({error.Message}); using the WebAssembly compiler instead.");
+            app.Log($"Emscripten failed ({error.Message}); using the WebAssembly compiler instead.");
             await BuildWithWasiAsync(root, gameSources, output, bundle, stamp!, app, token);
-            return;
         }
+    }
+
+    private static async Task BuildWithEmscriptenAsync(string root, string[] gameSources, string output, string compiler, HostBundle bundle, HostBundle.Stamp? stamp,
+        LauncherCoordinator app, CancellationToken token)
+    {
         var prebuilt = stamp is not null && await bundle.TryInstallAsync(stamp, root, compiler, output, app, token);
         var hostSources = prebuilt ? [] : HostSources(root);
         var objects = await CompileAsync(root, gameSources, hostSources, await EmccIdentityAsync(compiler, token),
@@ -101,7 +105,7 @@ public static class WasmCompiler
         using var wasi = await WasiToolchain.PrepareAsync(app.DataDirectory, app, token);
         app.Log($"Compiling with the WebAssembly compiler ({WasiToolchain.Identity}) and {bundle.Description} (Emscripten {stamp.Emscripten}).");
         WasiToolchain.Mount[] includes = [new(sysroot, "/sysroot"), new(Path.Combine(root, "recomp/runtime"), "/inc/runtime"), new(Path.Combine(root, "recomp/port"), "/inc/port")];
-        var objects = await CompileAsync(root, gameSources, [], "wasi:" + WasiToolchain.Identity + "\0" + stamp.Sysroot, (source, obj, _, ct) =>
+        var objects = await CompileAsync(root, gameSources, [], "wasi:" + WasiToolchain.Identity + "\0" + stamp.Sysroot + "\0" + string.Join(' ', WasiClangFlags), (source, obj, _, ct) =>
             wasi.RunAsync("clang", [.. WasiClangFlags, .. GameCompileFlags, "-I/inc/runtime", "-I/inc/port", "/src/" + Path.GetFileName(source), "-o", "/out/" + Path.GetFileName(obj)],
                 [.. includes, new(Path.GetDirectoryName(source)!, "/src"), new(Path.GetDirectoryName(obj)!, "/out", Writable: true)], app, ct), app, token);
         app.Status("compiling", "Finishing game preparation…", .9);

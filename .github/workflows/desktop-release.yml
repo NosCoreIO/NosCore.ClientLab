@@ -137,7 +137,9 @@ jobs:
         run: echo "version=$(grep -oP 'PackageVersion = "\K[^"]+' desktop/ClientLab.Launcher/Services/WasiToolchain.cs || sed -n 's/.*PackageVersion = "\([^"]*\)".*/\1/p' desktop/ClientLab.Launcher/Services/WasiToolchain.cs)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
-          path: ${{ runner.temp }}/wasi-toolchain/tools
+          path: |
+            ${{ runner.temp }}/wasi-toolchain/tools
+            ${{ runner.temp }}/wasi-toolchain/cache/wasmtime
           key: wasi-toolchain-${{ matrix.runtime }}-${{ steps.wasi.outputs.version }}
       - name: Build a game module with the WebAssembly compiler
         # The default compiler for new installs: it must compile, link and cancel on every platform we ship.
