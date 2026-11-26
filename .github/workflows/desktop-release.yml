@@ -211,6 +211,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release
+          # Launcher packages only: the runtime-module artifact is embedded in them, not published.
+          pattern: ClientLab-*
           merge-multiple: true
       - name: Write the update manifest
         # Running launchers read releases/latest/download/release-manifest.json and download the bare executable for

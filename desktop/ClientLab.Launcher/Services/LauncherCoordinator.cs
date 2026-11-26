@@ -148,6 +148,7 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         lock (gate)
         {
             if (action == "startup") updateLoop ??= Task.Run(() => KeepUpdatedAsync(stopping.Token));
+            if (stopping.IsCancellationRequested) throw new InvalidOperationException("ClientLab is closing.");
             if (state["busy"]!.GetValue<bool>() || game is not null) throw new InvalidOperationException("Finish the current task or close the game first.");
             state["busy"] = true; state["error"] = null;
             cancellation = new CancellationTokenSource(); var token = cancellation.Token;
@@ -169,13 +170,13 @@ public sealed class LauncherCoordinator : IAsyncDisposable
                         Status("idle", "Build tools are ready.", 1);
                     }
                 }
-                catch (OperationCanceledException) { Status("idle", "Task cancelled. Your previous build is still available."); }
-                catch (Exception error) when (background && error is HttpRequestException or TimeoutException or TaskCanceledException && state["active"] is not null)
+                catch (Exception error) when (background && !token.IsCancellationRequested && error is HttpRequestException or TimeoutException or TaskCanceledException && state["active"] is not null)
                 {
                     // An unattended check that cannot reach Gameforge must not turn a playable launcher into an error.
                     Log("Background update check failed: " + error.Message);
                     Status("ready", "Ready to play. ClientLab will check for game updates again shortly.", 1);
                 }
+                catch (OperationCanceledException) { Status("idle", "Task cancelled. Your previous build is still available."); }
                 catch (Exception error) { Log(error.Message); lock (gate) state["error"] = error.Message; Status("error", "This step needs attention."); }
                 finally { taskSettings.Value = null; lock (gate) state["busy"] = false; }
             }, CancellationToken.None);
@@ -192,7 +193,8 @@ public sealed class LauncherCoordinator : IAsyncDisposable
                 bool waiting;
                 lock (gate) waiting = state["awaiting_analysis"] is not null;
                 await Task.Delay(waiting ? AnalysisRetryInterval : UpdateInterval, token);
-                lock (gate) if (state["busy"]!.GetValue<bool>() || game is not null) continue;
+                // A preparation that failed (not a network blip) waits for the player instead of repeating every interval.
+                lock (gate) if (state["busy"]!.GetValue<bool>() || game is not null || state["error"] is not null) continue;
                 try { Start("startup", background: true); }
                 catch (InvalidOperationException) { } // A task or the game started in between; try at the next interval.
             }
@@ -439,15 +441,8 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             Status("ready", "Your game is up to date.", 1);
             return;
         }
-        version = BuildWorkspace.Create(versionDirectory);
-        pinned = Path.Combine(version, "compiled-client.exe"); File.Copy(Path.Combine(client, "NostaleClientX.exe"), pinned, overwrite: true);
-        var image = new NosCore.ClientLab.Recompiler.ExecutableImage(pinned);
-        var digest = await HashAsync(pinned, "sha256", token);
-        var buildId = await HashAsync(pinned, "md5", token);
-        Status("analysing", "Preparing the client…");
-        // Seeds come from the symbols committed for this exact build; the recompiler adds the rest through its own
-        // relocation and call-graph discovery. No Ghidra/Java analysis runs here (that stays a dev-only pipeline).
-        var seedAddresses = new List<string> { image.EntryPoint.ToString("x8") };
+        // Checked before a build workspace exists, so waiting for the analysis leaves nothing behind on each retry.
+        var buildId = await HashAsync(Path.Combine(client, "NostaleClientX.exe"), "md5", token);
         var symbolsDirectory = await AnalysisDirectoryAsync(buildId, token);
         if (symbolsDirectory is null)
         {
@@ -460,6 +455,15 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             Status("ready", waiting, 1);
             return;
         }
+        version = BuildWorkspace.Create(versionDirectory);
+        pinned = Path.Combine(version, "compiled-client.exe"); File.Copy(Path.Combine(client, "NostaleClientX.exe"), pinned, overwrite: true);
+        var image = new NosCore.ClientLab.Recompiler.ExecutableImage(pinned);
+        var digest = await HashAsync(pinned, "sha256", token);
+        if (await HashAsync(pinned, "md5", token) != buildId) throw new InvalidDataException("The client executable changed while it was being prepared.");
+        Status("analysing", "Preparing the client…");
+        // Seeds come from the symbols committed for this exact build; the recompiler adds the rest through its own
+        // relocation and call-graph discovery. No Ghidra/Java analysis runs here (that stays a dev-only pipeline).
+        var seedAddresses = new List<string> { image.EntryPoint.ToString("x8") };
         var ghidraFunctions = Path.Combine(symbolsDirectory, "ghidra-functions.txt");
         if (Directory.Exists(symbolsDirectory))
         {
