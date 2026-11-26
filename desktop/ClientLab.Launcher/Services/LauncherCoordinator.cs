@@ -492,7 +492,8 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         Status("compiling", "Compiling the game runtime…");
         var build = Path.Combine(version, "wasm/web");
         await WasmCompiler.BuildAsync(root, generated, build, CompilerSetting(Setting("compiler")),
-            async ct => { await EnsureToolsAsync(ct); return Setting("emcc"); }, this, token);
+            async ct => { await EnsureToolsAsync(ct); return Setting("emcc"); }, this, token,
+            emscriptenInstalled: File.Exists(Setting("emcc")));
         var record = new JsonObject { ["id"] = buildVersionId, ["build"] = buildLabel,
             ["executable_sha256"] = digest, ["client"] = client, ["executable"] = pinned, ["runtime"] = build,
             ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), ["unsupported_sites"] = unsupported,

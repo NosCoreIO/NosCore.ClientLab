@@ -45,9 +45,11 @@ public static class WasmCompiler
 
     /// <summary>Builds the game module for <paramref name="generated"/> and places the runtime module beside it: the
     /// release's prebuilt one when it was built from these exact sources, otherwise a local one (which needs Emscripten).
-    /// <paramref name="emscripten"/> returns emcc's path, installing it if needed; it is called only when Emscripten is used.</summary>
+    /// <paramref name="emscripten"/> returns emcc's path, installing it if needed; it is called only when Emscripten is used.
+    /// <see cref="CompilerChoice.Auto"/> uses the WebAssembly compiler when the prebuilt runtime module fits, unless
+    /// Emscripten is already installed (<paramref name="emscriptenInstalled"/>, about 3x faster); either one falls back to the other.</summary>
     public static async Task BuildAsync(string root, string generated, string output, CompilerChoice choice, Func<CancellationToken, Task<string>> emscripten,
-        LauncherCoordinator app, CancellationToken token, HostBundle? bundle = null)
+        LauncherCoordinator app, CancellationToken token, HostBundle? bundle = null, bool emscriptenInstalled = false)
     {
         Directory.CreateDirectory(output);
         bundle ??= HostBundle.Embedded;
@@ -60,17 +62,23 @@ public static class WasmCompiler
         var gameSources = Directory.GetFiles(generated, "*.c");
         if (choice == CompilerChoice.WebAssembly && unusable is not null)
             throw new InvalidOperationException($"The WebAssembly compiler needs the runtime module of a release build, but {unusable}.");
-        string? compiler = null;
-        if (choice != CompilerChoice.WebAssembly)
+        if (choice == CompilerChoice.WebAssembly || choice == CompilerChoice.Auto && unusable is null && !emscriptenInstalled)
         {
-            try { compiler = await emscripten(token); }
-            catch (Exception error) when (choice == CompilerChoice.Auto && unusable is null && error is not OperationCanceledException)
+            try
             {
-                app.Log($"Emscripten could not be set up ({error.Message}); using the WebAssembly compiler instead.");
+                await BuildWithWasiAsync(root, gameSources, output, bundle, stamp!, app, token);
+                return;
+            }
+            catch (Exception error) when (choice == CompilerChoice.Auto && error is not OperationCanceledException)
+            {
+                app.Log($"The WebAssembly compiler failed ({error.Message}); using Emscripten instead.");
             }
         }
-        if (compiler is null)
+        string compiler;
+        try { compiler = await emscripten(token); }
+        catch (Exception error) when (choice == CompilerChoice.Auto && unusable is null && emscriptenInstalled && error is not OperationCanceledException)
         {
+            app.Log($"Emscripten could not be set up ({error.Message}); using the WebAssembly compiler instead.");
             await BuildWithWasiAsync(root, gameSources, output, bundle, stamp!, app, token);
             return;
         }

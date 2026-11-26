@@ -14,6 +14,12 @@ static void Check(bool value, string message)
     if (!value) throw new Exception(message);
 }
 
+if (args is ["--wasm-toolchain", var bundleDirectory, var toolDirectory])
+{
+    await WasiToolchainChecks.RunAsync(Path.GetFullPath(bundleDirectory), Path.GetFullPath(toolDirectory));
+    return;
+}
+
 if (args is ["--game-settings"])
 {
     await GameSettingsChecks.RunAsync();

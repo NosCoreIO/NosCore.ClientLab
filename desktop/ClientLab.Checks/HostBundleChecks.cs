@@ -135,6 +135,17 @@ internal static class HostBundleChecks
             throw new Exception("A failed Emscripten setup was hidden although nothing could replace it.");
         }
         catch (HttpRequestException) { }
+        // An install that already has Emscripten keeps it (the provider is asked first) even with a usable runtime module.
+        await File.WriteAllTextAsync(Path.Combine(bundle, HostBundle.SysrootFile), "restored");
+        stamp[HostBundle.SysrootFile] = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(Path.Combine(bundle, HostBundle.SysrootFile))));
+        await File.WriteAllTextAsync(Path.Combine(bundle, HostBundle.StampFile), stamp.ToJsonString());
+        try
+        {
+            await WasmCompiler.BuildAsync(sources, generated, Path.Combine(root, "out-installed"), CompilerChoice.Auto,
+                _ => throw new OperationCanceledException("emscripten asked"), app, default, host, emscriptenInstalled: true);
+            throw new Exception("An installed Emscripten was not used.");
+        }
+        catch (OperationCanceledException error) when (error.Message == "emscripten asked") { }
 
         // The compiler package's resource archive cannot write outside its folder.
         using var tar = new MemoryStream();

@@ -119,8 +119,11 @@ Only `WasmCompiler.cs` changes: it invokes the WASM clang (one instance per work
   | WASM toolchain | 6.8 ms (up to 121 ms on its first run in a fresh Chrome profile) | 0.8–1.1 ms |
 
   So skipping `wasm-opt` shows no measurable cost on the boot scenes. Busy in-world scenes still need the comparison.
-- **Default.** Emscripten stays the default on desktop because it compiles about 3x faster. The WebAssembly
-  toolchain is used automatically when Emscripten cannot be set up, or always with `"compiler": "wasm"`.
+- **Default.** New installs of a released launcher use the WebAssembly toolchain, so they never set up emsdk or
+  Python. An install that already has Emscripten keeps it, because it compiles about 3x faster. Either falls back to
+  the other when it fails; `"compiler": "wasm"` or `"emcc"` forces one. The release workflow builds a small game module
+  with it on all four desktop targets, validates it, and cancels a compile midway (`ClientLab.Checks --wasm-toolchain`).
+  On Windows a cancelled clang run stops within milliseconds.
 
 ### Android, next
 

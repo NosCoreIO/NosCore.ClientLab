@@ -131,6 +131,20 @@ jobs:
           if ($LASTEXITCODE) { throw 'Launcher check build failed.' }
           dotnet desktop/ClientLab.Checks/bin/Debug/net10.0/ClientLab.Checks.dll
           if ($LASTEXITCODE) { throw 'Launcher checks failed.' }
+      - name: Read the WebAssembly compiler version
+        id: wasi
+        shell: bash
+        run: echo "version=$(grep -oP 'PackageVersion = "\K[^"]+' desktop/ClientLab.Launcher/Services/WasiToolchain.cs || sed -n 's/.*PackageVersion = "\([^"]*\)".*/\1/p' desktop/ClientLab.Launcher/Services/WasiToolchain.cs)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/wasi-toolchain/tools
+          key: wasi-toolchain-${{ matrix.runtime }}-${{ steps.wasi.outputs.version }}
+      - name: Build a game module with the WebAssembly compiler
+        # The default compiler for new installs: it must compile, link and cancel on every platform we ship.
+        shell: pwsh
+        run: |
+          dotnet desktop/ClientLab.Checks/bin/Debug/net10.0/ClientLab.Checks.dll --wasm-toolchain desktop/ClientLab.Launcher/Prebuilt/host "$env:RUNNER_TEMP/wasi-toolchain"
+          if ($LASTEXITCODE) { throw 'The WebAssembly compiler checks failed.' }
       - name: Import the Developer ID certificate
         if: runner.os == 'macOS' && env.APPLE_CERT_P12_BASE64 != ''
         run: |
