@@ -108,6 +108,7 @@ public sealed class GameFiles
                             hash.AppendData(buffer, 0, length);
                             await output.WriteAsync(buffer.AsMemory(0, length), cancellation);
                             written += length; Interlocked.Add(ref received, length);
+                            if (written > size) throw new InvalidDataException($"{name} is larger than its published size.");
                         }
                     }
                     if (written != size || Convert.ToHexStringLower(hash.GetHashAndReset()) != sha1)
