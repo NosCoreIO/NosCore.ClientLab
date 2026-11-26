@@ -41,7 +41,9 @@ public sealed record StagedUpdate(string Version, string Runtime, string File, s
 public static class LauncherUpdate
 {
     public const string ManifestUrl = "https://github.com/NosCoreIO/NosCore.ClientLab/releases/latest/download/release-manifest.json";
-    public const string AssetBaseUrl = "https://github.com/NosCoreIO/NosCore.ClientLab/releases/latest/download/";
+    /// <summary>Assets are fetched from the manifest's own release (<c>v{version}/</c>), so a release published between the
+    /// two requests cannot turn the download into a 404.</summary>
+    public const string AssetBaseUrl = "https://github.com/NosCoreIO/NosCore.ClientLab/releases/download/";
     /// <summary>The launcher exits with this code to ask the bootstrap to apply the staged update and start again.</summary>
     public const int RestartExitCode = 75;
     private const string StagedRecord = "staged.json";
@@ -155,8 +157,8 @@ public static class LauncherUpdate
         if (Sha256Of(incoming) != staged.Sha256) { File.Delete(incoming); throw new InvalidDataException("The staged launcher changed after it was verified."); }
         if (OperatingSystem.IsWindows())
         {
-            var old = target + ".old";
-            if (File.Exists(old)) File.Delete(old);
+            // A unique name: the bootstrap moved aside by an earlier update in this session may still be running.
+            var old = target + "." + Guid.NewGuid().ToString("N")[..8] + ".old";
             File.Move(target, old);
             try { File.Move(incoming, target); }
             catch { File.Move(old, target); throw; }
@@ -174,8 +176,12 @@ public static class LauncherUpdate
     /// <summary>Removes the executable a previous Windows update moved aside, once it is no longer running.</summary>
     public static void CleanupOld(string target)
     {
-        try { if (File.Exists(target + ".old")) File.Delete(target + ".old"); }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        var directory = Path.GetDirectoryName(Path.GetFullPath(target))!;
+        foreach (var old in Directory.EnumerateFiles(directory, Path.GetFileName(target) + ".*old"))
+        {
+            try { File.Delete(old); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { } // Still running; removed next time.
+        }
         try { if (File.Exists(target + ".new")) File.Delete(target + ".new"); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
