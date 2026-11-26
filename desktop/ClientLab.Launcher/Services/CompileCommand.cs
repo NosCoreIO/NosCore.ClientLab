@@ -5,6 +5,8 @@ namespace NosCore.ClientLab.Launcher.Services;
 /// the launcher's own WebAssembly build (object cache, workers, runtime module reuse) for recompiler output produced
 /// outside the launcher, such as <c>recomp/lift.py</c> or <c>ClientLab --recompile</c>. The output folder can be served
 /// with <c>ClientLab --serve --build</c>.
+/// <para><c>ClientLab --build-host &lt;output folder&gt; [--emcc &lt;compiler&gt;]</c> builds only the runtime module, with the
+/// <c>host.json</c> stamp; the release workflow embeds it so players compile only the game module.</para>
 /// </summary>
 internal static class CompileCommand
 {
@@ -21,6 +23,30 @@ internal static class CompileCommand
             Console.Error.WriteLine($"No generated C files in {generated}.");
             return 2;
         }
+        return await WithCompilerAsync(dataDirectory, async (app, compiler, token) =>
+        {
+            await WasmCompiler.BuildAsync(SourceAssets.Resolve(), generated, output, compiler, app, token);
+            Console.WriteLine("Built " + output);
+        });
+    }
+
+    public static async Task<int> RunHostAsync(string[] args, string dataDirectory)
+    {
+        if (args.Length < 2 || args[1].StartsWith("--"))
+        {
+            Console.Error.WriteLine("usage: ClientLab --build-host <output folder> [--emcc <compiler>] [--data-dir <folder>]");
+            return 2;
+        }
+        var output = Path.GetFullPath(args[1]);
+        return await WithCompilerAsync(dataDirectory, async (app, compiler, token) =>
+        {
+            await WasmCompiler.BuildHostAsync(SourceAssets.Resolve(), output, compiler, app, token);
+            Console.WriteLine("Built the runtime module in " + output);
+        });
+    }
+
+    private static async Task<int> WithCompilerAsync(string dataDirectory, Func<LauncherCoordinator, string, CancellationToken, Task> build)
+    {
         await using var app = new LauncherCoordinator(SourceAssets.Resolve(), dataDirectory);
         app.Logged += line => Console.WriteLine(line);
         var compiler = Program.Option("--emcc") ?? app.Snapshot()["settings"]?["emcc"]?.GetValue<string>() ?? "";
@@ -33,8 +59,7 @@ internal static class CompileCommand
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Cancel(); };
         try
         {
-            await WasmCompiler.BuildAsync(SourceAssets.Resolve(), generated, output, compiler, app, stop.Token);
-            Console.WriteLine("Built " + output);
+            await build(app, compiler, stop.Token);
             return 0;
         }
         catch (Exception error) when (error is InvalidOperationException or InvalidDataException or OperationCanceledException)

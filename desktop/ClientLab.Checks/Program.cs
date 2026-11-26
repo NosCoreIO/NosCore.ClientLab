@@ -101,6 +101,7 @@ await StartupChecks.RunAsync();
 await AnalysisChecks.RunAsync();
 NewsChecks.Run();
 await CompilationCacheChecks.RunAsync();
+await HostBundleChecks.RunAsync();
 await StructuredDispatchChecks.RunAsync();
 VerifiedClientChecks.Run();
 await GameFilesChecks.RunAsync();

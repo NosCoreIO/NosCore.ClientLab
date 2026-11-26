@@ -51,8 +51,46 @@ jobs:
           else version="0.2.$RUN_NUMBER"; fi
           echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][a-zA-Z0-9.-]+)?$' || { echo "Not a semantic version: $version"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
+  host-module:
+    # The runtime + portable host do not depend on the game client, so one Linux job builds that WebAssembly module
+    # for every platform's launcher. Players then compile only the game module (docs/WASM-BACKEND.md). The emsdk
+    # version is the one launchers install; the module's host.json stamp makes a launcher with other sources or another
+    # Emscripten build its own instead.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - id: emsdk
+        run: echo "version=$(grep -oP 'EmsdkVersion = "\K[^"]+' desktop/ClientLab.Launcher/Services/ToolchainInstaller.cs)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/emsdk
+          key: emsdk-${{ steps.emsdk.outputs.version }}-${{ runner.os }}
+      - name: Install Emscripten ${{ steps.emsdk.outputs.version }}
+        env:
+          EMSDK_VERSION: ${{ steps.emsdk.outputs.version }}
+        run: |
+          emsdk="$RUNNER_TEMP/emsdk"
+          if [ ! -x "$emsdk/upstream/emscripten/emcc" ]; then
+            rm -rf "$emsdk"
+            git clone --depth 1 --branch "$EMSDK_VERSION" https://github.com/emscripten-core/emsdk.git "$emsdk"
+            "$emsdk/emsdk" install "$EMSDK_VERSION"
+          fi
+          "$emsdk/emsdk" activate "$EMSDK_VERSION"
+      - name: Build the runtime module
+        run: |
+          dotnet run --project desktop/ClientLab.Launcher -c Release -p:NuGetAudit=false -- \
+            --build-host "$RUNNER_TEMP/host" --emcc "$RUNNER_TEMP/emsdk/upstream/emscripten/emcc" --data-dir "$RUNNER_TEMP/data"
+          cat "$RUNNER_TEMP/host/host.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-module
+          path: ${{ runner.temp }}/host/
+          if-no-files-found: error
   package:
-    needs: version
+    needs: [version, host-module]
     strategy:
       fail-fast: false
       matrix:
@@ -79,6 +117,10 @@ jobs:
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-module
+          path: desktop/ClientLab.Launcher/Prebuilt/host
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
@@ -155,6 +197,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release
+          # Launcher packages only: the runtime-module artifact is embedded in them, not published.
+          pattern: ClientLab-*
           merge-multiple: true
       - name: Write the update manifest
         # Running launchers read releases/latest/download/release-manifest.json and download the bare executable for

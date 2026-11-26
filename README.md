@@ -166,6 +166,9 @@ the UI. On macOS the script also wraps the executable in `ClientLab.app` (ad-hoc
   the player clicks *Restart* next to *Check for updates*. `dotnet run` and other development builds never update.
 - **Game patches need no launcher release.** The launcher follows Gameforge's patch manifest and fetches the
   analysis that the *Client analysis* workflow commits under `symbols/` for each new client build.
+- **Released launchers carry the runtime module prebuilt** (`ClientLab --build-host`, built once per release on
+  Linux), so a player's machine compiles only the game module. Development builds, and launchers whose runtime
+  sources or Emscripten version differ from the bundled module's stamp, build the runtime module locally as before.
 - Releases are unsigned: Windows SmartScreen and macOS Gatekeeper ask once (*More info → Run anyway*,
   *System Settings → Privacy & Security → Open Anyway*). The workflow signs Windows executables and signs and
   notarizes the macOS app once the `WINDOWS_CERT_*` / `APPLE_*` secrets exist. Linux and macOS game execution

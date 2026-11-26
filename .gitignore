@@ -17,6 +17,7 @@ client/
 bin/
 obj/
 dist/
+desktop/ClientLab.Launcher/Prebuilt/
 node_modules/
 .vs/
 *.user

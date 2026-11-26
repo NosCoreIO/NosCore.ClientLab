@@ -5,7 +5,7 @@ namespace NosCore.ClientLab.Launcher.Services;
 
 internal static class ToolchainInstaller
 {
-    private const string EmsdkVersion = "4.0.19";
+    public const string EmsdkVersion = "4.0.19";
 
     public static async Task<Dictionary<string, string>> InstallAsync(string directory, LauncherCoordinator app, CancellationToken token)
     {
