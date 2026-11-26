@@ -21,7 +21,12 @@ public sealed class LauncherCoordinator : IAsyncDisposable
     private GameHost? game;
     private string? launchCode;
     private string? launchInstallationId;
-    private int downloadedFiles;
+    private Task? updateLoop;
+    private readonly CancellationTokenSource stopping = new();
+    /// <summary>How often an open launcher looks for a new client or a newly published analysis for it.</summary>
+    public TimeSpan UpdateInterval { get; init; } = TimeSpan.FromMinutes(20);
+    /// <summary>Shorter while a new client waits for its analysis, which the repository publishes within hours.</summary>
+    public TimeSpan AnalysisRetryInterval { get; init; } = TimeSpan.FromMinutes(5);
     public string? GameUrl { get; private set; }
     public string DataDirectory => directory;
     // The launcher recompiles with the committed per-build symbols plus the recompiler's own relocation and
@@ -131,11 +136,15 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             settings = next;
         }
     }
-    public void Start(string action)
+    public void Start(string action) => Start(action, background: false);
+
+    private void Start(string action, bool background)
     {
         if (action is not ("check" or "prepare" or "tools" or "startup")) throw new InvalidOperationException("Unknown task.");
         lock (gate)
         {
+            if (action == "startup") updateLoop ??= Task.Run(() => KeepUpdatedAsync(stopping.Token));
+            if (stopping.IsCancellationRequested) throw new InvalidOperationException("ClientLab is closing.");
             if (state["busy"]!.GetValue<bool>() || game is not null) throw new InvalidOperationException("Finish the current task or close the game first.");
             state["busy"] = true; state["error"] = null;
             cancellation = new CancellationTokenSource(); var token = cancellation.Token;
@@ -157,15 +166,42 @@ public sealed class LauncherCoordinator : IAsyncDisposable
                         Status("idle", "Build tools are ready.", 1);
                     }
                 }
+                catch (Exception error) when (background && !token.IsCancellationRequested && error is HttpRequestException or TimeoutException or TaskCanceledException && state["active"] is not null)
+                {
+                    // An unattended check that cannot reach Gameforge must not turn a playable launcher into an error.
+                    Log("Background update check failed: " + error.Message);
+                    Status("ready", "Ready to play. ClientLab will check for game updates again shortly.", 1);
+                }
                 catch (OperationCanceledException) { Status("idle", "Task cancelled. Your previous build is still available."); }
                 catch (Exception error) { Log(error.Message); lock (gate) state["error"] = error.Message; Status("error", "This step needs attention."); }
                 finally { taskSettings.Value = null; lock (gate) state["busy"] = false; }
             }, CancellationToken.None);
         }
     }
+    /// <summary>Game patches need no launcher release: while the launcher is open and idle (no task, no game running) it
+    /// re-runs the startup preparation, which only fetches the manifest when nothing changed.</summary>
+    private async Task KeepUpdatedAsync(CancellationToken token)
+    {
+        try
+        {
+            while (true)
+            {
+                bool waiting;
+                lock (gate) waiting = state["awaiting_analysis"] is not null;
+                await Task.Delay(waiting ? AnalysisRetryInterval : UpdateInterval, token);
+                // A preparation that failed (not a network blip) waits for the player instead of repeating every interval.
+                // Waiting for a client's analysis is not a failure: that wait keeps retrying.
+                lock (gate) if (state["busy"]!.GetValue<bool>() || game is not null || state["error"] is not null && state["awaiting_analysis"] is null) continue;
+                try { Start("startup", background: true); }
+                catch (InvalidOperationException) { } // A task or the game started in between; try at the next interval.
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
     public void Cancel()
     {
-        cancellation?.Cancel();
+        lock (gate) cancellation?.Cancel(); // Under the lock: a job Start is creating right now is cancelled too.
     }
 
     public async Task CancelAndWaitAsync()
@@ -311,7 +347,8 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         manifest = new JsonObject { ["id"] = id, ["build"] = response["build"]?.ToString() ?? id, ["entries"] = entries };
         SaveJson(Path.Combine(directory, "latest.json"), manifest);
         var total = entries.Sum(item => item!["size"]!.GetValue<long>());
-        var missing = entries.Where(item => !File.Exists(Path.Combine(directory, "content", item!["sha1"]!.GetValue<string>()))).Sum(item => item!["size"]!.GetValue<long>());
+        var current = Path.Combine(directory, "versions", id, "client");
+        var missing = VerifiedClientFiles.IsCurrent(current, id, entries) ? 0 : GameFiles.DownloadBytes(entries, GameFiles.Donors(KnownClients()));
         lock (gate)
         {
             state["remote"] = new JsonObject { ["id"] = id, ["build"] = manifest["build"]!.GetValue<string>() };
@@ -320,68 +357,71 @@ public sealed class LauncherCoordinator : IAsyncDisposable
         Status("idle", "Latest version found. Ready when you are.", 1);
     }
 
-    private async Task<string> DownloadAsync(JsonNode entry, CancellationToken token)
+    /// <summary>Game folders of every prepared version, newest first: the sources unchanged files are linked from.</summary>
+    private List<string> KnownClients()
     {
-        var digest = entry["sha1"]!.GetValue<string>(); var name = entry["file"]!.GetValue<string>();
-        var size = entry["size"]!.GetValue<long>(); var store = Path.Combine(directory, "content", digest);
-        Directory.CreateDirectory(Path.GetDirectoryName(store)!);
-        if (File.Exists(store) && new FileInfo(store).Length == size && await HashAsync(store, "sha1", token) == digest) return store;
-        var temporary = store + ".part";
-        var imported = Path.Combine(Setting("import_dir"), name);
-        if (Setting("import_dir").Length > 0 && File.Exists(imported) && new FileInfo(imported).Length == size && await HashAsync(imported, "sha1", token) == digest)
-            File.Copy(imported, temporary, overwrite: true);
-        else
+        var clients = new List<string>();
+        JsonNode? active;
+        lock (gate) active = state["active"]?.DeepClone();
+        if (active?["client"]?.GetValue<string>() is { Length: > 0 } activeClient) clients.Add(activeClient);
+        var versions = Path.Combine(directory, "versions");
+        if (Directory.Exists(versions))
+            clients.AddRange(new DirectoryInfo(versions).EnumerateDirectories().OrderByDescending(item => item.LastWriteTimeUtc)
+                .Select(item => Path.Combine(item.FullName, "client")).Where(Directory.Exists));
+        return clients;
+    }
+
+    // The patch CDN's certificate does not cover patches.gameforge.com, so like the official launcher this uses
+    // plain HTTP; every file is checked against the SHA-1 of the manifest, which comes over HTTPS.
+    private Task<HttpResponseMessage> FetchPatchFileAsync(JsonNode entry, CancellationToken token) =>
+        http.GetAsync(PatchBaseUrl + entry["path"]!.GetValue<string>(), HttpCompletionOption.ResponseHeadersRead, token);
+
+    /// <summary>Removes what a newer layout or a newer version made redundant: the old content-addressed store (every
+    /// game file kept a second time), versions nothing points at any more, and abandoned build attempts. Anything in use
+    /// by another process stays and is retried after the next preparation.</summary>
+    private void Prune(string currentVersion)
+    {
+        JsonNode? active;
+        lock (gate) active = state["active"]?.DeepClone();
+        var keep = new[] { active?["client"], active?["runtime"], active?["executable"] }
+            .Select(value => value?.GetValue<string>()).Where(value => value is { Length: > 0 }).Select(value => Path.GetFullPath(value!)).ToList();
+        bool Kept(string path) => keep.Any(item => item.StartsWith(Path.GetFullPath(path) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+        void Remove(string path)
         {
-            Status("downloading", "Downloading " + name);
-            // The patch CDN's certificate does not cover patches.gameforge.com, so like the official launcher this uses
-            // plain HTTP; every file is checked against the SHA-1 of the manifest, which comes over HTTPS.
-            using var response = await http.GetAsync(PatchBaseUrl + entry["path"]!.GetValue<string>(), HttpCompletionOption.ResponseHeadersRead, token);
-            response.EnsureSuccessStatusCode();
-            await using var output = File.Create(temporary);
-            await response.Content.CopyToAsync(output, token);
-            downloadedFiles++;
-            Log("Downloaded " + name);
+            try { Directory.Delete(path, recursive: true); Log("Removed " + Path.GetRelativePath(directory, path) + "."); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
-        if (new FileInfo(temporary).Length != size || await HashAsync(temporary, "sha1", token) != digest)
-            throw new InvalidDataException($"Checksum mismatch for {name}. The downloaded file was not installed.");
-        File.Move(temporary, store, overwrite: true); return store;
+        var legacy = Path.Combine(directory, "content");
+        if (Directory.Exists(legacy)) Remove(legacy);
+        var versions = Path.Combine(directory, "versions");
+        if (!Directory.Exists(versions)) return;
+        foreach (var version in Directory.EnumerateDirectories(versions))
+        {
+            var isCurrent = Path.GetFileName(version) == currentVersion;
+            if (!isCurrent && !Kept(version)) { Remove(version); continue; }
+            var builds = Path.Combine(version, "builds");
+            if (Directory.Exists(builds))
+                foreach (var build in Directory.EnumerateDirectories(builds))
+                    if (!Kept(build)) Remove(build);
+        }
     }
 
     private async Task PrepareAsync(CancellationToken token)
     {
-        downloadedFiles = 0;
         string version, client, pinned, buildVersionId, buildLabel;
         // Both sign-in modes play the current official client: the host points its connections at the private
         // server, and files the local install already has are copied rather than downloaded.
         await CheckAsync(token);
         buildVersionId = manifest!["id"]!.GetValue<string>(); buildLabel = manifest["build"]!.GetValue<string>();
         // A complete current runtime can be reused on startup; failed/partial builds are never selected.
+        lock (gate) state["awaiting_analysis"] = null;
         if (await CanReuseBuildAsync(buildVersionId, token))
-        { Status("ready", "Your game is up to date.", 1); return; }
+        { Prune(buildVersionId); Status("ready", "Your game is up to date.", 1); return; }
         var versionDirectory = Path.Combine(directory, "versions", buildVersionId);
-        client = Path.Combine(versionDirectory, "client"); Directory.CreateDirectory(client);
-        var entries = manifest["entries"]!.AsArray(); var total = Math.Max(1, entries.Sum(item => item!["size"]!.GetValue<long>())); long completed = 0;
-        if (VerifiedClientFiles.IsCurrent(client, buildVersionId, entries))
-            Log($"All {entries.Count} game files are already verified; no download or patch is needed.");
-        else
-        {
-            var checkedFiles = 0;
-            foreach (var entry in entries)
-            {
-                token.ThrowIfCancellationRequested(); Status("checking", $"Checking game files: {++checkedFiles}/{entries.Count}", completed / (double)total);
-                var target = Path.Combine(client, entry!["file"]!.GetValue<string>());
-                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                if (!File.Exists(target) || new FileInfo(target).Length != entry["size"]!.GetValue<long>() || await HashAsync(target, "sha1", token) != entry["sha1"]!.GetValue<string>())
-                {
-                    var source = await DownloadAsync(entry, token);
-                    Status("installing", "Preparing local game files…", completed / (double)total);
-                    File.Copy(source, target + ".installing", overwrite: true); File.Move(target + ".installing", target, overwrite: true);
-                }
-                completed += entry["size"]!.GetValue<long>();
-            }
-            VerifiedClientFiles.MarkVerified(client, buildVersionId, entries);
-            Log($"Verified {entries.Count} game files; downloaded {downloadedFiles} files. The rest were already present or reused locally.");
-        }
+        client = Path.Combine(versionDirectory, "client");
+        var entries = manifest["entries"]!.AsArray();
+        var files = new GameFiles(FetchPatchFileAsync, Log, (text, progress) => Status(text.StartsWith("Downloading") ? "downloading" : "checking", text, progress));
+        await files.SyncAsync(client, buildVersionId, entries, KnownClients(), Setting("import_dir"), token);
         var executable = Path.Combine(client, "NostaleClientX.exe");
         // Asset-only patches still install, but do not invalidate compiled machine code.
         JsonObject? previous;
@@ -394,20 +434,33 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             SaveJson(Path.Combine(directory, "active.json"), previous);
             lock (gate) state["active"] = previous;
             Log("Game files updated; the executable is unchanged, so the compiled runtime was reused.");
+            Prune(buildVersionId);
             Status("ready", "Your game is up to date.", 1);
+            return;
+        }
+        // Checked before a build workspace exists, so waiting for the analysis leaves nothing behind on each retry.
+        var buildId = await HashAsync(Path.Combine(client, "NostaleClientX.exe"), "md5", token);
+        var symbolsDirectory = await AnalysisDirectoryAsync(buildId, token);
+        if (symbolsDirectory is null)
+        {
+            // The repository's client-analysis workflow publishes it within hours of a patch; the background update check
+            // picks it up then, without a launcher release. Until then the previous build stays playable.
+            const string waiting = "Gameforge released a new client. ClientLab is preparing support for it and will update automatically.";
+            lock (gate) state["awaiting_analysis"] = buildId;
+            if (previous is null) throw new InvalidOperationException(waiting);
+            Log($"No published analysis for client build {buildId} yet; keeping the previous build and retrying in the background.");
+            Status("ready", waiting, 1);
             return;
         }
         version = BuildWorkspace.Create(versionDirectory);
         pinned = Path.Combine(version, "compiled-client.exe"); File.Copy(Path.Combine(client, "NostaleClientX.exe"), pinned, overwrite: true);
         var image = new NosCore.ClientLab.Recompiler.ExecutableImage(pinned);
         var digest = await HashAsync(pinned, "sha256", token);
-        var buildId = await HashAsync(pinned, "md5", token);
+        if (await HashAsync(pinned, "md5", token) != buildId) throw new InvalidDataException("The client executable changed while it was being prepared.");
         Status("analysing", "Preparing the client…");
         // Seeds come from the symbols committed for this exact build; the recompiler adds the rest through its own
         // relocation and call-graph discovery. No Ghidra/Java analysis runs here (that stays a dev-only pipeline).
         var seedAddresses = new List<string> { image.EntryPoint.ToString("x8") };
-        var symbolsDirectory = await AnalysisDirectoryAsync(buildId, token) ?? throw new InvalidOperationException(
-            $"This client version (build {buildId}) has not been analysed for ClientLab yet. It usually is within a few hours of a patch; the previous prepared game has been kept.");
         var ghidraFunctions = Path.Combine(symbolsDirectory, "ghidra-functions.txt");
         await EnsureToolsAsync(token);
         if (Directory.Exists(symbolsDirectory))
@@ -447,6 +500,7 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             ["runtime_revision"] = NosCore.ClientLab.Recompiler.Program.RuntimeRevision };
         SaveJson(Path.Combine(version, "build.json"), record); SaveJson(Path.Combine(directory, "active.json"), record);
         lock (gate) state["active"] = record;
+        Prune(buildVersionId);
         Status("ready", "Your build is ready to launch.", 1);
     }
 
@@ -486,27 +540,33 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             if (state["busy"]!.GetValue<bool>()) throw new InvalidOperationException("Wait for the current task to finish.");
             if (game is not null) return GameUrl!;
             active = state["active"]?.DeepClone().AsObject() ?? throw new InvalidOperationException("Prepare a client build first.");
+            // Reserved until the game runs, so a background preparation cannot prune the files it is about to serve.
+            state["busy"] = true;
         }
-        if (await HashAsync(active["executable"]!.GetValue<string>(), "sha256", default) != active["executable_sha256"]!.GetValue<string>())
-            throw new InvalidDataException("The client executable changed. Prepare a matching runtime before playing.");
-        if (Setting("packet_logger") == "true")
+        try
         {
-            var sites = NosCore.ClientLab.Recompiler.PacketHooks.Find(new NosCore.ClientLab.Recompiler.ExecutableImage(active["executable"]!.GetValue<string>()));
-            if (sites.Count != 3) throw new InvalidOperationException("This client does not match all packet logger hooks. Disable packet logging to play, or update its analysis.");
-            Log("DeveloperTools packet hooks: " + string.Join(", ", sites.Select(site => $"{site.Value}@{site.Key:x8}")));
+            if (await HashAsync(active["executable"]!.GetValue<string>(), "sha256", default) != active["executable_sha256"]!.GetValue<string>())
+                throw new InvalidDataException("The client executable changed. Prepare a matching runtime before playing.");
+            if (Setting("packet_logger") == "true")
+            {
+                var sites = NosCore.ClientLab.Recompiler.PacketHooks.Find(new NosCore.ClientLab.Recompiler.ExecutableImage(active["executable"]!.GetValue<string>()));
+                if (sites.Count != 3) throw new InvalidOperationException("This client does not match all packet logger hooks. Disable packet logging to play, or update its analysis.");
+                Log("DeveloperTools packet hooks: " + string.Join(", ", sites.Select(site => $"{site.Value}@{site.Key:x8}")));
+            }
+            game = await GameHost.StartAsync(root, active, settings, Log, new GameSettingsStore(directory));
+            if (launchCode is { Length: > 0 })
+            {
+                // Signed in natively: hand the game the launch code through the page URL; no browser login needed.
+                GameUrl = game.Url + "?auth=" + Uri.EscapeDataString(launchCode);
+                if (launchInstallationId is { Length: > 0 }) GameUrl += "&NC_INSTALLATION_ID=" + Uri.EscapeDataString(launchInstallationId);
+            }
+            else GameUrl = game.Url + (Setting("provider") == "gameforge" ? "?login=gameforge" : "");
+            if (Setting("packet_logger") == "true") GameUrl += (GameUrl.Contains('?') ? "&" : "?") + "PORT_PACKET_LOG=1";
+            if (Setting("packet_logger") == "true" && Setting("packet_plugin").Length > 0) GameUrl += "&PORT_PLUGIN=1";
+            lock (gate) state["running"] = true;
+            return GameUrl;
         }
-        game = await GameHost.StartAsync(root, active, settings, Log, new GameSettingsStore(directory));
-        if (launchCode is { Length: > 0 })
-        {
-            // Signed in natively: hand the game the launch code through the page URL; no browser login needed.
-            GameUrl = game.Url + "?auth=" + Uri.EscapeDataString(launchCode);
-            if (launchInstallationId is { Length: > 0 }) GameUrl += "&NC_INSTALLATION_ID=" + Uri.EscapeDataString(launchInstallationId);
-        }
-        else GameUrl = game.Url + (Setting("provider") == "gameforge" ? "?login=gameforge" : "");
-        if (Setting("packet_logger") == "true") GameUrl += (GameUrl.Contains('?') ? "&" : "?") + "PORT_PACKET_LOG=1";
-        if (Setting("packet_logger") == "true" && Setting("packet_plugin").Length > 0) GameUrl += "&PORT_PLUGIN=1";
-        lock (gate) state["running"] = true;
-        return GameUrl;
+        finally { lock (gate) state["busy"] = false; }
     }
 
     public string GameforgeInstallationId { get { using var auth = new GameforgeAuthentication(settings); return auth.InstallationId; } }
@@ -532,6 +592,7 @@ public sealed class LauncherCoordinator : IAsyncDisposable
     }
     public async ValueTask DisposeAsync()
     {
+        stopping.Cancel();
         Cancel();
         if (job is not null) try { await job.WaitAsync(TimeSpan.FromSeconds(8)); } catch (TimeoutException) { }
         await CloseGameAsync(); http.Dispose(); cancellation?.Dispose();

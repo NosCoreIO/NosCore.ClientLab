@@ -38,6 +38,8 @@ internal static class StartupChecks
                     throw new Exception("Startup did not check the patch manifest and reuse the unchanged complete build.");
             }
             string assetPatchId;
+            var legacyStore = Path.Combine(directory, "content"); Directory.CreateDirectory(legacyStore);
+            File.WriteAllText(Path.Combine(legacyStore, "0000"), "a game file the old layout kept twice");
             var assetPatch = new PatchServer { AssetChanged = true };
             await using (var app = new LauncherCoordinator(directory, directory, assetPatch))
             {
@@ -46,6 +48,7 @@ internal static class StartupChecks
                 assetPatchId = snapshot["active"]!["id"]!.ToString();
                 if (assetPatch.Downloads != 2 || assetPatchId == id || snapshot["active"]!["runtime"]!.ToString() != runtime || File.Exists(compiler))
                     throw new Exception("An asset-only patch rebuilt the unchanged executable or did not install assets.");
+                if (Directory.Exists(legacyStore)) throw new Exception("The legacy duplicate content store was not removed.");
             }
             File.WriteAllText(compiler, "test marker");
             var changed = new PatchServer { Changed = true };
@@ -53,6 +56,7 @@ internal static class StartupChecks
             {
                 // The changed fixture deliberately isn't PE: preparation must start on startup,
                 // report the failed new build, and keep the previous runtime active.
+                // This patch also reverts the asset to bytes no prepared version holds, so both files are fetched.
                 try { await app.StartAndWaitAsync("startup"); throw new Exception("Invalid changed executable was accepted."); }
                 catch (InvalidOperationException) when (changed.Downloads == 2) { }
                 if (app.Snapshot()["active"]!["id"]!.ToString() != assetPatchId || File.ReadAllText(Path.Combine(runtime, "nostale.js")) != "previous runtime")
@@ -83,14 +87,14 @@ internal static class StartupChecks
             byte[] assetContents = AssetChanged ? [3, 4] : [1, 2];
             if (request.RequestUri!.Host == "spark.gameforge.com")
             {
-                Manifests++;
+                Interlocked.Increment(ref Manifests);
                 var exe = new JsonObject { ["file"] = "NostaleClientX.exe", ["sha1"] = Convert.ToHexStringLower(SHA1.HashData(contents)), ["path"] = DifferentCdn ? "/new-cdn/executable" : "/fixture/executable", ["size"] = contents.Length, ["folder"] = false };
                 var asset = new JsonObject { ["file"] = "data.txt", ["sha1"] = Convert.ToHexStringLower(SHA1.HashData(assetContents)), ["path"] = "/fixture/asset", ["size"] = 2, ["folder"] = false };
                 var json = new JsonObject { ["build"] = "fixture", ["entries"] = ReverseOrder ? new JsonArray(asset, exe) : new JsonArray(exe, asset) };
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json.ToJsonString(), Encoding.UTF8, "application/json") });
             }
             if (request.RequestUri.Host != "patches.gameforge.com") throw new Exception("Unexpected startup request.");
-            Downloads++;
+            Interlocked.Increment(ref Downloads);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(request.RequestUri.AbsolutePath.EndsWith("/asset") ? assetContents : contents) });
         }
     }

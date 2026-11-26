@@ -4,7 +4,9 @@ using NosCore.ClientLab.Recompiler;
 
 if (args is ["--child", var pidFile])
 {
-    await File.WriteAllTextAsync(pidFile, Environment.ProcessId.ToString());
+    // Written aside and renamed, so the parent never reads a file that exists but is still empty.
+    await File.WriteAllTextAsync(pidFile + ".tmp", Environment.ProcessId.ToString());
+    File.Move(pidFile + ".tmp", pidFile);
     await Task.Delay(Timeout.Infinite);
     return;
 }
@@ -77,8 +79,13 @@ try
 finally
 {
     foreach (var pid in children)
-        try { using var child = Process.GetProcessById(pid); if (!child.HasExited) child.Kill(true); } catch (ArgumentException) { }
-    Directory.Delete(directory, recursive: true);
+        try { using var child = Process.GetProcessById(pid); if (!child.HasExited) child.Kill(true); child.WaitForExit(5000); } catch (ArgumentException) { }
+    // A process that just exited can hold its files for a moment on Windows.
+    for (var attempt = 0; ; attempt++)
+    {
+        try { Directory.Delete(directory, recursive: true); break; }
+        catch (IOException) when (attempt < 20) { await Task.Delay(100); }
+    }
 }
 Console.WriteLine("PASS: manifest paths, relocated leaf discovery, and cancellation of parallel compiler processes.");
 await CaptchaChecks.RunAsync();
@@ -95,6 +102,7 @@ NewsChecks.Run();
 await CompilationCacheChecks.RunAsync();
 await StructuredDispatchChecks.RunAsync();
 VerifiedClientChecks.Run();
+await GameFilesChecks.RunAsync();
 
 if (OperatingSystem.IsWindows())
 {
