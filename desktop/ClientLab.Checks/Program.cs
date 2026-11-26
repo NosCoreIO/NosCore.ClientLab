@@ -4,7 +4,9 @@ using NosCore.ClientLab.Recompiler;
 
 if (args is ["--child", var pidFile])
 {
-    await File.WriteAllTextAsync(pidFile, Environment.ProcessId.ToString());
+    // Written aside and renamed, so the parent never reads a file that exists but is still empty.
+    await File.WriteAllTextAsync(pidFile + ".tmp", Environment.ProcessId.ToString());
+    File.Move(pidFile + ".tmp", pidFile);
     await Task.Delay(Timeout.Infinite);
     return;
 }
