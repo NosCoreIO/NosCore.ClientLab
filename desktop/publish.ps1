@@ -132,8 +132,14 @@ $iconEntry</dict>
     & ln -s /Applications (Join-Path $staging 'Applications')
     $dmg = Join-Path $destination "ClientLab-$Version-$Runtime.dmg"
     if (Test-Path $dmg) { Remove-Item $dmg -Force }
-    & hdiutil create -volname ClientLab -srcfolder $staging -ov -format UDZO $dmg
-    if ($LASTEXITCODE) { throw 'Creating the disk image failed.' }
+    # hdiutil intermittently reports "Resource busy" on CI runners (Spotlight or XProtect scanning the new image).
+    for ($attempt = 1; ; $attempt++) {
+        & hdiutil create -volname ClientLab -srcfolder $staging -ov -format UDZO $dmg
+        if (!$LASTEXITCODE) { break }
+        if ($attempt -ge 5) { throw 'Creating the disk image failed.' }
+        Write-Warning "hdiutil failed (attempt $attempt); retrying."
+        Start-Sleep -Seconds (5 * $attempt)
+    }
     if (!$SkipChecksum) {
         $hash = (Get-FileHash $dmg -Algorithm SHA256).Hash.ToLowerInvariant()
         "$hash  $([IO.Path]::GetFileName($dmg))" | Set-Content "$dmg.sha256" -Encoding ascii
