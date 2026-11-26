@@ -77,8 +77,13 @@ try
 finally
 {
     foreach (var pid in children)
-        try { using var child = Process.GetProcessById(pid); if (!child.HasExited) child.Kill(true); } catch (ArgumentException) { }
-    Directory.Delete(directory, recursive: true);
+        try { using var child = Process.GetProcessById(pid); if (!child.HasExited) child.Kill(true); child.WaitForExit(5000); } catch (ArgumentException) { }
+    // A process that just exited can hold its files for a moment on Windows.
+    for (var attempt = 0; ; attempt++)
+    {
+        try { Directory.Delete(directory, recursive: true); break; }
+        catch (IOException) when (attempt < 20) { await Task.Delay(100); }
+    }
 }
 Console.WriteLine("PASS: manifest paths, relocated leaf discovery, and cancellation of parallel compiler processes.");
 await CaptchaChecks.RunAsync();
