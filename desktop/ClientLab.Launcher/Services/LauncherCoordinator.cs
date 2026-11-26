@@ -99,6 +99,9 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             result["tools"] = tools; return result;
         }
     }
+    /// <summary>Every Activity line as it is logged (the command-line modes print them).</summary>
+    public event Action<string>? Logged;
+
     public void Log(string text)
     {
         lock (gate)
@@ -106,6 +109,7 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             var logs = state["logs"]!.AsArray(); logs.Add(text);
             while (logs.Count > 500) logs.RemoveAt(0);
         }
+        Logged?.Invoke(text);
     }
     public void Status(string stage, string message, double progress = 0)
     { lock (gate) { state["stage"] = stage; state["message"] = message; state["progress"] = progress; } }

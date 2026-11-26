@@ -16,15 +16,29 @@ Today the launcher compiles all three with Emscripten on each device. Only the s
 
 ## Stage 1: split host and game (prerequisite for every option)
 
-- CI builds the host once per launcher release as an Emscripten **main module**
-  (`-sMAIN_MODULE=2`, explicit exports): runtime, port, JS glue. It ships inside the launcher.
-- The device builds only the game as a **side module** that imports memory, the indirect-call table and
-  the `rt_*` / port symbols it uses. The worker loads it with `loadDynamicLibrary` before `callMain`.
-- This immediately cuts local compile work, and makes host fixes (renderer, audio, input) ship as plain
-  launcher updates with no rebuild on the device.
-- Things to measure: the cost of PIC (`-fPIC` global access through the GOT) on the hot game loop. Memory
-  accesses go through `M32(addr)` on a fixed base, so this cost should be small. Use
-  `docs/PERFORMANCE.md` scenes, with a gate of no more than 3% frame-time regression.
+**Done** (`WasmCompiler`, `ClientLab --compile`).
+- **What the build produces:**
+  - The runtime and portable host form an Emscripten **main module** (`nostale.js/.wasm`, `-sMAIN_MODULE=1`,
+    compiled with `-DRT_HOST_MODULE`).
+  - The lifted client is a **side module** (`nostale-game.wasm`).
+  - The worker loads the side module through `Module.dynamicLibraries` when the build has one; older single-binary
+    builds still run unchanged.
+- **The boundary is four symbols.** The host needs only `rt_labels`, `rt_label_count`, `rt_code_lo` and
+  `rt_code_hi` from the game. `rt_game_link()` looks them up with `dlsym` at the start of `main`. Everything the
+  game needs from the host (the `rt_*` helpers, port functions, libc) resolves as a side-module import.
+- **The host module is cached by its own objects.** A client patch relinks only the game:
+  - Cold build of the current client: 291 s.
+  - Same build warm: 25 s (all 132 objects reused, runtime module reused, game relinked).
+- **Measured on the boot scenes** (headless Chrome, 1080p, current client, `PORT_PROFILE=1`, two runs each):
+
+  | Build | First frame | Game work per frame (boot, then idle) |
+  |---|---|---|
+  | Single binary | 12.3 s | 8.0 / 7.9 ms, then 0.6 ms |
+  | Split, PIC | 11.1–11.3 s | 7.6 / 7.9 ms, then 0.6 ms |
+
+  No measurable cost from position-independent code here. The busy in-world scenes of `docs/PERFORMANCE.md` still need
+  the same comparison before Stage 2 relies on it.
+- **Next:** CI prebuilds the host module per release and ships it, so devices only build the game module.
 
 ## Stage 2: replace the native toolchain (recommended path)
 

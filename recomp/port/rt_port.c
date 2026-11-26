@@ -502,6 +502,12 @@ uint32_t res_find(uint32_t type, const char* type_name, uint32_t id, const char*
 /* ---- startup ---- */
 
 int main(int argc, char** argv) {
+#ifdef RT_HOST_MODULE
+    if (!rt_game_link()) {
+        fprintf(stderr, "the game module (nostale-game.wasm) is not loaded or is not a ClientLab game build\n");
+        return 3;
+    }
+#endif
     if (argc < 2) {
         fprintf(stderr, "usage: nostale.js <path to client exe> [client args...]\n");
         return 2;

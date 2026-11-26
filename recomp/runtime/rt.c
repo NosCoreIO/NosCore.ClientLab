@@ -23,6 +23,22 @@ void rt_call_host(CPU* c, uint32_t target) {
     rt_call_host_raw(c, target);
 }
 
+#ifdef RT_HOST_MODULE
+#include <dlfcn.h>
+RtGame rt_game;
+
+/* The worker loads the game side module before main (Module.dynamicLibraries); its symbols are global. */
+int rt_game_link(void) {
+    const RtLabel* labels = (const RtLabel*)dlsym(RTLD_DEFAULT, "rt_labels");
+    const uint32_t* count = (const uint32_t*)dlsym(RTLD_DEFAULT, "rt_label_count");
+    const uint32_t* lo = (const uint32_t*)dlsym(RTLD_DEFAULT, "rt_code_lo");
+    const uint32_t* hi = (const uint32_t*)dlsym(RTLD_DEFAULT, "rt_code_hi");
+    if (!labels || !count || !lo || !hi) return 0;
+    rt_game.labels = labels; rt_game.label_count = *count; rt_game.code_lo = *lo; rt_game.code_hi = *hi;
+    return 1;
+}
+#endif
+
 static int is_guest(uint32_t a) { return a >= rt_code_lo && a < rt_code_hi; }
 
 /* Indirect calls and jumps (virtual methods, callbacks, jump tables) resolve through a flat table over the code

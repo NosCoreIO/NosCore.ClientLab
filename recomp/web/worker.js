@@ -301,4 +301,13 @@ self.Module = {
   },
 };
 
+// A split build ships the runtime once (nostale.js/.wasm, a main module) and the lifted client as a side module
+// prepared on this device; the runtime finds the game's label table by name once it is loaded.
+{
+  const probe = new XMLHttpRequest();
+  probe.open('HEAD', '/build/nostale-game.wasm', false);
+  probe.send();
+  if (probe.status === 200) Module.dynamicLibraries = ['nostale-game.wasm'];
+}
+
 importScripts('/build/nostale.js');

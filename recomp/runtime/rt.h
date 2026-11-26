@@ -137,9 +137,22 @@ static __forceinline uint32_t PARITY(uint8_t v) {
 }
 
 typedef struct { uint32_t addr; RtFn fn; uint32_t is_entry; } RtLabel;
+#ifdef RT_HOST_MODULE
+/* The runtime and portable host built once, as a main module, without the game: the lifted client is a side module
+   loaded at startup, and these four symbols, the only ones the host needs from it, are found by name
+   (rt_game_link). The generated code never sees RT_HOST_MODULE and still defines them as plain globals. */
+typedef struct { const RtLabel* labels; uint32_t label_count, code_lo, code_hi; } RtGame;
+extern RtGame rt_game;
+int rt_game_link(void);
+#define rt_labels (rt_game.labels)
+#define rt_label_count (rt_game.label_count)
+#define rt_code_lo (rt_game.code_lo)
+#define rt_code_hi (rt_game.code_hi)
+#else
 extern const RtLabel rt_labels[];
 extern const uint32_t rt_label_count;
 extern const uint32_t rt_code_lo, rt_code_hi;
+#endif
 
 #ifndef RT_PORTABLE
 int rt_setjmp(uint32_t* jb);
