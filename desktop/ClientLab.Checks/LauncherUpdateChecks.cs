@@ -71,9 +71,9 @@ internal static class LauncherUpdateChecks
             Check(LauncherUpdate.Apply(updates, staged, target), "The staged launcher was not applied.");
             Check(await File.ReadAllTextAsync(target) == "new launcher", "The swap did not install the new launcher.");
             Check(!Directory.Exists(updates), "Applied updates were not cleared.");
-            if (OperatingSystem.IsWindows()) Check(File.Exists(target + ".old"), "Windows swap must move the running executable aside.");
+            if (OperatingSystem.IsWindows()) Check(Directory.EnumerateFiles(Path.GetDirectoryName(target)!, Path.GetFileName(target) + ".*.old").Any(), "Windows swap must move the running executable aside.");
             LauncherUpdate.CleanupOld(target);
-            Check(!File.Exists(target + ".old") && !File.Exists(target + ".new"), "Leftover executables were not cleaned up.");
+            Check(!Directory.EnumerateFiles(Path.GetDirectoryName(target)!, Path.GetFileName(target) + ".*old").Any() && !File.Exists(target + ".new"), "Leftover executables were not cleaned up.");
 
             // End to end through the launcher service, against a fake release server.
             var server = new FakeReleases(release, payload);
@@ -118,6 +118,9 @@ internal static class LauncherUpdateChecks
                 var json = $$$$"""{"version":"{{{{manifest.Version}}}}","assets":{"{{{{asset.Key}}}}":{"name":"{{{{asset.Value.Name}}}}","sha256":"{{{{asset.Value.Sha256}}}}"}}}""";
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json) });
             }
+            // The asset comes from the manifest's own release, never from whatever "latest" is by then.
+            if (!request.RequestUri.AbsolutePath.Contains("/v" + manifest.Version + "/", StringComparison.Ordinal))
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
             Interlocked.Increment(ref AssetRequests);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(payload) });
         }
