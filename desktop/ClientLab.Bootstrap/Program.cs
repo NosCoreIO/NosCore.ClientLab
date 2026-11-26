@@ -45,7 +45,9 @@ internal static class Program
             // The launcher asks for a restart once it has staged a newer version: swap, then start the new bootstrap.
             if (exitCode == LauncherUpdate.RestartExitCode && self.Length > 0)
             {
-                if (TryApplyUpdate(cache, self, version, runtime)) StartDetached(self, args);
+                // Reopen even when the swap is impossible (read-only install): the player asked for a restart, not an exit.
+                TryApplyUpdate(cache, self, version, runtime);
+                StartDetached(self, args);
                 return 0;
             }
             return exitCode;
