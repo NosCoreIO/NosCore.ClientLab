@@ -194,7 +194,8 @@ public sealed class LauncherCoordinator : IAsyncDisposable
                 lock (gate) waiting = state["awaiting_analysis"] is not null;
                 await Task.Delay(waiting ? AnalysisRetryInterval : UpdateInterval, token);
                 // A preparation that failed (not a network blip) waits for the player instead of repeating every interval.
-                lock (gate) if (state["busy"]!.GetValue<bool>() || game is not null || state["error"] is not null) continue;
+                // Waiting for a client's analysis is not a failure: that wait keeps retrying.
+                lock (gate) if (state["busy"]!.GetValue<bool>() || game is not null || state["error"] is not null && state["awaiting_analysis"] is null) continue;
                 try { Start("startup", background: true); }
                 catch (InvalidOperationException) { } // A task or the game started in between; try at the next interval.
             }
@@ -204,7 +205,7 @@ public sealed class LauncherCoordinator : IAsyncDisposable
 
     public void Cancel()
     {
-        cancellation?.Cancel();
+        lock (gate) cancellation?.Cancel(); // Under the lock: a job Start is creating right now is cancelled too.
     }
 
     public async Task CancelAndWaitAsync()
@@ -543,27 +544,33 @@ public sealed class LauncherCoordinator : IAsyncDisposable
             if (state["busy"]!.GetValue<bool>()) throw new InvalidOperationException("Wait for the current task to finish.");
             if (game is not null) return GameUrl!;
             active = state["active"]?.DeepClone().AsObject() ?? throw new InvalidOperationException("Prepare a client build first.");
+            // Reserved until the game runs, so a background preparation cannot prune the files it is about to serve.
+            state["busy"] = true;
         }
-        if (await HashAsync(active["executable"]!.GetValue<string>(), "sha256", default) != active["executable_sha256"]!.GetValue<string>())
-            throw new InvalidDataException("The client executable changed. Prepare a matching runtime before playing.");
-        if (Setting("packet_logger") == "true")
+        try
         {
-            var sites = NosCore.ClientLab.Recompiler.PacketHooks.Find(new NosCore.ClientLab.Recompiler.ExecutableImage(active["executable"]!.GetValue<string>()));
-            if (sites.Count != 3) throw new InvalidOperationException("This client does not match all packet logger hooks. Disable packet logging to play, or update its analysis.");
-            Log("DeveloperTools packet hooks: " + string.Join(", ", sites.Select(site => $"{site.Value}@{site.Key:x8}")));
+            if (await HashAsync(active["executable"]!.GetValue<string>(), "sha256", default) != active["executable_sha256"]!.GetValue<string>())
+                throw new InvalidDataException("The client executable changed. Prepare a matching runtime before playing.");
+            if (Setting("packet_logger") == "true")
+            {
+                var sites = NosCore.ClientLab.Recompiler.PacketHooks.Find(new NosCore.ClientLab.Recompiler.ExecutableImage(active["executable"]!.GetValue<string>()));
+                if (sites.Count != 3) throw new InvalidOperationException("This client does not match all packet logger hooks. Disable packet logging to play, or update its analysis.");
+                Log("DeveloperTools packet hooks: " + string.Join(", ", sites.Select(site => $"{site.Value}@{site.Key:x8}")));
+            }
+            game = await GameHost.StartAsync(root, active, settings, Log, new GameSettingsStore(directory));
+            if (launchCode is { Length: > 0 })
+            {
+                // Signed in natively: hand the game the launch code through the page URL; no browser login needed.
+                GameUrl = game.Url + "?auth=" + Uri.EscapeDataString(launchCode);
+                if (launchInstallationId is { Length: > 0 }) GameUrl += "&NC_INSTALLATION_ID=" + Uri.EscapeDataString(launchInstallationId);
+            }
+            else GameUrl = game.Url + (Setting("provider") == "gameforge" ? "?login=gameforge" : "");
+            if (Setting("packet_logger") == "true") GameUrl += (GameUrl.Contains('?') ? "&" : "?") + "PORT_PACKET_LOG=1";
+            if (Setting("packet_logger") == "true" && Setting("packet_plugin").Length > 0) GameUrl += "&PORT_PLUGIN=1";
+            lock (gate) state["running"] = true;
+            return GameUrl;
         }
-        game = await GameHost.StartAsync(root, active, settings, Log, new GameSettingsStore(directory));
-        if (launchCode is { Length: > 0 })
-        {
-            // Signed in natively: hand the game the launch code through the page URL; no browser login needed.
-            GameUrl = game.Url + "?auth=" + Uri.EscapeDataString(launchCode);
-            if (launchInstallationId is { Length: > 0 }) GameUrl += "&NC_INSTALLATION_ID=" + Uri.EscapeDataString(launchInstallationId);
-        }
-        else GameUrl = game.Url + (Setting("provider") == "gameforge" ? "?login=gameforge" : "");
-        if (Setting("packet_logger") == "true") GameUrl += (GameUrl.Contains('?') ? "&" : "?") + "PORT_PACKET_LOG=1";
-        if (Setting("packet_logger") == "true" && Setting("packet_plugin").Length > 0) GameUrl += "&PORT_PLUGIN=1";
-        lock (gate) state["running"] = true;
-        return GameUrl;
+        finally { lock (gate) state["busy"] = false; }
     }
 
     public string GameforgeInstallationId { get { using var auth = new GameforgeAuthentication(settings); return auth.InstallationId; } }

@@ -37,11 +37,18 @@ public static class VerifiedClientFiles
         if (files is null) yield break;
         foreach (var (name, stamp) in files)
         {
-            if (stamp is not JsonObject value || value["sha1"]?.GetValue<string>() is not { } sha1) continue;
-            var path = Path.Combine(client, name);
-            var file = new FileInfo(path);
-            if (file.Exists && file.Length == value["size"]?.GetValue<long>() && file.LastWriteTimeUtc.Ticks == value["modified"]?.GetValue<long>())
-                yield return (name, path, sha1);
+            // A malformed or unreadable entry only means this file is not reused.
+            string path, sha1;
+            try
+            {
+                if (stamp is not JsonObject value || value["sha1"]?.GetValue<string>() is not { } hash) continue;
+                path = Path.Combine(client, name);
+                var file = new FileInfo(path);
+                if (!(file.Exists && file.Length == value["size"]?.GetValue<long>() && file.LastWriteTimeUtc.Ticks == value["modified"]?.GetValue<long>())) continue;
+                sha1 = hash;
+            }
+            catch (Exception error) when (error is InvalidOperationException or FormatException or ArgumentException or IOException or UnauthorizedAccessException) { continue; }
+            yield return (name, path, sha1);
         }
     }
 
