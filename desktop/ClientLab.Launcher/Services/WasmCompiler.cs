@@ -160,7 +160,7 @@ public static class WasmCompiler
     /// names identify it. A client patch reuses it as is.</summary>
     private static async Task HostModuleAsync(string compiler, string[] hostObjects, string output, LauncherCoordinator app, CancellationToken token)
     {
-        var key = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', HostLinkFlags.Concat(hostObjects.Select(Path.GetFileName)).Prepend(Path.GetFullPath(compiler))))))[..24];
+        var key = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', HostLinkFlags.Concat(hostObjects.Select(ObjectIdentity)).Prepend(Path.GetFullPath(compiler))))))[..24];
         var cached = Path.Combine(app.DataDirectory, "cache", "host-module", key);
         if (!File.Exists(Path.Combine(cached, "nostale.wasm")))
         {
@@ -178,6 +178,9 @@ public static class WasmCompiler
         foreach (var file in HostFiles.Where(file => File.Exists(Path.Combine(cached, file))))
             File.Copy(Path.Combine(cached, file), Path.Combine(output, file), overwrite: true);
     }
+
+    /// <summary>An object's cache directory (its headers, flags and compiler) and file name (its source).</summary>
+    private static string ObjectIdentity(string obj) => Path.GetFileName(Path.GetDirectoryName(obj)) + "/" + Path.GetFileName(obj);
 
     private static async Task LinkAsync(string compiler, IEnumerable<string> flags, IEnumerable<string> objects, string target, LauncherCoordinator app, CancellationToken token)
     {

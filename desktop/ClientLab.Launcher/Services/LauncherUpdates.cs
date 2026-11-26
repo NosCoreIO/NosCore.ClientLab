@@ -80,7 +80,7 @@ public sealed class LauncherUpdates : IDisposable
             log($"Downloading launcher {manifest.Version} in the background…");
             Directory.CreateDirectory(Updates);
             var part = Path.Combine(Updates, asset.Name + ".part");
-            using (var response = await http.GetAsync(assetBaseUrl + Uri.EscapeDataString(asset.Name), HttpCompletionOption.ResponseHeadersRead, token))
+            using (var response = await http.GetAsync(assetBaseUrl + "v" + Uri.EscapeDataString(manifest.Version) + "/" + Uri.EscapeDataString(asset.Name), HttpCompletionOption.ResponseHeadersRead, token))
             {
                 response.EnsureSuccessStatusCode();
                 await using var output = File.Create(part);
