@@ -185,6 +185,7 @@ public sealed partial class CEmitter
         if (instructions.Any(instruction => image.WebPageSites.ContainsKey(instruction.Address)))
             output.AppendLine("void port_open_web_page(CPU* c, uint32_t url_offset);");
         output.AppendLine($"/* {function.Name.Replace("*/", "")} */");
+        var prologueStart = output.Length;
         output.AppendLine($"{(IsSmallLeaf ? "RT_LEAF " : "")}void {Name}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{");
         E((structured ? "volatile uint32_t tgt = entry; uint32_t t, a, b, r;" : "uint32_t tgt = entry, t, a, b, r;") + " uint64_t q; int ind = 0; (void)t; (void)a; (void)b; (void)r; (void)q;");
         if (FlagLiveness) E("uint32_t xCF, xZF, xSF, xOF, xPF; (void)xCF; (void)xZF; (void)xSF; (void)xOF; (void)xPF;");
@@ -199,7 +200,6 @@ public sealed partial class CEmitter
         output.AppendLine("dispatch:"); E("switch (tgt) {");
         foreach (var label in Labels.Order()) E($"case 0x{label:x8}u: goto L_{label:x8};");
         E("default: if (ind) { rt_jump_ind(c, tgt, ret, ind); EXIT; } c->pend = 1; c->pend_target = tgt; EXIT;"); E("}");
-        var bodyStart = output.Length;
         var lifted = new string[instructions.Count];
         for (var index = 0; index < instructions.Count; index++)
         {
@@ -218,24 +218,87 @@ public sealed partial class CEmitter
             output.Length = start;
         }
         if (FlagLiveness) DropDeadFlags(lifted);
+        if (structured)
+        {
+            output.Length = prologueStart;
+            return output.ToString() + Segmented(lifted);
+        }
+        for (var index = 0; index < instructions.Count; index++) AppendInstruction(output, index, lifted);
+        output.AppendLine("#undef EXIT"); output.AppendLine("}");
+        return output.ToString();
+    }
+
+    /// <summary>Labels per segment of a structured function.</summary>
+    public int SegmentLabels { get; set; } = 128;
+
+    private void AppendInstruction(StringBuilder text, int index, string[] lifted)
+    {
+        var address = instructions[index].Address;
+        if (Labels.Contains(address)) text.AppendLine($"L_{address:x8}:");
+        if (image.PacketCaptureSites.TryGetValue(address, out var packetKind))
+            text.AppendLine("  " + (packetKind == 2 ? "port_capture_login_packet(c);" : $"port_capture_world_packet(c, {packetKind}, 0x{address:x8}u);"));
+        // Hands the window's web address to the page, which draws the page in the window's browser area.
+        if (image.WebPageSites.TryGetValue(address, out var urlOffset))
+            text.AppendLine($"  port_open_web_page(c, 0x{urlOffset:x}u);");
+        text.Append(lifted[index]);
+    }
+
+    /// <summary>
+    /// A function with thousands of labels (a long Delphi initialisation routine, a packet handler table) takes the
+    /// WebAssembly backend minutes: fixing up its control flow and stackifying registers grow with the square of its
+    /// size. It is split into segments of <see cref="SegmentLabels"/> labels, each its own C function, and the function
+    /// itself only dispatches between them. Inside a segment every jump goes through the segment's dispatch, which keeps
+    /// the graph reducible (volatile stops jump threading from recreating the old graph); a target in another segment
+    /// returns to the function. Registers and flags live in the CPU, so only the target and the indirect-jump kind pass
+    /// between segments.
+    /// </summary>
+    private string Segmented(string[] lifted)
+    {
+        var starts = new List<int> { 0 };
+        var count = 0;
         for (var index = 0; index < instructions.Count; index++)
         {
-            if (Labels.Contains(instructions[index].Address)) output.AppendLine($"L_{instructions[index].Address:x8}:");
-            if (image.PacketCaptureSites.TryGetValue(instructions[index].Address, out var packetKind))
-                E(packetKind == 2 ? "port_capture_login_packet(c);" : $"port_capture_world_packet(c, {packetKind}, 0x{instructions[index].Address:x8}u);");
-            // Hands the window's web address to the page, which draws the page in the window's browser area.
-            if (image.WebPageSites.TryGetValue(instructions[index].Address, out var urlOffset))
-                E($"port_open_web_page(c, 0x{urlOffset:x}u);");
-            output.Append(lifted[index]);
+            if (!Labels.Contains(instructions[index].Address)) continue;
+            if (count == SegmentLabels && index > starts[^1]) { starts.Add(index); count = 0; }
+            count++;
         }
-        output.AppendLine("#undef EXIT"); output.AppendLine("}");
-        if (!structured) return output.ToString();
-        // Keep large graphs reducible for the WebAssembly backend. All backward edges go
-        // through dispatch; volatile prevents jump threading from recreating the old graph.
-        // Dispatch's own case destinations stay direct, and guest instruction order is unchanged.
-        var body = output.ToString(bodyStart, output.Length - bodyStart);
-        return output.ToString(0, bodyStart) + Regex.Replace(body, @"goto L_([0-9a-f]{8});",
-            match => "{ tgt = 0x" + match.Groups[1].Value + "u; goto dispatch; }");
+        var text = new StringBuilder();
+        var segmentOf = new Dictionary<uint, int>();
+        for (var segment = 0; segment < starts.Count; segment++)
+        {
+            var from = starts[segment]; var to = segment + 1 < starts.Count ? starts[segment + 1] : instructions.Count;
+            var labels = Enumerable.Range(from, to - from).Select(index => instructions[index].Address).Where(Labels.Contains).ToList();
+            foreach (var label in labels) segmentOf[label] = segment;
+            text.AppendLine($"static int {Name}_s{segment}(CPU* RT_RESTRICT c, uint32_t* RT_RESTRICT next, int* RT_RESTRICT indirect, uint32_t ret) {{");
+            text.AppendLine("  volatile uint32_t tgt = *next; uint32_t t, a, b, r; uint64_t q; int ind = *indirect; (void)t; (void)a; (void)b; (void)r; (void)q;");
+            if (FlagLiveness) text.AppendLine("  uint32_t xCF, xZF, xSF, xOF, xPF; (void)xCF; (void)xZF; (void)xSF; (void)xOF; (void)xPF;");
+            text.AppendLine("#define EXIT return 0");
+            text.AppendLine("dispatch:"); text.AppendLine("  switch (tgt) {");
+            foreach (var label in labels) text.AppendLine($"  case 0x{label:x8}u: goto L_{label:x8};");
+            text.AppendLine("  default: *next = tgt; *indirect = ind; return 1;"); text.AppendLine("  }");
+            var body = new StringBuilder();
+            for (var index = from; index < to; index++) AppendInstruction(body, index, lifted);
+            if (to < instructions.Count) body.AppendLine($"  {{ tgt = 0x{instructions[to].Address:x8}u; goto dispatch; }}");
+            text.Append(Regex.Replace(body.ToString(), @"goto L_([0-9a-f]{8});", match => "{ tgt = 0x" + match.Groups[1].Value + "u; goto dispatch; }"));
+            text.AppendLine("  return 0;"); text.AppendLine("#undef EXIT"); text.AppendLine("}"); text.AppendLine();
+        }
+        text.AppendLine($"void {Name}(CPU* RT_RESTRICT c, uint32_t entry, uint32_t ret) {{");
+        text.AppendLine("  uint32_t tgt = entry; int ind = 0;");
+        text.AppendLine("  RT_TRACE(c, entry, ret);");
+        if (UsesSeh)
+        {
+            text.AppendLine($"  RtAct act; act.fn = {Name}; act.guest_esp = c->esp; act.host_esp = c->host_esp;");
+            text.AppendLine("  if (rt_setjmp(act.jb)) { tgt = c->lj_target; ind = 0; rt_act_push(c, &act); goto dispatch; }");
+            text.AppendLine("  rt_act_push(c, &act);"); text.AppendLine("#define EXIT do { rt_act_pop(c, &act); return; } while (0)");
+        }
+        else text.AppendLine("#define EXIT return");
+        text.AppendLine("dispatch:"); text.AppendLine("  switch (tgt) {");
+        foreach (var label in Labels.Order()) text.AppendLine($"  case 0x{label:x8}u: goto S{segmentOf[label]};");
+        text.AppendLine("  default: if (ind) { rt_jump_ind(c, tgt, ret, ind); EXIT; } c->pend = 1; c->pend_target = tgt; EXIT;"); text.AppendLine("  }");
+        for (var segment = 0; segment < starts.Count; segment++)
+            text.AppendLine($"S{segment}: if (!{Name}_s{segment}(c, &tgt, &ind, ret)) EXIT; goto dispatch;");
+        text.AppendLine("#undef EXIT"); text.AppendLine("}");
+        return text.ToString();
     }
 
     /// <summary>When set, a flag result that no later instruction can read goes to a local the C compiler then deletes.</summary>
