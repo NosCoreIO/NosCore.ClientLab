@@ -173,13 +173,14 @@ static int brush_info(uint32_t h, int* style, uint32_t* color, uint32_t* hatch, 
 #include <emscripten.h>
 /* Text arrives as guest bytes (Windows-1252 for the A calls, UTF-16 for the W calls). Decoding 1252 rather than
    Latin-1 keeps 0x80-0x9F (euro sign, curly quotes) from drawing as boxes; it is one character per byte either way. */
-EM_JS(void, js_text_measure, (const char* css, const void* text, int n, int wide, int* out), {
+/* Returns whether the answer may be kept (text_metrics): not while a font is loading, nor with PORT_TEXT_CACHE=0. */
+EM_JS(int, js_text_measure, (const char* css, const void* text, int n, int wide, int* out), {
     const s = wide ? String.fromCharCode.apply(null, HEAPU16.subarray(text >> 1, (text >> 1) + n))
                    : (self.__ansi || (self.__ansi = new TextDecoder('windows-1252'))).decode(HEAPU8.slice(text, text + n));
     const font = UTF8ToString(css);
     if (typeof OffscreenCanvas === 'undefined') {
         HEAP32[out >> 2] = 7 * n; HEAP32[(out >> 2) + 1] = 13; HEAP32[(out >> 2) + 2] = 3;
-        return;
+        return 1;
     }
     const g = self.__textCtx || (self.__textCtx = new OffscreenCanvas(4, 4).getContext('2d', { willReadFrequently: true }));
     // This private context is shared only with js_text_prefixes below. Avoid
@@ -194,7 +195,7 @@ EM_JS(void, js_text_measure, (const char* css, const void* text, int n, int wide
     if (cache.enabled && !loading && cache.entries.has(key)) {
         const hit = cache.entries.get(key); cache.hits++;
         HEAP32[out >> 2] = hit[0]; HEAP32[(out >> 2) + 1] = hit[1]; HEAP32[(out >> 2) + 2] = hit[2];
-        return;
+        return 1;
     }
     const m = g.measureText(s);
     const asc = Math.ceil(m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? 10);
@@ -204,6 +205,7 @@ EM_JS(void, js_text_measure, (const char* css, const void* text, int n, int wide
         if (cache.entries.size >= 4096) cache.entries.delete(cache.entries.keys().next().value);
         cache.entries.set(key, [Math.round(m.width), asc, desc]); cache.misses++;
     }
+    return cache.enabled && !loading ? 1 : 0;
 });
 EM_JS(void, js_text_prefixes, (const char* css, const void* text, int n, int wide, int* out), {
     const s = wide ? String.fromCharCode.apply(null, HEAPU16.subarray(text >> 1, (text >> 1) + n))
@@ -262,8 +264,9 @@ EM_JS(void, js_set_cursor, (const uint8_t* rgba, int w, int h, int hx, int hy, i
     if (typeof postMessage === 'function') postMessage({ type: 'cursor', visible: !!visible, w, h, hx, hy, rgba: rgba ? HEAPU8.slice(rgba, rgba + w * h * 4) : null });
 });
 #else
-static void js_text_measure(const char* css, const void* text, int n, int wide, int* out) {
+static int js_text_measure(const char* css, const void* text, int n, int wide, int* out) {
     (void)css; (void)text; (void)wide; out[0] = 7 * n; out[1] = 13; out[2] = 3;
+    return 1;
 }
 static void js_text_prefixes(const char* css, const void* text, int n, int wide, int* out) {
     (void)css; (void)text; (void)wide; for (int i = 0; i < n; i++) out[i] = 7 * (i + 1);
@@ -278,8 +281,44 @@ static void js_set_cursor(const uint8_t* rgba, int w, int h, int hx, int hy, int
 }
 #endif
 
+/* The client measures the same names and labels every frame (GetTextExtentPoint32). A repeat is answered here, without
+   calling into JavaScript, when JavaScript said its answer may be kept; adding or removing a font forgets them all. */
+#define TEXT_SLOTS 4096
+#define TEXT_KEY_MAX 4096
+typedef struct { uint32_t hash, size; uint8_t* key; int m[3]; } TextSlot;
+static TextSlot text_slots[TEXT_SLOTS];
+
+static void text_cache_clear(void) {
+    for (int i = 0; i < TEXT_SLOTS; i++) { free(text_slots[i].key); text_slots[i].key = 0; }
+}
+
+static void text_metrics(const char* css, const void* text, int n, int wide, int* out) {
+    if (n < 0) n = 0;
+    size_t css_len = strlen(css), bytes = (size_t)n * (wide ? 2 : 1), size = css_len + 2 + bytes;
+    if (size > TEXT_KEY_MAX) { js_text_measure(css, text, n, wide, out); return; }
+    const uint8_t* t = text;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i <= css_len; i++) h = (h ^ (uint8_t)css[i]) * 16777619u;
+    h = (h ^ (uint32_t)wide) * 16777619u;
+    for (size_t i = 0; i < bytes; i++) h = (h ^ t[i]) * 16777619u;
+    TextSlot* s = &text_slots[h & (TEXT_SLOTS - 1)];
+    if (s->key && s->hash == h && s->size == size && !memcmp(s->key, css, css_len + 1) && s->key[css_len + 1] == (uint8_t)wide &&
+        !memcmp(s->key + css_len + 2, t, bytes)) {
+        memcpy(out, s->m, sizeof s->m);
+        return;
+    }
+    if (!js_text_measure(css, text, n, wide, out)) return;
+    uint8_t* key = realloc(s->key, size);
+    if (!key) return;
+    memcpy(key, css, css_len + 1);
+    key[css_len + 1] = (uint8_t)wide;
+    memcpy(key + css_len + 2, t, bytes);
+    s->key = key; s->hash = h; s->size = (uint32_t)size;
+    memcpy(s->m, out, sizeof s->m);
+}
+
 static void measure(Font* f, uint32_t text, int n, int wide, int* m) {
-    js_text_measure(f->css, GPTR(text), n > 0 ? n : 0, wide, m);
+    text_metrics(f->css, GPTR(text), n > 0 ? n : 0, wide, m);
 }
 
 /* ---- pixels ---- */
@@ -1245,7 +1284,7 @@ static void u_DrawTextA(CPU* c) {
                 if (s[e] == ' ') last_space = e;
                 memcpy(GPTR(buf), s + k, (size_t)(e - k + 1));
                 int mm[3];
-                js_text_measure(f->css, GPTR(buf), e - k + 1, 0, mm);
+                text_metrics(f->css, GPTR(buf), e - k + 1, 0, mm);
                 if (mm[0] > width && e > k) { if (last_space > k) e = last_space; break; }
             }
             e++;
@@ -1261,7 +1300,7 @@ static void u_DrawTextA(CPU* c) {
     for (int l = 0; l < lines; l++) {
         int mm[3] = {0, 0, 0};
         memcpy(GPTR(buf), s + starts[l], (size_t)(ends[l] - starts[l]));
-        js_text_measure(f->css, GPTR(buf), ends[l] - starts[l], 0, mm);
+        text_metrics(f->css, GPTR(buf), ends[l] - starts[l], 0, mm);
         if (mm[0] > max_w) max_w = mm[0];
     }
     int total = lines * line_h;
@@ -1283,11 +1322,11 @@ static void u_DrawTextA(CPU* c) {
         int cnt = ends[l] - starts[l];
         memcpy(GPTR(buf), s + starts[l], (size_t)cnt);
         int mm[3];
-        js_text_measure(f->css, GPTR(buf), cnt, 0, mm);
+        text_metrics(f->css, GPTR(buf), cnt, 0, mm);
         if ((fmt & 0x8000) && mm[0] > width) {   /* DT_END_ELLIPSIS */
             while (cnt > 0) {
                 memcpy(GPTR(buf + (uint32_t)cnt), "...", 3);
-                js_text_measure(f->css, GPTR(buf), cnt + 3, 0, mm);
+                text_metrics(f->css, GPTR(buf), cnt + 3, 0, mm);
                 if (mm[0] <= width) break;
                 cnt--;
             }
@@ -1342,9 +1381,9 @@ static void g_GetTextMetricsA(CPU* c) {
     measure(f, 0, 0, 0, m);
     uint32_t tmp = guest_alloc(4, 4);
     M8(tmp) = 'x';
-    js_text_measure(f->css, GPTR(tmp), 1, 0, x);
+    text_metrics(f->css, GPTR(tmp), 1, 0, x);
     M8(tmp) = 'W';
-    js_text_measure(f->css, GPTR(tmp), 1, 0, w);
+    text_metrics(f->css, GPTR(tmp), 1, 0, w);
     guest_free(tmp);
     memset(GPTR(p), 0, 56);
     M32(p) = (uint32_t)(m[1] + m[2]);
@@ -1409,6 +1448,7 @@ static void g_AddFontResourceA(CPU* c) {
     long size = 0;
     if (!ARG(0) || !load_font_file(ARG(0), family, sizeof family, &data, &size)) { free(data); RET(0); return; }
     int ok = js_font_add(family, data, (int)size);
+    text_cache_clear();
     port_log("AddFontResourceA %s: family \"%s\"%s", GSTR(ARG(0)), family, ok ? "" : " (browser font engine unavailable)");
     free(data);
     RET(1);
@@ -1419,6 +1459,7 @@ static void g_RemoveFontResourceA(CPU* c) {
     long size = 0;
     int ok = ARG(0) && load_font_file(ARG(0), family, sizeof family, &data, &size) && js_font_remove(family);
     free(data);
+    if (ok) text_cache_clear();
     RET(ok);
 }
 
