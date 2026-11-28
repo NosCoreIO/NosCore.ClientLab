@@ -492,9 +492,45 @@ static int brush_pixel(Dc* d, uint32_t brush, int x, int y, uint32_t* out) {
     return 1;
 }
 
+/* A solid brush copied as is (FillRect, PatBlt PATCOPY), the client's fills every frame: clipped once, the colour
+   encoded once, rows written directly. Exclusion rectangles and palette formats take the per-pixel path. */
+static int fill_solid(Dc* d, GdiBitmap* b, int x0, int y0, int x1, int y1, uint32_t brush, uint32_t rop) {
+    int style;
+    uint32_t color, hatch, pattern;
+    if (rop != 0xf00021 || d->s.nexcl || (b->bpp != 32 && b->bpp != 24 && b->bpp != 16)) return 0;
+    if (!brush_info(brush, &style, &color, &hatch, &pattern)) return 1;
+    if (style == BS_NULL) return 1;
+    if (style != BS_SOLID) return 0;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > b->w) x1 = b->w;
+    if (y1 > b->h) y1 = b->h;
+    if (d->s.clip_on) {
+        if (x0 < d->s.clip[0]) x0 = d->s.clip[0];
+        if (y0 < d->s.clip[1]) y0 = d->s.clip[1];
+        if (x1 > d->s.clip[2]) x1 = d->s.clip[2];
+        if (y1 > d->s.clip[3]) y1 = d->s.clip[3];
+    }
+    if (x0 >= x1 || y0 >= y1) return 1;
+    int bytes = (int)b->bpp / 8;
+    uint8_t px[4];
+    if (b->bpp == 16) {
+        uint32_t v = ((color & 0xff) >> 3) << 10 | ((color >> 8 & 0xff) >> 3) << 5 | (color >> 16 & 0xff) >> 3;
+        px[0] = (uint8_t)v; px[1] = (uint8_t)(v >> 8);
+    } else {
+        px[0] = (uint8_t)(color >> 16); px[1] = (uint8_t)(color >> 8); px[2] = (uint8_t)color; px[3] = 0xff;
+    }
+    for (int y = y0; y < y1; y++) {
+        uint8_t* p = row_ptr(b, y) + x0 * bytes;
+        for (int x = x0; x < x1; x++, p += bytes) memcpy(p, px, (size_t)bytes);
+    }
+    return 1;
+}
+
 static void fill_rect_dev(Dc* d, GdiBitmap* b, int x0, int y0, int x1, int y1, uint32_t brush, uint32_t rop) {
     if (x0 > x1) { int t = x0; x0 = x1; x1 = t; }
     if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+    if (fill_solid(d, b, x0, y0, x1, y1, brush, rop)) return;
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
             if (clipped(d, b, x, y)) continue;
