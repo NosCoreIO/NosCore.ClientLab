@@ -86,6 +86,34 @@ int main(void) {
     reap(&cpu);
     expect(live == before && nretired == 0, "the released texture was not freed exactly once");
 
+    uint32_t vertex_only = make_texture(16, 16, 1, 21);
+    r_set_texture(2, vertex_only);
+    blocks[9].state = malloc(r_state_size()); blocks[9].mask = malloc(r_state_size());
+    r_state_save(blocks[9].state);
+    r_state_mask(3, blocks[9].mask);   /* VERTEXSTATE: cannot restore textures */
+    r_set_texture(2, 0);
+    release(vertex_only);
+    reap(&cpu);
+    expect(live == before, "a state block that cannot restore textures kept one alive");
+    free(blocks[9].state); free(blocks[9].mask); blocks[9].state = blocks[9].mask = 0;
+
+    uint32_t again = make_texture(8, 8, 1, 21);
+    r_set_texture(0, again);
+    release(again);                 /* zero while bound: queued */
+    M32(again + 4)++;               /* GetTexture */
+    release(again);                 /* zero again: must not be queued twice */
+    expect(nretired == 1, "a texture released to zero twice was queued twice");
+    r_set_texture(0, 0);
+    reap(&cpu);
+    expect(live == before && nretired == 0, "a texture released to zero twice was not freed exactly once");
+
+    uint32_t tagged = make_texture(8, 8, 2, 21), tagged_level = M32(M32(tagged + 40) + 4);
+    PrivateData* d = calloc(1, sizeof *d);
+    d->obj = tagged_level; d->data = malloc(1); d->next = private_data; private_data = d;
+    release(tagged);
+    reap(&cpu);
+    expect(live == before && !private_data, "a level surface's private data outlived its texture");
+
     uint32_t surface = make_surface(8, 8, 21, 0);
     int surface_allocations = live - before;
     release(surface);
@@ -94,6 +122,6 @@ int main(void) {
 
     if (failed) return 1;
     printf("PASS: released textures and buffers are freed once unbound, not kept by a state block, a held level, a lock "
-           "or a reference, and exactly once; device surfaces are left alone.\n");
+           "or a reference, and exactly once, even when released to zero twice; state blocks keep only what they can restore; level surfaces' private data goes with them; device surfaces are left alone.\n");
     return 0;
 }

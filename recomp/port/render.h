@@ -35,8 +35,9 @@ void r_read_back(uint32_t surface);
 void r_preload(uint32_t tex);
 /* The renderer forgets a texture or buffer hle_d3d9.c freed, whose address a new object may get. */
 void r_forget(uint32_t id);
-/* Whether the device state (saved: a state block's copy, or 0 for the live state) refers to the object. */
-int r_refers(const uint8_t* saved, uint32_t obj);
+/* Whether the device state refers to the object: the live state (saved 0), or a saved copy, only through the bytes
+   its mask lets a state block restore (mask 0: all of them). */
+int r_refers(const uint8_t* saved, const uint8_t* mask, uint32_t obj);
 void r_reset(uint32_t backbuffer);
 void r_set_depth(int present);
 void r_set_scissor(uint32_t rect);

@@ -26,7 +26,7 @@ try{
     const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);check(Math.abs(pixel[0]-16)<=1&&Math.abs(pixel[2]-239)<=1&&pixel[3]===255,'Mip pixels stale after partial update');
     gl.bindFramebuffer(gl.FRAMEBUFFER,null);for(let i=0;i<16;i++)all.set([0,255,0,255],4*i);texture(101,4,4,all,0);G.apply(G.cpu,states,0);check(mipmaps===4,'Full replacement did not rebuild LOD');
     gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,G.textures.get(101),2);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);check(pixel.join(',')==='0,255,0,255','Full replacement left stale LOD pixels');
-    gl.bindFramebuffer(gl.FRAMEBUFFER,null);const old=G.textures.get(101),buffer=gl.createBuffer();G.vbs.set(101,{buffer,size:4});forget(101);
+    gl.bindFramebuffer(gl.FRAMEBUFFER,null);const old=G.textures.get(101),buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bindBuffer(gl.ARRAY_BUFFER,null);check(gl.isBuffer(buffer),'Test buffer was never created');G.vbs.set(101,{buffer,size:4});forget(101);
     check(!G.textures.has(101)&&!G.lods.has(101)&&!G.vbs.has(101)&&!gl.isTexture(old)&&!gl.isBuffer(buffer),'A freed texture or buffer was kept');check(G.prev.every(v=>v===-1)&&!G.tnlState,'A freed texture left its binding cached');
     for(let i=0;i<16;i++)all.set([255,255,0,255],4*i);texture(101,4,4,all,0);check(G.textures.get(101)!==old,'A new texture at a freed address got the old one');
     const fresh=new Uint8Array(4);gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,G.textures.get(101),0);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,fresh);gl.bindFramebuffer(gl.FRAMEBUFFER,null);
