@@ -102,6 +102,8 @@ public partial class MainWindow : Window
             identityBrowser = new AvaloniaCefBrowser { Address = collector.Url }.OpeningPopupsExternally();
             IdentityBrowserHost.Child = identityBrowser;
             await collector.WaitUntilReadyAsync();
+            // Shown only while it loads and collects: a resumed session never collects, so nothing else would hide it.
+            IdentityBrowserHost.IsVisible = false;
             identityCollector = collector;
             return collector;
         }
