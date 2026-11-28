@@ -41,6 +41,12 @@ public sealed class GameforgeSignIn : IDisposable
     public Task SignInAsync(string email, string password) => StepAsync(async () =>
         await ApplyAsync(await auth.LoginAsync(new JsonObject { ["email"] = email.Trim(), ["password"] = password, ["blackbox"] = await BlackboxAsync() }, userAgent)));
 
+    /// <summary>The token behind the current sign-in, to keep for the next launcher start.</summary>
+    public string? SessionToken => sessionId is null ? null : auth.TokenOf(sessionId);
+
+    /// <summary>Signs in with a token kept from an earlier sign-in; throws SessionExpiredException once Gameforge refuses it.</summary>
+    public Task ResumeAsync(string token) => StepAsync(async () => await ApplyAsync(await auth.ResumeAsync(token, userAgent)));
+
     public Task SubmitOtpAsync(string code) => StepAsync(async () =>
         await ApplyAsync(await auth.ChallengeAsync(new JsonObject { ["flowId"] = flowId, ["otpCode"] = code.Trim(), ["blackbox"] = await BlackboxAsync() })));
 

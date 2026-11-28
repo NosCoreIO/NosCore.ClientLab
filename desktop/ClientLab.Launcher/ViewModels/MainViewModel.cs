@@ -18,6 +18,8 @@ public partial class MainViewModel : ObservableObject
     private bool polling;
     private bool loadedSettings;
     private CredentialStore? credentialStore;
+    private CredentialStore? sessionStore;
+    private readonly SemaphoreSlim sessionWrites = new(1);
     public event Action<string>? GameRequested;
     public Func<Task<IGameforgeIdentity>>? IdentityRequested { get; set; }
 
@@ -176,6 +178,7 @@ public partial class MainViewModel : ObservableObject
             { Notice = "Game preferences could not be loaded: " + error.Message; }
             UseGameforge = Coordinator.Snapshot()["settings"]!["provider"]!.GetValue<string>() == "gameforge";
             credentialStore = new CredentialStore(UseGameforge ? Program.DataDirectory : Path.Combine(Program.DataDirectory, "private-server"));
+            sessionStore = UseGameforge ? new CredentialStore(Program.DataDirectory, "session") : null;
             try
             {
                 var saved = await Task.Run(() => credentialStore.ReadAsync());
@@ -185,6 +188,8 @@ public partial class MainViewModel : ObservableObject
             Initialized = true;
             Coordinator.Start("startup");
             StartLauncherUpdates();
+            // A slow Gameforge must not hold back the update check.
+            _ = ResumeSessionAsync();
             await RefreshAsync();
         }
         catch (Exception error) { Notice = error.Message; Busy = false; Message = "ClientLab could not start."; }
@@ -392,6 +397,7 @@ public partial class MainViewModel : ObservableObject
                 catch (GameforgeAuthentication.SessionExpiredException) { expired = true; }
                 if (expired)
                 {
+                    await ForgetSessionAsync();
                     if (!await RenewSignInAsync(accountId)) throw new GameforgeAuthentication.SessionExpiredException();
                     await signIn!.ChooseAccountAsync(accountId);
                 }
@@ -487,9 +493,11 @@ public partial class MainViewModel : ObservableObject
         UseGameforge = mode == "gameforge";
         SignInEmail = ""; SignInPassword = "";
         credentialStore = new CredentialStore(UseGameforge ? Program.DataDirectory : Path.Combine(Program.DataDirectory, "private-server"));
+        sessionStore = UseGameforge ? new CredentialStore(Program.DataDirectory, "session") : null;
         var saved = await credentialStore.ReadAsync();
         if (saved is not null) { SignInEmail = saved.Email; SignInPassword = saved.Password; }
         Coordinator.Start("startup");
+        _ = ResumeSessionAsync();
     });
 
     private async Task SaveFormCredentialsAsync()
@@ -501,6 +509,59 @@ public partial class MainViewModel : ObservableObject
             else await Task.Run(() => credentialStore.DeleteAsync());
         }
         catch (Exception) { Notice = "Your account could not be saved to the system credential store."; }
+        if (!RememberCredentials) await ForgetSessionAsync();
+    }
+
+    /// <summary>Signs in with the Gameforge session kept from the last start, as the official client keeps its sign-in
+    /// until Gameforge stops accepting it.</summary>
+    private async Task ResumeSessionAsync()
+    {
+        if (sessionStore is null) return;
+        SavedSession? saved;
+        try { saved = await Task.Run(() => sessionStore.ReadAsync<SavedSession>()); }
+        catch (Exception) { return; }
+        if (saved is null) return;
+        try
+        {
+            await CreateSignInAsync();
+            SignInBusy = true;
+            await signIn!.ResumeAsync(saved.Token);
+            RefreshSignIn();
+            var account = SignInAccounts.FirstOrDefault(item => item.Id == saved.AccountId) ?? (SignInAccounts.Count == 1 ? SignInAccounts[0] : null);
+            if (account is not null) SelectAccount(account.Id);
+            else SignInVisible = true;
+        }
+        catch (Exception error)
+        {
+            signIn?.Dispose(); signIn = null;
+            RefreshSignIn();
+            if (error is GameforgeAuthentication.SessionExpiredException) await ForgetSessionAsync();
+            else Notice = "Your Gameforge sign-in could not be restored: " + error.Message;
+        }
+        finally { SignInBusy = false; }
+    }
+
+    private async Task KeepSessionAsync()
+    {
+        if (sessionStore is not { } store) return;
+        await sessionWrites.WaitAsync();
+        try
+        {
+            // Checked after the wait so a sign-out or Remember me change queued first is not undone.
+            if (!RememberCredentials || signIn?.SessionToken is not { } token || selectedAccountId is not { } account) return;
+            await Task.Run(() => store.SaveAsync("session", new SavedSession(token, account)));
+        }
+        catch (Exception) { Notice = "Your Gameforge sign-in could not be kept for the next start."; }
+        finally { sessionWrites.Release(); }
+    }
+
+    private async Task ForgetSessionAsync()
+    {
+        if (sessionStore is not { } store) return;
+        await sessionWrites.WaitAsync();
+        try { await Task.Run(() => store.DeleteAsync()); }
+        catch (Exception) { Notice = "Your Gameforge sign-in could not be removed from the system credential store."; }
+        finally { sessionWrites.Release(); }
     }
 
     [RelayCommand]
@@ -512,6 +573,7 @@ public partial class MainViewModel : ObservableObject
         SignInEmail = ""; SignInPassword = ""; SignInOtp = "";
         try { if (credentialStore is not null) await Task.Run(() => credentialStore.DeleteAsync()); }
         catch (Exception) { Notice = "Your saved account could not be removed from the system credential store."; }
+        await ForgetSessionAsync();
         RefreshSignIn();
     }
 
@@ -550,6 +612,7 @@ public partial class MainViewModel : ObservableObject
         if (signIn.Stage == SignInStage.ChooseAccount && SignInAccounts.FirstOrDefault(account => account.Id == accountId) is { } account)
         {
             selectedAccountId = account.Id; SignedInAs = account.Name;
+            await KeepSessionAsync();
             return true;
         }
         SignInError = signIn.ChallengeMessage ?? "";
@@ -613,6 +676,7 @@ public partial class MainViewModel : ObservableObject
         SignedInAs = SignInAccounts.First(account => account.Id == id).Name;
         SignInVisible = false; SignInError = "";
         RefreshSignIn();
+        _ = KeepSessionAsync();
     }
 
     private void RefreshSignIn()
