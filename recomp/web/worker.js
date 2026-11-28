@@ -1,6 +1,7 @@
 // Runs the recompiled client. The game folder is mounted at /C:/Nostale and read on demand from the dev server's
 // /game/ (mountGameFile), so nothing of the client is bundled with the page.
 const params = new URLSearchParams(self.location.search);
+importScripts('/control.js');
 
 // Input ring shared with the page: [0] = events written, [1] = events read, then 5 ints per event (type, argument, x, y, page time in ms). The worker never
 // yields, so postMessage could not deliver input; the host drains this from PeekMessage.
@@ -92,7 +93,7 @@ if (params.get('PORT_PLUGIN') === '1') {
 }
 // </plugin-runtime>
 postMessage({ type: 'input', ring: self.inputRing, audioDone: self.audioDone, paste: self.pasteBuf, vsync: self.vsync,
-  plugin: self.pluginBuf });
+  plugin: self.pluginBuf, control: self.controlBuf });
 
 // The page's renderer worker (gl.js) does the WebGL calls; its port arrives right after start, and the game waits
 // for it because this worker stops receiving messages once the game runs.

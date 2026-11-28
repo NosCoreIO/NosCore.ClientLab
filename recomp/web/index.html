@@ -138,6 +138,23 @@
   const LOG_LINES = 1000;
   let lines = [], pending = [], flushQueued = false;
   window.allLog = [];
+  // The last cleartext packets for tools that wait on the server (PORT_PACKET_LOG=1); seq keeps counting past the cap.
+  const PACKET_LINES = 2000;
+  window.packetLog = { seq: 0, list: [] };
+  // Monsters the server reported dead on this map, kept apart from the bounded log.
+  window.deadEntities = {};
+  function recordPacket(direction, raw) {
+    window.packetLog.list.push({ seq: ++window.packetLog.seq, direction, raw });
+    if (window.packetLog.list.length > PACKET_LINES) window.packetLog.list.splice(0, window.packetLog.list.length - PACKET_LINES);
+    if (direction !== 'recv') return;
+    const f = raw.split(' ');
+    if (f[0] === 'at') window.deadEntities = {};
+    // A kill can arrive only as an su whose target is no longer alive; the client keeps drawing it until it leaves.
+    else if (f[0] === 'su' && f[11] === '0') window.deadEntities[`${f[3]}:${f[4]}`] = true;
+    else if (f[0] === 'die') window.deadEntities[`${f[1]}:${f[2]}`] = true;
+    else if (f[0] === 'in') delete window.deadEntities[`${f[1]}:${f[1] === '1' ? f[4] : f[3]}`];
+    else if (f[0] === 'out') delete window.deadEntities[`${f[1]}:${f[2]}`];
+  }
   function flushLog() {
     flushQueued = false;
     lines = lines.concat(pending);
@@ -286,6 +303,7 @@
       window.gameExited = true;
     } else if (m.type === 'input') {
       ring = m.ring;
+      controlBuf = m.control;
       audioDone = m.audioDone;
       pasteBuf = m.paste;
       shownCount = m.vsync;
@@ -318,6 +336,7 @@
       Object.assign(webFrame, { hwnd: m.hwnd, visible: m.visible, x: m.x, y: m.y, w: m.w, h: m.h });
       placeWebFrame();
     } else if (m.type === 'packet') {
+      recordPacket(m.kind === 0 ? 'send' : 'recv', m.raw);
       packetSends = packetSends.then(() => fetch('/packets', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(m)})).then(response=>{if(!response.ok)throw Error('Packet log write failed: '+response.status);}).catch(error=>console.error(error.message));
     } else if (m.type === 'sound') {
       sound(m);
@@ -592,6 +611,36 @@
     rendererProfileDetailed = !rendererProfileDetailed;
     renderer?.postMessage({type:'profile', enabled:rendererProfileDetailed});
   };
+  // Automation (control.js): one JSON request at a time, answered by the game thread between window messages.
+  let controlBuf = null, controlQueue = Promise.resolve(), controlPending = 0;
+  window.clientControl = {
+    request(req) {
+      const run = async () => {
+        if (!controlBuf) throw new Error('the game has not started');
+        const head = new Int32Array(controlBuf, 0, 4), body = new Uint8Array(controlBuf, 16);
+        // A timed-out request still owns the buffer until the game thread answers it.
+        if (controlPending && Atomics.load(head, 1) !== controlPending) throw new Error('the game thread has not answered the previous request');
+        const bytes = new TextEncoder().encode(JSON.stringify(req));
+        body.set(bytes);
+        head[2] = bytes.length;
+        const seq = (Atomics.load(head, 0) + 1) | 0;
+        Atomics.store(head, 0, seq);
+        controlPending = seq;
+        for (const started = performance.now(); Atomics.load(head, 1) !== seq;) {
+          if (performance.now() - started > 30000) throw new Error('the game thread did not answer');
+          await Atomics.waitAsync(head, 1, Atomics.load(head, 1), 1000).value;
+        }
+        controlPending = 0;
+        const answer = JSON.parse(new TextDecoder().decode(body.slice(0, head[3])));
+        if (answer.error) throw new Error(answer.error);
+        return answer.result;
+      };
+      const result = controlQueue.then(run, run);
+      controlQueue = result.catch(() => { });
+      return result;
+    },
+  };
+
   let ring = null;
   function send(type, a, x = 0, y = 0, time = performance.now()) {
     if (!ring) return;
