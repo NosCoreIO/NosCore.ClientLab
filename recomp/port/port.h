@@ -60,6 +60,7 @@ void guest_free(uint32_t p);
 uint32_t guest_call(CPU* c, uint32_t fn, int n, ...);
 uint32_t guest_call_register(CPU* c, uint32_t fn, uint32_t a, uint32_t d, uint32_t cx, int n, const uint32_t* stack);
 void port_open_web_page(CPU* c, uint32_t url_offset);
+void port_control_poll(CPU* c);
 uint32_t guest_strdup(const char* s);
 
 int port_file_fd(uint32_t handle);

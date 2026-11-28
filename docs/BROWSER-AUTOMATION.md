@@ -116,3 +116,108 @@ The launcher performs patching and recompilation in C# using the matching map. A
 patches reuse the compiled runtime. An unknown executable requires a compatibility
 update; it never silently reuses a different executable's map or replaces a good build
 with an incomplete analysis.
+
+## Driving the game through its own functions
+
+`recomp/web/control.js` lets a test or an agent play without aiming the mouse. The page sends one JSON request at a
+time through a shared buffer (`window.clientControl.request({...})`); the game thread answers it between window
+messages, so a client function called there runs where the client's own input handlers would. Nothing builds or
+sends a packet: an action is the call a click or a key ends in, and the client sends what it would have sent for it.
+
+The functions and globals are found by byte patterns in the client's code, so they follow the executable rather than
+a fixed address. `{op: 'api'}` lists what this build resolved (0 = not found).
+
+| Request | What it does |
+|---|---|
+| `{op:'state', radius, vnums, kinds}` | Character (id, name, map, cell, level, HP/MP, sitting), target, monsters, NPCs, players, ground items, nearest first with their `distance`; the optional filters keep entities within `radius` cells, with those `vnums`, or only some lists |
+| `{op:'skills'}`, `{op:'inventory'}`, `{op:'grid'}` | Learned skills, inventory, the map's walkability grid |
+| `{op:'walk', x, y}` | A floor click on that cell |
+| `{op:'select', id}` | Selects the entity as the target |
+| `{op:'interact', id}` | A click on the entity: select it, walk up, then attack with the armed skill or talk |
+| `{op:'skill', castId, target}` | Selects the target, arms the skill from the skill bar and uses it; refused while sitting, on cooldown or out of range |
+| `{op:'pickup', id}`, `{op:'collect', id}`, `{op:'rest'}` | Picks up, collects from a map object, sits or stands |
+| `{op:'use_item', vnum}` or `{op:'use_item', pocket, slot}` | A double click on the inventory item |
+| `{op:'dialogs'}` | Open yes/no boxes (revive, teleport offers, confirmations): their text and what Yes and No answer |
+| `{op:'answer', yes, text, index}` | Presses the Yes or No button of the box whose text or answers contain `text` (or the one at `index`) |
+| `{op:'npc_dialog'}`, `{op:'talk_choose', index, text}`, `{op:'close_npc_dialog'}` | Whether the NPC talk window is open with its lines and the command each sends, a click on one line, and ending the talk by clicking its last line (End Dialogue), which sends what the server waits for, such as the `n_run` that spawns a time-space room (`interact` and `draw_item` end a leftover talk first) |
+| `{op:'offer'}`, `{op:'answer_offer', accept}` | The offer window a talk line such as Get Quest opens instead of sending its command, and its buttons: accept sends the command, otherwise back to the talk |
+| `{op:'reward_window'}`, `{op:'draw_item'}` | Whether the reward window (time-space score, raid box) is open and drawn, and its Draw Item button (closes a talk window first, which would swallow the click) |
+| `{op:'mates'}` | The mates the client drives: entity info plus their current order and stance |
+| `{op:'pet_attack', target, pet}` | A click on a monster with the mates in control: each mate (or only `pet`) attacks it until it dies or gets a new order |
+| `{op:'pet_move', x, y, pet}` | A floor click with the mates in control: each mate (or only `pet`) walks to the cell |
+| `{op:'read', address, length}`, `{op:'scan', signature}`, `{op:'call', address, eax, edx, ecx, stack}` | For finding new structures and functions |
+
+`recomp/web/mcp.mjs` wraps these, plus screenshots, clicks and keys for the windows that have no call yet, as an MCP
+server over stdio. It opens its own Chromium on the game host:
+
+```bash
+claude mcp add clientlab -- node /path/to/NosCore.ClientLab/recomp/web/mcp.mjs --url http://127.0.0.1:8090/ --params PORT_SCREEN=1280x720
+```
+
+`enter_world` picks the first server and channel and the character slot; the other tools then work on the character
+in the world. On another server's character select, pass `slot` (or start the MCP with `--slot x,y`) as the
+character's position on a screenshot. `screenshot` returns its size, and `click` and `slot` take that screenshot's
+pixel coordinates, whatever the window size.
+
+The launcher serves the web files built into it, extracted under `%LOCALAPPDATA%\NosCore.ClientLab\sources\<hash>`;
+a rebuilt launcher extracts a new copy. To try edits to `recomp/web` without rebuilding, start it with
+`--source-root <path to this repository>`, then close the game and press Play again: reloading the page alone signs
+the character out mid-session.
+
+To drive the desktop app instead, start it with `CLIENTLAB_DEVTOOLS_PORT=9222` and attach to it; `client_close` then
+only disconnects and leaves the app running:
+
+```bash
+claude mcp add clientlab -- node /path/to/NosCore.ClientLab/recomp/web/mcp.mjs --attach http://127.0.0.1:9222 --log C:/dev/clientlab-actions.jsonl
+```
+
+`--log` appends every action (walk, select, answer_dialog, ...) with its arguments and result as one JSON line, so a run
+can be replayed or reviewed next to the packet log. Reads such as `client_state` and `screenshot` are left out.
+
+With the packet log on (`PORT_PACKET_LOG=1`, which the MCP adds to the pages it opens, or the launcher's packet logger
+setting), the page keeps the last 2000 cleartext packets. `packets` lists them and `wait_for` waits for one by header,
+direction or text, counted from just before the last action so a fast reply is not missed. `wait_for` also takes
+`dialog` to wait for a yes/no box.
+
+`guard` keeps a character alive while an agent thinks: below `hp_below` or `mp_below` percent it uses `hp_item` or
+`mp_item` from the inventory, and it presses Yes on any box whose text or answers contain one of `accept` (a teleport
+offer, `#revival^0`). It runs before each tool, inside `walk` and `wait_for`, and every second while the MCP is idle;
+With `end_talk_after`, it also ends a talk window left open that many seconds through its End Dialogue line: the client drops one by itself after 30 s without sending the command a time-space room waits for. `guard` with no arguments shows what it did. Its settings are kept in `--guard <file>` (by default next to the `--log`
+file) and restored when the MCP restarts. `client_state` lists entities nearest first with their distance in cells,
+so an agent can pull the closest group instead of a whole room.
+
+`walk` refuses a cell on or next to a portal of the current map (the client's own portal list, shown by `portals`)
+unless `through_portal` is set, so a character is not sent through one by accident. Around portals it plans the route
+itself, in legs short enough that no route the client could pick between them passes one, and a `walk` with `wait`
+off is refused when it could. With `through_portal`, the route still keeps off every other portal, such as a time-space's exit. A walk that ends on another map returns the character there with `changedMap`; when it arrives on or next to a portal, it is stopped two cells away from every portal, since a walk that ends on one can send it straight back.
+
+`client_state` leaves out monsters the server has reported dead (an `su` whose target is no longer alive, or `die`)
+until they appear again, since the client keeps drawing them; this needs the packet log. `use_item` refuses while the
+character is dead or a revival box is open, and whenever the client would name another entity than the character as
+the item's user.
+
+`interact` and `pick_up` return once the walk to the target is over and, for `pick_up`, once the item has left the ground. `rest` returns once
+the server has sat or stood the character, and `use_skill` waits up to `wait` seconds for the skill's cooldown,
+selects the target first, and with the packet log on fails unless the client actually sent the cast. A monster whose
+`in` carries a dialog id is talked to rather than hit: every click, interact or skill on it sends `npc_req`, so only a
+pet can attack it.
+
+`pet_attack` and `pet_move` give the order the way the client's clicks do with the mates in control; the client's own mate AI then walks
+the mate, sends `ptctl` for its steps and `suctl` for each hit at the mate's attack speed. A mate whose HP is at 10 %
+or less, or that is busy with a stance those clicks leave alone, is skipped and reported. Without an order, the
+client sends a mate after a monster only in the defending stance, when that monster hits the character.
+
+The client gives up on a long detour without moving. When a `walk` stalls, the MCP finds a path on the map grid and
+walks it in short legs; if that fails too, `walk` returns an error with where the character stopped. The guard's
+`food_item` is eaten only when no monster is within `safe_radius` cells, since eating sits the character down.
+
+On a Linux machine without a GPU, headless Chromium stops updating the canvas after the login screen, although the
+game keeps running. Run it headed under Xvfb with ANGLE on Mesa's GL instead:
+
+```bash
+sudo apt-get install -y xvfb libegl-mesa0 libegl1 libgles2
+CHROME_ARGS="--use-angle=gl --ignore-gpu-blocklist" xvfb-run -a -s "-screen 0 1920x1200x24" \
+  node recomp/web/mcp.mjs --headed --params PORT_SCREEN=1280x720
+```
+
+The control requests do not depend on the display; only `screenshot` does.
