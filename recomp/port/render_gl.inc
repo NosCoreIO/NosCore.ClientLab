@@ -587,6 +587,15 @@ int r_on_gpu(uint32_t surface) { return gl_on && surface == gl_backbuffer; }
 void r_fill(uint32_t color, int x, int y, int w, int h) { gl_clear(1, color, 0, x, y, w, h); }
 
 void r_preload(uint32_t tex) { if (gl_on) gl_texture(tex); }
+/* Drawing recorded so far runs first; the next draw resends all its state, since a new texture or buffer may get the
+   same address and so the same state words. */
+void r_forget(uint32_t id) {
+    if (!gl_on) return;
+    gl_flush();
+    gl_tnl_flush_batch();
+    glq_op(11); glq_word((int32_t)id);
+    gl_tnl_primed = 0;
+}
 void r_texture_lod(uint32_t tex, uint32_t lod) {
     if (!gl_on) return;
     gl_flush();
@@ -621,6 +630,7 @@ static void gl_clear(int flags, uint32_t color, float z, int x, int y, int w, in
 }
 int r_gl_present(void) { return 0; }
 void r_preload(uint32_t tex) { (void)tex; }
+void r_forget(uint32_t id) { (void)id; }
 void r_texture_lod(uint32_t tex, uint32_t lod) { (void)tex; (void)lod; }
 void r_read_back(uint32_t surface) { (void)surface; }
 #endif

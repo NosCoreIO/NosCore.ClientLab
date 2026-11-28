@@ -275,6 +275,21 @@ function texture(id, w, h, B, at) {
     G.tnlState = false;
 }
 
+// A texture or buffer the runtime freed (hle_d3d9.c reap): a new one may get its address, so nothing of it is kept, and
+// the next draw binds everything again.
+function forget(id) {
+    const gl = G.gl, t = G.textures.get(id);
+    if (t) { gl.deleteTexture(t); G.textures.delete(id); }
+    for (const cache of [G.vbs, G.ibs]) {
+        const b = cache.get(id);
+        if (b) { gl.deleteBuffer(b.buffer); cache.delete(id); }
+    }
+    G.lods.delete(id); G.mipDirty.delete(id); load.textures.delete(id);
+    G.tnl.ib = undefined;
+    G.prev.fill(-1);
+    G.tnlState = false;
+}
+
 // The changed part of a texture already uploaded whole.
 function textureRect(id, x, y, w, h, B, at) {
     const gl = G.gl, t = G.textures.get(id);
@@ -395,6 +410,7 @@ function frameData(W, start) {
             case 7: at += 4 + W[at + 2] * W[at + 3]; break;
             case 9: break;
             case 10: at += 5 + W[at + 3] * W[at + 4]; break;
+            case 11: at += 1; break;
             default: throw new Error('renderer: unknown command ' + op);
         }
     }
@@ -625,6 +641,7 @@ function execute(buffer, offset = 0, length = buffer.byteLength - offset) {
                 at += 5 + w * h;
                 break;
             }
+            case 11: forget(W[at] >>> 0); at += 1; break;
             default: throw new Error('renderer: unknown command ' + op);
         }
     }
