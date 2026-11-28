@@ -242,7 +242,8 @@ public static class WasmCompiler
         var hostCache = new CompilationCache(cacheRoot, await IdentityAsync(portHeaders.Concat(runtimeHeaders), HostCompileFlags));
         var memory = GC.GetGCMemoryInfo();
         var budget = Math.Max(0, memory.TotalAvailableMemoryBytes - memory.MemoryLoadBytes);
-        var workers = Math.Clamp(Math.Min(Environment.ProcessorCount - 2, (int)(budget / (3L * 1024 * 1024 * 1024))), 1, 8);
+        // A compile peaks below 700 MB now that huge functions are split (CEmitter.Segmented); 1.5 GB leaves headroom.
+        var workers = Math.Clamp(Math.Min(Environment.ProcessorCount - 2, (int)(budget / (1536L * 1024 * 1024))), 1, 16);
         var objects = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
         var completed = 0; var reused = 0;
         var elapsed = Stopwatch.StartNew();

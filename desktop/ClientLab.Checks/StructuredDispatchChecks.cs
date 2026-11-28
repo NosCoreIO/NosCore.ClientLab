@@ -11,9 +11,13 @@ internal static class StructuredDispatchChecks
         {
             var image = new ExecutableImage(Convert.FromHexString("B96400000031C001C84975FBC3"));
             var definition = new FunctionDefinition(0x1000, "control-flow fixture", [new(0x1000, image.CodeEnd)]);
-            CEmitter Emitter(int threshold) => new(image, definition) { StructuredDispatchThreshold = threshold, ExtraLabels = [0x1005, 0x1009] };
+            CEmitter Emitter(int threshold, int segmentLabels = 128) =>
+                new(image, definition) { StructuredDispatchThreshold = threshold, SegmentLabels = segmentLabels, ExtraLabels = [0x1005, 0x1009] };
             var reference = Emitter(int.MaxValue).Generate().Replace("f_00001000", "reference");
             var structured = Emitter(1).Generate().Replace("f_00001000", "structured");
+            // One label per segment: every jump, fall-through and mid-function entry crosses segments.
+            var segmented = Emitter(1, segmentLabels: 1).Generate().Replace("f_00001000", "segmented");
+            if (!segmented.Contains("segmented_s3(")) throw new Exception("A one-label segment size did not split the fixture.");
             // xor/add/sub, shl eax,cl, jb, add, adc, sete bl, test, setl bh, and, shr, sbb, inc, dec ecx, jne back, shl edx,cl
             // (cl is 0 there, so dec's flags must survive to ret), ret.
             var flagImage = new ExecutableImage(Convert.FromHexString("31C001C829D0D3E0720383C00511D80F94C385C90F9CC721D2D1E819C8404975DFD3E2C3"));
@@ -56,7 +60,7 @@ internal static class StructuredDispatchChecks
                 static void rt_jump_ind(CPU* c,uint32_t target,uint32_t ret,int ind) { c->pend=ind; c->pend_target=target; }
                 static void rt_jump(CPU* c,uint32_t target,uint32_t ret) { c->pend=1; c->pend_target=target; }
                 """);
-            File.WriteAllText(Path.Combine(root, "test.c"), "#include \"rt.h\"\n#include <string.h>\n" + reference + structured + comparison + flagsKept + flagsDropped + """
+            File.WriteAllText(Path.Combine(root, "test.c"), "#include \"rt.h\"\n#include <string.h>\n" + reference + structured + segmented + comparison + flagsKept + flagsDropped + """
 
                 int main(void) {
                   uint32_t flagSeed=777;
@@ -78,15 +82,18 @@ internal static class StructuredDispatchChecks
                   uint32_t entries[] = {0x1000,0x1005,0x1007,0x1009,0x100c,0xdead};
                   uint32_t seed=12345;
                   for(int i=0;i<500;i++) {
-                    CPU a={0},b;
+                    CPU a={0},b,s;
                     seed=seed*1664525u+1013904223u;
                     a.eax=seed; a.ecx=(seed%64)+1; a.esp=256;
                     a.cf=seed&1; a.zf=(seed>>1)&1; a.pf=(seed>>2)&1;
-                    a.sf=(seed>>3)&1; a.of=(seed>>4)&1; b=a;
+                    a.sf=(seed>>3)&1; a.of=(seed>>4)&1; b=a; s=a;
                     memory[64]=(i%7)==0?0xdead:0xc0de;
                     reference(&a,entries[i%6],0xc0de);
                     structured(&b,entries[i%6],0xc0de);
                     if(memcmp(&a,&b,sizeof(CPU))) return 1;
+                    memory[64]=(i%7)==0?0xdead:0xc0de;
+                    segmented(&s,entries[i%6],0xc0de);
+                    if(memcmp(&a,&s,sizeof(CPU))) return 6;
                   }
                   CPU known={0}; known.esp=256; memory[64]=0xc0de;
                   structured(&known,0x1000,0xc0de);
@@ -112,7 +119,7 @@ internal static class StructuredDispatchChecks
                 await RunAsync(compiler, ["-O2", Path.Combine(root, "test.c"), "-o", exe], root);
             }
             await RunAsync(exe, [], root);
-            Console.WriteLine("PASS: structured dispatch matches the original generated C for 500 branch/loop/mid-entry/return cases; x87 compares distinct stack registers correctly; dropping dead flags leaves registers and flags identical over 500 runs.");
+            Console.WriteLine("PASS: structured dispatch, whole and split into one-label segments, matches the original generated C for 500 branch/loop/mid-entry/return cases; x87 compares distinct stack registers correctly; dropping dead flags leaves registers and flags identical over 500 runs.");
         }
         finally
         {
