@@ -160,7 +160,7 @@ public partial class MainViewModel : ObservableObject
 
     private void NotifyActions()
     {
-        foreach (var name in new[] { nameof(CanAct), nameof(CanPrimary), nameof(CanCheck), nameof(CanSaveSettings), nameof(CanSelectMode), nameof(CanPlayCurrent), nameof(ActionLabel), nameof(StatusLabel), nameof(IsIndeterminate), nameof(ShowCredentials), nameof(WelcomeMessage) })
+        foreach (var name in new[] { nameof(CanAct), nameof(CanPrimary), nameof(CanCheck), nameof(CanSaveSettings), nameof(CanSelectMode), nameof(CanPlayCurrent), nameof(ActionLabel), nameof(StatusLabel), nameof(IsIndeterminate), nameof(ShowCredentials), nameof(WelcomeMessage), nameof(CanSwitchLogin), nameof(ShowLoginSwitcher), nameof(ShowGameAccountPicker) })
             OnPropertyChanged(name);
     }
 
@@ -177,19 +177,12 @@ public partial class MainViewModel : ObservableObject
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             { Notice = "Game preferences could not be loaded: " + error.Message; }
             UseGameforge = Coordinator.Snapshot()["settings"]!["provider"]!.GetValue<string>() == "gameforge";
-            credentialStore = new CredentialStore(UseGameforge ? Program.DataDirectory : Path.Combine(Program.DataDirectory, "private-server"));
-            sessionStore = UseGameforge ? new CredentialStore(Program.DataDirectory, "session") : null;
-            try
-            {
-                var saved = await Task.Run(() => credentialStore.ReadAsync());
-                if (saved is not null) { SignInEmail = saved.Email; SignInPassword = saved.Password; }
-            }
-            catch (Exception) { Notice = "Your saved account could not be loaded. You can still sign in."; }
+            await LoadSavedSignInAsync();
             Initialized = true;
             Coordinator.Start("startup");
             StartLauncherUpdates();
             // A slow Gameforge must not hold back the update check.
-            _ = ResumeSessionAsync();
+            _ = SignInOnOpenAsync();
             await RefreshAsync();
         }
         catch (Exception error) { Notice = error.Message; Busy = false; Message = "ClientLab could not start."; }
@@ -351,6 +344,9 @@ public partial class MainViewModel : ObservableObject
         {
             if (string.IsNullOrWhiteSpace(SignInEmail) || string.IsNullOrEmpty(SignInPassword))
                 throw new InvalidOperationException("Enter your account and password to continue.");
+            // A login typed again keeps its own saved entries rather than overwriting another login's.
+            if (UseGameforge && Logins.FirstOrDefault(login => SameEmail(login.Email, SignInEmail)) is { } known && known.Key != currentLoginKey)
+                UseLoginStores(known.Key);
             await SaveFormCredentialsAsync();
             if (!UseGameforge)
             {
@@ -492,12 +488,9 @@ public partial class MainViewModel : ObservableObject
         Coordinator.ClearLaunchCode(); SignedInAs = ""; SignInVisible = false; SignInError = "";
         UseGameforge = mode == "gameforge";
         SignInEmail = ""; SignInPassword = "";
-        credentialStore = new CredentialStore(UseGameforge ? Program.DataDirectory : Path.Combine(Program.DataDirectory, "private-server"));
-        sessionStore = UseGameforge ? new CredentialStore(Program.DataDirectory, "session") : null;
-        var saved = await credentialStore.ReadAsync();
-        if (saved is not null) { SignInEmail = saved.Email; SignInPassword = saved.Password; }
+        await LoadSavedSignInAsync();
         Coordinator.Start("startup");
-        _ = ResumeSessionAsync();
+        _ = SignInOnOpenAsync();
     });
 
     private async Task SaveFormCredentialsAsync()
@@ -509,18 +502,18 @@ public partial class MainViewModel : ObservableObject
             else await Task.Run(() => credentialStore.DeleteAsync());
         }
         catch (Exception) { Notice = "Your account could not be saved to the system credential store."; }
-        if (!RememberCredentials) await ForgetSessionAsync();
+        if (!RememberCredentials) { await ForgetSessionAsync(); await ForgetLoginAsync(currentLoginKey); }
     }
 
     /// <summary>Signs in with the Gameforge session kept from the last start, as the official client keeps its sign-in
     /// until Gameforge stops accepting it.</summary>
-    private async Task ResumeSessionAsync()
+    private async Task<bool> ResumeSessionAsync()
     {
-        if (sessionStore is null) return;
+        if (sessionStore is null) return false;
         SavedSession? saved;
         try { saved = await Task.Run(() => sessionStore.ReadAsync<SavedSession>()); }
-        catch (Exception) { return; }
-        if (saved is null) return;
+        catch (Exception) { return false; }
+        if (saved is null) return false;
         try
         {
             await CreateSignInAsync();
@@ -530,6 +523,7 @@ public partial class MainViewModel : ObservableObject
             var account = SignInAccounts.FirstOrDefault(item => item.Id == saved.AccountId) ?? (SignInAccounts.Count == 1 ? SignInAccounts[0] : null);
             if (account is not null) SelectAccount(account.Id);
             else SignInVisible = true;
+            return true;
         }
         catch (Exception error)
         {
@@ -537,6 +531,7 @@ public partial class MainViewModel : ObservableObject
             RefreshSignIn();
             if (error is GameforgeAuthentication.SessionExpiredException) await ForgetSessionAsync();
             else Notice = "Your Gameforge sign-in could not be restored: " + error.Message;
+            return false;
         }
         finally { SignInBusy = false; }
     }
@@ -564,6 +559,172 @@ public partial class MainViewModel : ObservableObject
         finally { sessionWrites.Release(); }
     }
 
+    // --- Remembered Gameforge logins ---
+    private CredentialStore? loginsStore;
+    private readonly SemaphoreSlim loginWrites = new(1);
+    private string currentLoginKey = "";
+    private bool choosingLogin, choosingGameAccount;
+    public ObservableCollection<LoginChoice> Logins { get; } = [];
+    /// <summary>The switcher's items: the remembered logins, then "Add another login".</summary>
+    public ObservableCollection<LoginChoice> LoginMenu { get; } = [];
+    public record LoginChoice(string Email, string Key);
+    private static readonly LoginChoice AddLogin = new("Add another login…", "+");
+    [ObservableProperty] private LoginChoice? currentLogin;
+    [ObservableProperty] private AccountItem? selectedGameAccount;
+    public bool ShowLoginSwitcher => UseGameforge && Logins.Count > 0;
+    public bool CanSwitchLogin => Initialized && !Running && !SignInBusy;
+    public bool ShowGameAccountPicker => SignedIn && signIn is not null && SignInAccounts.Count > 1;
+
+    private static bool SameEmail(string a, string b) => string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
+
+    private void UseLoginStores(string key)
+    {
+        currentLoginKey = key;
+        credentialStore = new CredentialStore(Program.DataDirectory, key.Length == 0 ? "credentials" : "credentials/" + key);
+        sessionStore = new CredentialStore(Program.DataDirectory, key.Length == 0 ? "session" : "session/" + key);
+    }
+
+    /// <summary>Points the credential stores at the login the launcher opens with: for Gameforge, the last one used.</summary>
+    private async Task LoadSavedSignInAsync()
+    {
+        Logins.Clear();
+        if (UseGameforge)
+        {
+            var saved = await ReadLoginsAsync();
+            foreach (var login in saved.Logins) Logins.Add(new(login.Email, login.Key));
+            var last = Logins.FirstOrDefault(login => saved.Last is not null && SameEmail(login.Email, saved.Last)) ?? Logins.FirstOrDefault();
+            UseLoginStores(last?.Key ?? "");
+            ShowLoginChoice(last ?? AddLogin);
+        }
+        else
+        {
+            credentialStore = new CredentialStore(Path.Combine(Program.DataDirectory, "private-server"));
+            sessionStore = null;
+            OnPropertyChanged(nameof(ShowLoginSwitcher));
+        }
+        try
+        {
+            if (await Task.Run(() => credentialStore!.ReadAsync()) is { } credentials) { SignInEmail = credentials.Email; SignInPassword = credentials.Password; }
+        }
+        catch (Exception) { Notice = "Your saved account could not be loaded. You can still sign in."; }
+    }
+
+    private async Task<SavedLogins> ReadLoginsAsync()
+    {
+        loginsStore ??= new CredentialStore(Program.DataDirectory, "logins");
+        try { if (await Task.Run(() => loginsStore.ReadAsync<SavedLogins>()) is { } saved) return saved; }
+        catch (Exception) { }
+        // Before several logins could be remembered, the one login lived in the plain entries (the empty key).
+        try
+        {
+            if (await Task.Run(() => new CredentialStore(Program.DataDirectory).ReadAsync()) is { } single)
+                return new([new(single.Email, "")], single.Email);
+        }
+        catch (Exception) { }
+        return new([], null);
+    }
+
+    private void ShowLoginChoice(LoginChoice choice)
+    {
+        choosingLogin = true;
+        // Rebuilding the items clears the switcher's selection; passing through null makes it show the choice again.
+        CurrentLogin = null;
+        if (!LoginMenu.SequenceEqual(Logins.Append(AddLogin)))
+        {
+            LoginMenu.Clear();
+            foreach (var login in Logins) LoginMenu.Add(login);
+            LoginMenu.Add(AddLogin);
+        }
+        CurrentLogin = choice;
+        choosingLogin = false;
+        OnPropertyChanged(nameof(ShowLoginSwitcher));
+    }
+
+    /// <summary>Signs in on its own when the launcher opens or a login is picked: with the kept Gameforge session, or
+    /// else with the saved password. A CAPTCHA or authenticator code still asks the user.</summary>
+    private async Task SignInOnOpenAsync()
+    {
+        if (!UseGameforge) return;
+        if (await ResumeSessionAsync()) return;
+        if (SignedIn || string.IsNullOrWhiteSpace(SignInEmail) || string.IsNullOrEmpty(SignInPassword)) return;
+        try
+        {
+            await CreateSignInAsync();
+            await SignInSubmitAsync();
+        }
+        catch (Exception error) { Notice = error.Message; }
+    }
+
+    partial void OnCurrentLoginChanged(LoginChoice? value)
+    {
+        if (choosingLogin || value is null) return;
+        _ = ExecuteAsync(() => SwitchLoginAsync(value));
+    }
+
+    private async Task SwitchLoginAsync(LoginChoice choice)
+    {
+        signIn?.Dispose(); signIn = null; selectedAccountId = null;
+        Coordinator?.ClearLaunchCode(); SignedInAs = ""; SignInVisible = false; SignInError = ""; SignInOtp = "";
+        if (choice == AddLogin) { StartNewLogin(); return; }
+        UseLoginStores(choice.Key);
+        SignInEmail = choice.Email; SignInPassword = "";
+        try
+        {
+            if (await Task.Run(() => credentialStore!.ReadAsync()) is { } credentials) { SignInEmail = credentials.Email; SignInPassword = credentials.Password; }
+        }
+        catch (Exception) { Notice = "This login's saved password could not be read. You can still sign in."; }
+        RefreshSignIn();
+        await SaveLoginsAsync(logins => logins, choice.Email);
+        await SignInOnOpenAsync();
+    }
+
+    /// <summary>Clears the form for a login not remembered yet; its vault entries get a key of their own.</summary>
+    private void StartNewLogin()
+    {
+        UseLoginStores(Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8)));
+        SignInEmail = ""; SignInPassword = ""; SignInOtp = "";
+        RefreshSignIn();
+        ShowLoginChoice(AddLogin);
+    }
+
+    private async Task RememberLoginAsync(string email)
+    {
+        email = email.Trim();
+        if (email.Length == 0) return;
+        var key = currentLoginKey;
+        await SaveLoginsAsync(logins => [.. logins.Where(login => !SameEmail(login.Email, email) && login.Key != key), new(email, key)], email);
+        if (Logins.FirstOrDefault(login => login.Key == key) is { } remembered) ShowLoginChoice(remembered);
+    }
+
+    private async Task ForgetLoginAsync(string key)
+    {
+        await SaveLoginsAsync(logins => [.. logins.Where(login => login.Key != key)], null);
+        ShowLoginChoice(Logins.FirstOrDefault(login => login.Key == currentLoginKey) ?? AddLogin);
+    }
+
+    private async Task SaveLoginsAsync(Func<List<SavedLogin>, List<SavedLogin>> change, string? last)
+    {
+        if (!UseGameforge) return;
+        await loginWrites.WaitAsync();
+        try
+        {
+            var saved = await ReadLoginsAsync();
+            var logins = change(saved.Logins);
+            last ??= logins.Any(login => saved.Last is not null && SameEmail(login.Email, saved.Last)) ? saved.Last : logins.FirstOrDefault()?.Email;
+            await Task.Run(() => loginsStore!.SaveAsync("logins", new SavedLogins(logins, last)));
+            Logins.Clear();
+            foreach (var login in logins) Logins.Add(new(login.Email, login.Key));
+        }
+        catch (Exception) { Notice = "The list of remembered logins could not be saved."; }
+        finally { loginWrites.Release(); }
+    }
+
+    partial void OnSelectedGameAccountChanged(AccountItem? value)
+    {
+        if (choosingGameAccount || value is null || signIn is null || SignInBusy || value.Id == selectedAccountId) return;
+        SelectAccount(value.Id);
+    }
+
     [RelayCommand]
     private async Task SignOutAsync()
     {
@@ -574,7 +735,9 @@ public partial class MainViewModel : ObservableObject
         try { if (credentialStore is not null) await Task.Run(() => credentialStore.DeleteAsync()); }
         catch (Exception) { Notice = "Your saved account could not be removed from the system credential store."; }
         await ForgetSessionAsync();
+        await ForgetLoginAsync(currentLoginKey);
         RefreshSignIn();
+        if (UseGameforge) StartNewLogin();
     }
 
     [RelayCommand]
@@ -677,6 +840,7 @@ public partial class MainViewModel : ObservableObject
         SignInVisible = false; SignInError = "";
         RefreshSignIn();
         _ = KeepSessionAsync();
+        if (UseGameforge && RememberCredentials) _ = RememberLoginAsync(SignInEmail);
     }
 
     private void RefreshSignIn()
@@ -710,6 +874,10 @@ public partial class MainViewModel : ObservableObject
         }
         foreach (var name in new[] { nameof(StageCredentials), nameof(StageOtp), nameof(StageCaptcha), nameof(StageAccounts), nameof(SignInSubmitLabel), nameof(SignInSubmitVisible) })
             OnPropertyChanged(name);
+        choosingGameAccount = true;
+        SelectedGameAccount = SignInAccounts.FirstOrDefault(account => account.Id == selectedAccountId);
+        choosingGameAccount = false;
+        OnPropertyChanged(nameof(ShowGameAccountPicker));
     }
 
     private (string Prompt, string Icons, string Target)? displayedCaptcha;

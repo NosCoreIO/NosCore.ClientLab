@@ -97,6 +97,10 @@
                   <Button Content="Gameforge" Classes="mode" Classes.active="{Binding UseGameforge}" Command="{Binding SelectModeCommand}" CommandParameter="gameforge" />
                   <Button Content="Private server" Classes="mode" Classes.active="{Binding !UseGameforge}" Command="{Binding SelectModeCommand}" CommandParameter="noscore" />
                 </StackPanel>
+                <ComboBox IsVisible="{Binding ShowLoginSwitcher}" IsEnabled="{Binding CanSwitchLogin}" ItemsSource="{Binding LoginMenu}" SelectedItem="{Binding CurrentLogin}"
+                          HorizontalAlignment="Stretch" AutomationProperties.Name="Gameforge login">
+                  <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Email}" /></DataTemplate></ComboBox.ItemTemplate>
+                </ComboBox>
                 <StackPanel Spacing="8">
                   <TextBlock Text="MAKE YOURSELF AT HOME" Classes="eyebrow" />
                   <TextBlock Text="Welcome back." FontSize="34" FontWeight="SemiBold" LetterSpacing="-0.8" />
@@ -116,6 +120,13 @@
                     <Button Grid.Column="2" Classes="subtle" Content="Sign out" Command="{Binding SignOutCommand}" IsEnabled="{Binding CanCheck}" />
                   </Grid>
                 </Border>
+                <StackPanel Spacing="7" IsVisible="{Binding ShowGameAccountPicker}">
+                  <TextBlock Text="Game account" FontSize="12" Foreground="#C9D2D0" />
+                  <ComboBox ItemsSource="{Binding SignInAccounts}" SelectedItem="{Binding SelectedGameAccount}" IsEnabled="{Binding CanSwitchLogin}"
+                            HorizontalAlignment="Stretch" AutomationProperties.Name="Game account">
+                    <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Name}" /></DataTemplate></ComboBox.ItemTemplate>
+                  </ComboBox>
+                </StackPanel>
                 <StackPanel Spacing="8">
                   <Button Classes="primary" Content="{Binding ActionLabel}" Command="{Binding PrimaryCommand}" IsEnabled="{Binding CanPrimary}" IsDefault="True" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Height="52" />
                   <ProgressBar Value="{Binding Progress}" Maximum="100" IsIndeterminate="{Binding IsIndeterminate}" IsVisible="{Binding Busy}" Height="3" Foreground="#B9E8CC" />
