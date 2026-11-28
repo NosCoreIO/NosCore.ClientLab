@@ -7,7 +7,7 @@ namespace NosCore.ClientLab.Recompiler;
 public static partial class Program
 {
     // Change only when generated/runtime semantics require rebuilding existing clients.
-    public const int RuntimeRevision = 34;
+    public const int RuntimeRevision = 35;
     public static int Main(string[] args)
     {
         try
