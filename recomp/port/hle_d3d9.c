@@ -40,6 +40,8 @@ static void m_ok(CPU* c) { RET(0); }
 static void m_addref(CPU* c) { RET(++M32(THIS + 4)); }
 static void m_release(CPU* c) { uint32_t r = M32(THIS + 4); RET(r ? --M32(THIS + 4) : 0); }
 static void addref(uint32_t o) { if (o) M32(o + 4)++; }
+static void res_release(CPU* c);
+static void reap(CPU* c);
 
 static uint32_t make_vtable(const char* iface, const Method* m, int n);
 static void mat_mul(uint32_t out, uint32_t a, uint32_t b);
@@ -391,7 +393,7 @@ static void present_frame(void) {
         r_stats();
     }
 }
-static void v_Present(CPU* c) { present_frame(); RET(0); }
+static void v_Present(CPU* c) { present_frame(); reap(c); RET(0); }
 static uint32_t back_buffer(uint32_t index, uint32_t out) {
     if (!out || index != 0) return D3DERR_INVALIDCALL;
     addref(backbuffer);
@@ -702,12 +704,18 @@ static PrivateData** private_find(uint32_t obj, uint32_t guid) {
     return at;
 }
 static void unknown_call(CPU* c, uint32_t unk, int slot) { guest_call(c, M32(M32(unk) + 4 * (uint32_t)slot), 1, unk); }
+/* Unlinked before the interface's Release runs: guest code there may reach private data again. */
 static void private_free(CPU* c, PrivateData** at) {
     PrivateData* d = *at;
-    if (d->flags & 1) unknown_call(c, M32((uint32_t)(uintptr_t)d->data), 2);
     *at = d->next;
+    if (d->flags & 1) unknown_call(c, M32((uint32_t)(uintptr_t)d->data), 2);
     free(d->data);
     free(d);
+}
+static void private_free_all(CPU* c, uint32_t obj) {
+    for (PrivateData** at = &private_data; *at;)
+        if ((*at)->obj == obj) private_free(c, at);
+        else at = &(*at)->next;
 }
 static void r_SetPrivateData(CPU* c) {
     uint32_t guid = ARG(1), data = ARG(2), size = ARG(3), flags = ARG(4);
@@ -778,7 +786,7 @@ static void t_GenerateMipSubLevels(CPU* c) { (void)c; }
 static void t_AddDirtyRect(CPU* c) { changed(THIS, NULL); RET(0); }
 
 #define RESOURCE_METHODS \
-    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, m_release}, {"GetDevice", 2, r_GetDevice}, \
+    {"QueryInterface", 3, m_QueryInterface}, {"AddRef", 1, m_addref}, {"Release", 1, res_release}, {"GetDevice", 2, r_GetDevice}, \
     {"SetPrivateData", 5, r_SetPrivateData}, {"GetPrivateData", 4, r_GetPrivateData}, {"FreePrivateData", 2, r_FreePrivateData}, \
     {"SetPriority", 2, r_SetPriority}, {"GetPriority", 1, r_GetPriority}, {"PreLoad", 1, r_PreLoad}, {"GetType", 1, r_GetType}
 
@@ -1268,6 +1276,78 @@ static void sb_Release(CPU* c) {
     RET(r ? r - 1 : 0);
 }
 
+/* ---- freeing released resources ----
+   Nothing was ever freed, so every map change leaked its textures until the heap ran out; guest_alloc then returned 0
+   and every later object shared address 0, its methods overwritten by its neighbours'. A texture, vertex or index
+   buffer whose count reaches zero is freed at the next Present once nothing can still reach it: the device state, a
+   state block, a level surface the client still holds, an open DC or a lock. */
+static uint32_t* retired;
+static uint32_t nretired, retired_cap;
+
+static int reachable(uint32_t o) {
+    if (r_refers(0, 0, o) || (recording && r_refers(recording, 0, o))) return 1;
+    for (int i = 0; i < 256; i++)
+        if (blocks[i].state && r_refers(blocks[i].state, blocks[i].mask, o)) return 1;
+    return 0;
+}
+
+static int in_use(uint32_t o) {
+    if (M32(o + 4) || M32(o + 64) || reachable(o)) return 1;
+    if (M32(o + 8) != O_TEXTURE) return 0;
+    for (uint32_t n = 0, arr = M32(o + 40); n < M32(o + 24); n++) {
+        uint32_t s = M32(arr + 4 * n);
+        if (M32(s + 4) > 1 || M32(s + 60) || M32(s + 64) || reachable(s)) return 1;
+    }
+    return 0;
+}
+
+static void destroy(CPU* c, uint32_t o) {
+    r_forget(o);
+    private_free_all(c, o);
+    if (M32(o + 8) == O_TEXTURE) {
+        uint32_t arr = M32(o + 40);
+        for (uint32_t n = 0; n < M32(o + 24); n++) {
+            uint32_t s = M32(arr + 4 * n);
+            private_free_all(c, s);
+            guest_free(M32(s + 28));
+            guest_free(s);
+        }
+        guest_free(arr);
+    } else guest_free(M32(o + 28));
+    guest_free(o);
+}
+
+/* An object leaves the queue before it is destroyed: releasing its private data runs guest code, which may Present. */
+static void reap(CPU* c) {
+    for (uint32_t i = 0; i < nretired;) {
+        uint32_t o = retired[i];
+        if (in_use(o)) { i++; continue; }
+        retired[i] = retired[--nretired];
+        destroy(c, o);
+    }
+}
+
+/* Surfaces belong to their texture or the device and are freed with it. An object released to zero, taken again
+   (GetTexture) and released again is queued once. */
+static void res_release(CPU* c) {
+    uint32_t r = M32(THIS + 4), k = M32(THIS + 8);
+    if (!r) { RET(0); return; }
+    if (!--M32(THIS + 4) && (k == O_TEXTURE || k == O_VB || k == O_IB)) {
+        uint32_t i = 0;
+        while (i < nretired && retired[i] != THIS) i++;
+        if (i == nretired) {
+            if (nretired == retired_cap) {
+                uint32_t cap = retired_cap ? 2 * retired_cap : 1024, *grown = realloc(retired, cap * sizeof *retired);
+                if (!grown) { RET(0); return; }
+                retired = grown;
+                retired_cap = cap;
+            }
+            retired[nretired++] = THIS;
+        }
+    }
+    RET(r - 1);
+}
+
 /* ---- queries: D3DQUERYTYPE_EVENT, signalled once the commands before it are submitted ---- */
 
 static void v_CreateQuery(CPU* c) {
@@ -1289,7 +1369,7 @@ static void q_GetData(CPU* c) {
 
 /* ---- swap chain ---- */
 
-static void sc_Present(CPU* c) { present_frame(); RET(0); }
+static void sc_Present(CPU* c) { present_frame(); reap(c); RET(0); }
 static void sc_GetFrontBufferData(CPU* c) { RET(front_buffer(ARG(1))); }
 static void sc_GetBackBuffer(CPU* c) { RET(back_buffer(ARG(1), ARG(3))); }
 static void sc_GetRasterStatus(CPU* c) { RET(raster_status(ARG(1))); }

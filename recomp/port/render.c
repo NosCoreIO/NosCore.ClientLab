@@ -133,6 +133,13 @@ static void draw_area(int32_t* x, int32_t* y, int32_t* w, int32_t* h) {
 
 /* State blocks: the state is one snapshot of R; a mask picks the bytes a block covers. */
 uint32_t r_state_size(void) { return sizeof R; }
+int r_refers(const uint8_t* saved, const uint8_t* mask, uint32_t obj) {
+    const __typeof__(R)* s = saved ? (const void*)saved : (const void*)&R;
+#define HOLDS(field) (s->field == obj && (!mask || mask[offsetof(__typeof__(R), field)]))
+    for (int k = 0; k < 8; k++) if (HOLDS(tex_obj[k])) return 1;
+    return HOLDS(vb) || HOLDS(ib) || HOLDS(target);
+#undef HOLDS
+}
 void r_state_save(uint8_t* out) { memcpy(out, &R, sizeof R); }
 void r_state_load(const uint8_t* in, const uint8_t* mask) {
     uint8_t* r = (uint8_t*)&R;
