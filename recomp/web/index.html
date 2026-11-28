@@ -655,9 +655,55 @@
     const r = canvas.getBoundingClientRect();
     return [Math.round((e.clientX - r.left) * canvas.width / r.width), Math.round((e.clientY - r.top) * canvas.height / r.height)];
   }
-  canvas.addEventListener('mousemove', (e) => send(IN.move, 0, ...pos(e), e.timeStamp));
-  canvas.addEventListener('mousedown', (e) => { canvas.focus(); send(IN.down, e.button, ...pos(e), e.timeStamp); e.preventDefault(); });
-  canvas.addEventListener('mouseup', (e) => send(IN.up, e.button, ...pos(e), e.timeStamp));
+  canvas.addEventListener('mousemove', (e) => { syncButtons(e); send(IN.move, 0, ...pos(e), e.timeStamp); });
+  // Keys and buttons the game has seen go down and not yet up. Their release can go elsewhere: the page loses focus
+  // (Cmd+Tab, a click outside the window), macOS takes it for a shortcut (Cmd+Shift+4 keeps Cmd and Shift for its
+  // screenshot tool), and while Cmd is down macOS sends no key-up for the other keys. The game is told they went up.
+  const heldKeys = new Set(), heldButtons = new Set();
+  let lastPos = [0, 0];
+  function releaseKey(key) {
+    if (heldKeys.delete(key)) send(IN.keyup, key);
+  }
+  function releaseHeld() {
+    for (const button of heldButtons) send(IN.up, button, ...lastPos);
+    for (const key of heldKeys) send(IN.keyup, key);
+    heldButtons.clear();
+    heldKeys.clear();
+  }
+  // Every mouse and key event says which modifiers are really down; one the game still holds is let go.
+  function syncModifiers(e) {
+    if (!e.shiftKey) releaseKey(16);
+    if (!e.ctrlKey) releaseKey(17);
+    if (!e.altKey) releaseKey(18);
+    if (!e.metaKey) { releaseKey(91); releaseKey(92); releaseKey(93); }
+  }
+  // A move says which buttons are really down. One the game still holds was released where the page could not see it
+  // (outside the game, or a drag whose release never reached the page), so it is let go before the move.
+  const BUTTON_BITS = [1, 4, 2];
+  function syncButtons(e) {
+    for (const button of heldButtons)
+      if (!(e.buttons & BUTTON_BITS[button])) { heldButtons.delete(button); send(IN.up, button, ...pos(e)); }
+  }
+  addEventListener('mouseup', (e) => {
+    if (e.target !== canvas && heldButtons.delete(e.button)) send(IN.up, e.button, ...lastPos);
+  });
+  addEventListener('blur', releaseHeld);
+  canvas.addEventListener('blur', releaseHeld);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) releaseHeld(); });
+  canvas.addEventListener('mousemove', syncModifiers);
+  canvas.addEventListener('mousedown', (e) => {
+    syncModifiers(e);
+    canvas.focus();
+    lastPos = pos(e);
+    heldButtons.add(e.button);
+    send(IN.down, e.button, ...lastPos, e.timeStamp);
+    e.preventDefault();
+  });
+  canvas.addEventListener('mouseup', (e) => {
+    lastPos = pos(e);
+    heldButtons.delete(e.button);
+    send(IN.up, e.button, ...lastPos, e.timeStamp);
+  });
   canvas.addEventListener('wheel', (e) => { send(IN.wheel, e.deltaY < 0 ? 120 : -120, ...pos(e)); e.preventDefault(); }, { passive: false });
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   const charKeys = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27 };
@@ -670,9 +716,11 @@
     return code;
   }
   canvas.addEventListener('keydown', (e) => {
+    syncModifiers(e);
     // F9 is not a game key: it asks the renderer to log every draw of the next frame.
     if (e.key === 'F9') { send(IN.dumpFrame, 0); e.preventDefault(); return; }
     const press = () => {
+      heldKeys.add(e.keyCode);
       send(IN.keydown, e.keyCode);
       const ch = keyChar(e);
       if (ch !== undefined) send(IN.char, ch);
@@ -685,7 +733,14 @@
     press();
     e.preventDefault();
   });
-  canvas.addEventListener('keyup', (e) => { send(IN.keyup, e.keyCode); e.preventDefault(); });
+  canvas.addEventListener('keyup', (e) => {
+    heldKeys.delete(e.keyCode);
+    send(IN.keyup, e.keyCode);
+    // macOS sent no key-up for the keys pressed while Cmd was down.
+    if (e.key === 'Meta') releaseHeld();
+    else syncModifiers(e);
+    e.preventDefault();
+  });
 
   const loginPanel = document.getElementById('login-panel');
   const game = document.getElementById('game');
