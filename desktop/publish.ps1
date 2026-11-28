@@ -35,16 +35,19 @@ $project = Join-Path $PSScriptRoot 'ClientLab.Launcher/ClientLab.Launcher.csproj
 $publishArguments = @('-c', 'Release', '-r', $Runtime, '--self-contained', 'true', '-o', $payload,
     "-p:CefArchitecture=$architecture", "-p:Version=$Version", '-p:DebugType=None', '-p:NuGetAudit=false', "-p:BrowserFileList=$browserList", '-m:1')
 & dotnet publish $project @publishArguments
-if ($LASTEXITCODE) {
-    # CefGlue's macOS packaging occasionally misses one Chromium library in the build output (a different one each
-    # time, MSB3030). One clean retry; a failure that repeats is real.
-    Write-Warning 'Publishing failed; retrying once from a clean build output.'
-    $output = Join-Path $PSScriptRoot "ClientLab.Launcher/bin/Release/net10.0/$Runtime"
-    if (Test-Path $output) { Remove-Item $output -Recurse -Force }
+# CefGlue's macOS packaging occasionally misses one Chromium library in the build output (a different one each
+# time, MSB3030). Retry from a clean build: both the output and the intermediate folder, since the incremental copy
+# state in obj/ survives a bin-only clean. A failure that survives three clean attempts is real.
+for ($attempt = 2; $LASTEXITCODE -and $attempt -le 3; $attempt++) {
+    Write-Warning "Publishing failed; retrying from a clean build (attempt $attempt of 3)."
+    foreach ($folder in "bin/Release/net10.0/$Runtime", "obj/Release/net10.0/$Runtime") {
+        $path = Join-Path $PSScriptRoot "ClientLab.Launcher/$folder"
+        if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+    }
     Remove-Item $payload -Recurse -Force; New-Item -ItemType Directory -Path $payload -Force | Out-Null
     & dotnet publish $project @publishArguments
-    if ($LASTEXITCODE) { throw 'Publishing the desktop launcher failed.' }
 }
+if ($LASTEXITCODE) { throw 'Publishing the desktop launcher failed.' }
 $launcher = if ($IsWindows) { 'ClientLab.exe' } else { 'ClientLab' }
 if (!(Test-Path (Join-Path $payload $launcher))) { throw 'The published launcher is missing.' }
 Copy-Item (Join-Path $PSScriptRoot '../LICENSE') (Join-Path $payload 'LICENSE.txt')
