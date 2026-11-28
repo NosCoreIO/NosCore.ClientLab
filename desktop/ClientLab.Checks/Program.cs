@@ -133,9 +133,27 @@ if (OperatingSystem.IsWindows())
             "The kept Gameforge session did not round-trip beside the saved account.");
         await sessions.DeleteAsync();
         Check(await sessions.ReadAsync<SavedSession>() is null && await vault.ReadAsync() is not null, "Forgetting the session touched the saved account.");
+        // Several remembered logins: an index, and each login's own credentials and session beside the original entries.
+        var logins = new CredentialStore(vaultDirectory, "logins");
+        var second = new CredentialStore(vaultDirectory, "credentials/0123456789abcdef");
+        var secondSession = new CredentialStore(vaultDirectory, "session/0123456789abcdef");
+        await logins.SaveAsync("logins", new SavedLogins([new("other@example.invalid", ""), new("second@example.invalid", "0123456789abcdef")], "second@example.invalid"));
+        await second.SaveAsync("second@example.invalid", "second-password");
+        await secondSession.SaveAsync("session", new SavedSession("second-token", "second-account"));
+        var index = await logins.ReadAsync<SavedLogins>();
+        Check(index is { Last: "second@example.invalid", Logins.Count: 2 } && index.Logins[1] == new SavedLogin("second@example.invalid", "0123456789abcdef"),
+            "The remembered logins did not round-trip.");
+        Check((await vault.ReadAsync())?.Email == "other@example.invalid" && (await second.ReadAsync())?.Password == "second-password" &&
+              (await secondSession.ReadAsync<SavedSession>())?.Token == "second-token", "A second login's entries were not kept apart from the first.");
+        await second.DeleteAsync(); await secondSession.DeleteAsync();
+        Check(await second.ReadAsync() is null && await vault.ReadAsync() is not null, "Forgetting a second login touched the first.");
         await vault.DeleteAsync();
         Check(await vault.ReadAsync() is null, "Credential vault delete failed.");
-        Console.WriteLine("PASS: Windows credential store save, read, update and delete, with the Gameforge session kept apart from the account.");
+        Console.WriteLine("PASS: Windows credential store save, read, update and delete, with the Gameforge session kept apart from the account and each remembered login kept apart from the others.");
     }
-    finally { await vault.DeleteAsync(); await new CredentialStore(vaultDirectory, "session").DeleteAsync(); }
+    finally
+    {
+        foreach (var kind in new[] { "credentials", "session", "logins", "credentials/0123456789abcdef", "session/0123456789abcdef" })
+            await new CredentialStore(vaultDirectory, kind).DeleteAsync();
+    }
 }

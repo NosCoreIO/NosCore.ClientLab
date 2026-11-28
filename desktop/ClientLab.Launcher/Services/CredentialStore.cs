@@ -13,6 +13,13 @@ public sealed record SavedCredentials(string Email, string Password);
 /// sign-in so a restart does not ask for the password again.</summary>
 public sealed record SavedSession(string Token, string AccountId);
 
+/// <summary>A remembered Gameforge login. Its credentials and session live in their own vault entries named by
+/// <see cref="Key"/>; the empty key is the single login kept before several could be remembered.</summary>
+public sealed record SavedLogin(string Email, string Key);
+
+/// <summary>The remembered Gameforge logins, and the one the launcher signs in with when it opens.</summary>
+public sealed record SavedLogins(List<SavedLogin> Logins, string? Last);
+
 /// <summary>Stores credentials in the user's OS vault, never in launcher settings or release files.</summary>
 public sealed class CredentialStore(string dataDirectory, string kind = "credentials")
 {
