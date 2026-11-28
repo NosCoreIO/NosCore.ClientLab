@@ -19,6 +19,7 @@ public static class BrowserRuntime
     private static readonly object gate = new();
     private static Task? preparing;
     private static Action<double>? progress;
+    private static readonly TimeSpan StallTimeout = TimeSpan.FromMinutes(1);
 
     public sealed record Manifest(string Name, Uri Url, string Sha256, long Size);
 
@@ -101,21 +102,31 @@ public static class BrowserRuntime
         using var http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
         http.Timeout = TimeSpan.FromMinutes(30);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("NosCore.ClientLab/0.2");
-        using var response = await http.GetAsync(manifest.Url, HttpCompletionOption.ResponseHeadersRead, token);
+        // HttpClient.Timeout stops at the headers: a server that stalls in the body is cut off once it sends nothing for a minute.
+        using var stalled = CancellationTokenSource.CreateLinkedTokenSource(token);
+        stalled.CancelAfter(StallTimeout);
+        using var response = await http.GetAsync(manifest.Url, HttpCompletionOption.ResponseHeadersRead, stalled.Token);
         response.EnsureSuccessStatusCode();
         var size = response.Content.Headers.ContentLength ?? manifest.Size;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        await using (var output = File.Create(path + ".part"))
-        await using (var input = await response.Content.ReadAsStreamAsync(token))
+        try
         {
+            await using var output = File.Create(path + ".part");
+            await using var input = await response.Content.ReadAsStreamAsync(stalled.Token);
             var buffer = new byte[1024 * 1024]; long done = 0; int length;
-            while ((length = await input.ReadAsync(buffer, token)) > 0)
+            while ((length = await input.ReadAsync(buffer, stalled.Token)) > 0)
             {
+                stalled.CancelAfter(StallTimeout);
                 await output.WriteAsync(buffer.AsMemory(0, length), token);
                 hash.AppendData(buffer, 0, length);
                 done += length;
                 if (size > 0) onProgress?.Invoke(Math.Min(1, done / (double)size));
             }
+        }
+        catch
+        {
+            File.Delete(path + ".part");
+            throw;
         }
         if (Convert.ToHexStringLower(hash.GetHashAndReset()) != manifest.Sha256)
         {
@@ -171,7 +182,9 @@ public static class BrowserRuntime
             var destination = Path.Combine(target, relative);
             if (File.Exists(destination))
             {
-                if (new FileInfo(destination).Length == new FileInfo(file).Length) continue; // linked by an earlier run
+                // A link or copy from an earlier, interrupted run shares the cached file's size and write time.
+                var existing = new FileInfo(destination); var cached = new FileInfo(file);
+                if (existing.Length == cached.Length && existing.LastWriteTimeUtc == cached.LastWriteTimeUtc) continue;
                 File.Delete(destination);
             }
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
@@ -195,7 +208,12 @@ public static class BrowserRuntime
         {
             var name = Path.GetFileName(folder);
             if (name == current || !(name.Length == 64 && name.All(Uri.IsHexDigit))) continue;
-            try { Directory.Delete(folder, recursive: true); File.Delete(folder + ".lock"); }
+            try
+            {
+                // A launcher still linking from that folder holds its lock: leave the folder to a later start.
+                using var held = new FileStream(folder + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                Directory.Delete(folder, recursive: true);
+            }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
     }
