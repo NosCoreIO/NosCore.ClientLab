@@ -180,7 +180,9 @@
   function showFrame(refreshTime = performance.now()) {
     const f = window.frameStats;
     f.refreshes++;
-    if (targetFps && refreshTime + 0.75 < nextPresentation) {
+    // A quarter of a frame of slack: refreshes arrive unevenly on some displays (USB docks, remote desktops), and one a
+    // little early must not wait a whole extra refresh, which halved a 60 Hz display to 30 frames a second.
+    if (targetFps && refreshTime + 250 / targetFps < nextPresentation) {
       f.capped++; requestAnimationFrame(showFrame); return;
     }
     if (targetFps) {
