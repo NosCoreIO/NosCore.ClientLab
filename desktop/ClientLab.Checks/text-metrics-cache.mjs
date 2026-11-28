@@ -5,7 +5,7 @@ import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url);
 const {chromium}=require(process.env.PLAYWRIGHT_PATH||'C:/Program Files/nodejs/node_modules/@playwright/cli/node_modules/playwright');
 const host=readFileSync(new URL('../../recomp/port/hle_dc.c',import.meta.url),'utf8');
-const start=host.indexOf('EM_JS(void, js_text_measure,');
+const start=host.indexOf('EM_JS(int, js_text_measure,');
 const body=host.slice(host.indexOf(', {',start)+3,host.indexOf('\n});',start));
 const source='function measureGuest(css,text,n,wide,out){'+body+'}';
 const prefixStart=host.indexOf('EM_JS(void, js_text_prefixes,');
@@ -33,6 +33,10 @@ try{
   if(writes!==1||reads!==1)throw Error('Repeated labels still reparse/read the native font');delete g.font;
   const stats=self.__textMetricsCache;
   if(stats.hits<20)throw Error('Repeated metrics did not use cache');
+  // The C side keeps an answer only when told it may (text_metrics in hle_dc.c).
+  self.currentFont='12px Arial';HEAPU16.set([65,66],256);
+  if(measureGuest(0,512,2,1,0)!==1)throw Error('A cacheable answer was not reported as one');
+  stats.enabled=false;if(measureGuest(0,512,2,1,0)!==0)throw Error('PORT_TEXT_CACHE=0 answers were reported as cacheable');stats.enabled=true;
   for(let i=0;i<5000;i++)measure('12px Arial','distinct '+i);
   if(stats.entries.size!==4096)throw Error('Unbounded text cache');
   measure('12px Arial','x'.repeat(3000));if(stats.entries.size!==4096)throw Error('Long text changed bounded storage');
