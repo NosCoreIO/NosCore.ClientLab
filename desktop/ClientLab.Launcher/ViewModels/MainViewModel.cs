@@ -185,10 +185,11 @@ public partial class MainViewModel : ObservableObject
                 if (saved is not null) { SignInEmail = saved.Email; SignInPassword = saved.Password; }
             }
             catch (Exception) { Notice = "Your saved account could not be loaded. You can still sign in."; }
-            await ResumeSessionAsync();
             Initialized = true;
             Coordinator.Start("startup");
             StartLauncherUpdates();
+            // A slow Gameforge must not hold back the update check.
+            _ = ResumeSessionAsync();
             await RefreshAsync();
         }
         catch (Exception error) { Notice = error.Message; Busy = false; Message = "ClientLab could not start."; }
@@ -495,8 +496,8 @@ public partial class MainViewModel : ObservableObject
         sessionStore = UseGameforge ? new CredentialStore(Program.DataDirectory, "session") : null;
         var saved = await credentialStore.ReadAsync();
         if (saved is not null) { SignInEmail = saved.Email; SignInPassword = saved.Password; }
-        await ResumeSessionAsync();
         Coordinator.Start("startup");
+        _ = ResumeSessionAsync();
     });
 
     private async Task SaveFormCredentialsAsync()
