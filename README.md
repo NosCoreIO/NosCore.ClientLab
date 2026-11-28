@@ -155,8 +155,13 @@ To create a single executable, run PowerShell 7 **on the target operating system
 ./desktop/publish.ps1 -Runtime win-x64 -OutputDirectory ./dist/ClientLab-win -ExecutableName ClientLab.exe -SkipChecksum
 ```
 
-The executable bundles the launcher, .NET and Chromium, and extracts them into the
-user's local application-data directory on first use. It imports or downloads game
+The executable (about 50 MB) bundles the launcher and .NET, and extracts them into the
+user's local application-data directory on first use. Chromium is a separate release asset,
+`ClientLab-browser-<version>-<runtime>.zip` (about 155 MB), next to the executable: the launcher downloads it
+in the background on first start, checks it against the SHA-256 in its `browser.json`, and hard-links it into place,
+and later launcher releases with the same Chromium reuse that download. A development build already has Chromium
+next to it and downloads nothing. `-BrowserBaseUrl` sets where the archive will be served (default: the `v<version>`
+GitHub release). The launcher imports or downloads game
 files locally; releases contain no game executable, assets, generated client C/WASM,
 credentials or device identities. `--verify-payload` checks extraction without opening
 the UI. On macOS the script also wraps the executable in `ClientLab.app` (ad-hoc signed) and a `.dmg`.

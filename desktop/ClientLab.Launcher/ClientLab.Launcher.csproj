@@ -24,6 +24,19 @@
     <PackageReference Include="CefGlue.Avalonia.ARM64" Version="120.6099.215" Condition="'$(CefArchitecture)' == 'arm64'" />
     <PackageReference Include="Wasmtime" Version="50.0.1" />
   </ItemGroup>
+  <!-- publish.ps1 ships Chromium as its own release download (the launcher fetches it on first start, BrowserRuntime).
+       This lists every published file that comes from the CEF packages, by where it was copied from (the ARM64 build
+       uses CefGlue.Common.ARM64, so the package folder is matched by prefix). -->
+  <Target Name="ListBrowserFiles" AfterTargets="Publish" Condition="'$(BrowserFileList)' != ''">
+    <ItemGroup>
+      <_ClientLabBrowserFile Include="@(ResolvedFileToPublish)"
+        Condition="$([System.String]::new('%(FullPath)').Replace('\','/').ToLowerInvariant().Contains('/cef.redist.')) or
+                   $([System.String]::new('%(FullPath)').Replace('\','/').ToLowerInvariant().Contains('/chromiumembeddedframework.runtime')) or
+                   ($([System.String]::new('%(FullPath)').Replace('\','/').ToLowerInvariant().Contains('/cefglue.common')) and
+                    $([System.String]::new('%(FullPath)').Replace('\','/').ToLowerInvariant().Contains('/bin/')))" />
+    </ItemGroup>
+    <WriteLinesToFile File="$(BrowserFileList)" Lines="@(_ClientLabBrowserFile->'%(RelativePath)'->Distinct())" Overwrite="true" />
+  </Target>
   <ItemGroup>
     <AvaloniaResource Include="Assets/**" />
     <EmbeddedResource Include="Assets/gameforge-verification.js" LogicalName="GameforgeVerification.js" />

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Formats.Tar;
 using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -24,7 +25,7 @@ internal static class Program
                 if (Environment.GetEnvironmentVariable("CLIENTLAB_UPDATED") != "1" && TryApplyUpdate(cache, self, version, runtime))
                     return await RunAsync(self, args, new() { ["CLIENTLAB_UPDATED"] = "1" });
             }
-            using var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("LauncherPayload.zip")
+            using var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("LauncherPayload.tar.br")
                 ?? throw new InvalidDataException("The launcher payload is missing. Download a complete release.");
             var digest = Convert.ToHexStringLower(await SHA256.HashDataAsync(payload));
             payload.Position = 0;
@@ -159,24 +160,21 @@ internal static class Program
         Directory.CreateDirectory(temporary);
         try
         {
-            using var zip = new ZipArchive(payload, ZipArchiveMode.Read, leaveOpen: true);
+            await using var brotli = new BrotliStream(payload, CompressionMode.Decompress, leaveOpen: true);
+            using var tar = new TarReader(brotli);
             var prefix = Path.GetFullPath(temporary) + Path.DirectorySeparatorChar;
-            foreach (var entry in zip.Entries)
+            while (await tar.GetNextEntryAsync() is { } entry)
             {
-                var path = Path.GetFullPath(Path.Combine(temporary, entry.FullName.Replace('\\', '/')));
+                var path = Path.GetFullPath(Path.Combine(temporary, entry.Name.Replace('\\', '/')));
                 if (!path.StartsWith(prefix, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
                     throw new InvalidDataException("The launcher archive contains an unsafe path.");
-                if (((entry.ExternalAttributes >> 16) & 0xF000) == 0xA000)
-                    throw new InvalidDataException("The launcher archive must contain regular files, not symbolic links.");
-                if (entry.FullName.EndsWith('/')) { Directory.CreateDirectory(path); continue; }
+                if (entry.EntryType == TarEntryType.Directory) { Directory.CreateDirectory(path); continue; }
+                if (entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile))
+                    throw new InvalidDataException("The launcher archive must contain regular files only.");
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                await using (var input = entry.Open())
-                await using (var output = File.Create(path)) await input.CopyToAsync(output);
-                if (!OperatingSystem.IsWindows())
-                {
-                    var mode = (entry.ExternalAttributes >> 16) & 0x1FF;
-                    if (mode != 0) File.SetUnixFileMode(path, (UnixFileMode)mode);
-                }
+                await using (var output = File.Create(path))
+                    if (entry.DataStream is { } data) await data.CopyToAsync(output);
+                if (!OperatingSystem.IsWindows() && entry.Mode != 0) File.SetUnixFileMode(path, entry.Mode);
             }
             var executable = Path.Combine(temporary, OperatingSystem.IsWindows() ? "ClientLab.exe" : "ClientLab");
             if (!File.Exists(executable)) throw new InvalidDataException("The launcher archive is incomplete.");
